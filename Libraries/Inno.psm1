@@ -1339,7 +1339,7 @@ function Resolve-InnoVersion5FileMatch {
     return $Entry.Where({ $_.LocationEntry -ge 0 })
   }
 
-  $Matches = $Entry.Where({
+  $Match = $Entry.Where({
       $_.LocationEntry -ge 0 -and (
         $_.DestName -like $Name -or
         $_.SourceFilename -like $Name -or
@@ -1347,9 +1347,9 @@ function Resolve-InnoVersion5FileMatch {
         ([System.IO.Path]::GetFileName($_.SourceFilename)) -like $Name
       )
     })
-  if (-not $Matches) { throw "No files matched the Inno Setup pattern: $Name" }
+  if (-not $Match) { throw "No files matched the Inno Setup pattern: $Name" }
 
-  $ExactMatches = $Matches.Where({
+  $ExactMatches = $Match.Where({
       $_.DestName -ieq $Name -or
       $_.SourceFilename -ieq $Name -or
       ([System.IO.Path]::GetFileName($_.DestName)) -ieq $Name -or
@@ -1357,7 +1357,7 @@ function Resolve-InnoVersion5FileMatch {
     })
   if ($ExactMatches) { return $ExactMatches }
 
-  return $Matches
+  return $Match
 }
 
 function Find-InnoVersion5FileEntry {
