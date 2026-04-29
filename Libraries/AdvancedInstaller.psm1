@@ -1,4 +1,4 @@
-# License: GPL-2.0. See Modules\InstallerParsers\LICENSE.AdvancedInstaller.
+# License: GPL-2.0. See Modules\InstallerParsers\LICENSE.GPL2.
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $ADVANCED_INSTALLER_MAGIC = [System.Text.Encoding]::ASCII.GetBytes('ADVINSTSFX')
 $ADVANCED_INSTALLER_FOOTER_SIZE = 72
 $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET = 60
-$ADVANCED_INSTALLER_FOOTER_SEARCH_BACK = 10000
+$ADVANCED_INSTALLER_FOOTER_SEARCH_CHUNK_SIZE = 1048576
 $ADVANCED_INSTALLER_FILE_ENTRY_SIZE = 24
 $ADVANCED_INSTALLER_XOR_HEADER_SIZE = 512
 $ADVANCED_INSTALLER_BUFFER_SIZE = 81920
@@ -82,10 +82,17 @@ function Find-AdvancedInstallerBytePattern {
     [byte[]]$Bytes,
 
     [Parameter(Mandatory, HelpMessage = 'The byte pattern to find')]
-    [byte[]]$Pattern
+    [byte[]]$Pattern,
+
+    [Parameter(HelpMessage = 'The last byte index to consider as a pattern start')]
+    [int]$StartIndex = -1
   )
 
-  for ($Index = $Bytes.Length - $Pattern.Length; $Index -ge 0; $Index--) {
+  if ($StartIndex -lt 0 -or $StartIndex -gt $Bytes.Length - $Pattern.Length) {
+    $StartIndex = $Bytes.Length - $Pattern.Length
+  }
+
+  for ($Index = $StartIndex; $Index -ge 0; $Index--) {
     $Matched = $true
 
     for ($PatternIndex = 0; $PatternIndex -lt $Pattern.Length; $PatternIndex++) {
@@ -99,6 +106,162 @@ function Find-AdvancedInstallerBytePattern {
   }
 
   return -1
+}
+
+function Test-AdvancedInstallerBytePattern {
+  <#
+  .SYNOPSIS
+    Test whether two byte arrays match exactly
+  .PARAMETER Left
+    The first byte array
+  .PARAMETER Right
+    The second byte array
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The first byte array')]
+    [byte[]]$Left,
+
+    [Parameter(Mandatory, HelpMessage = 'The second byte array')]
+    [byte[]]$Right
+  )
+
+  if ($Left.Length -ne $Right.Length) { return $false }
+
+  for ($Index = 0; $Index -lt $Left.Length; $Index++) {
+    if ($Left[$Index] -ne $Right[$Index]) { return $false }
+  }
+
+  return $true
+}
+
+function Read-AdvancedInstallerBytes {
+  <#
+  .SYNOPSIS
+    Read an exact byte range from a stream
+  .PARAMETER Stream
+    The source stream
+  .PARAMETER Offset
+    The starting position inside the stream
+  .PARAMETER Length
+    The number of bytes to read
+  #>
+  [OutputType([byte[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The source stream')]
+    [System.IO.Stream]$Stream,
+
+    [Parameter(Mandatory, HelpMessage = 'The starting position inside the stream')]
+    [long]$Offset,
+
+    [Parameter(Mandatory, HelpMessage = 'The number of bytes to read')]
+    [int]$Length
+  )
+
+  $Bytes = New-Object 'byte[]' $Length
+  $null = $Stream.Seek($Offset, 'Begin')
+  $Read = 0
+
+  while ($Read -lt $Length) {
+    $ChunkRead = $Stream.Read($Bytes, $Read, $Length - $Read)
+    if ($ChunkRead -le 0) { break }
+    $Read += $ChunkRead
+  }
+
+  if ($Read -ne $Length) {
+    throw 'Unexpected end of stream while reading Advanced Installer data'
+  }
+
+  return $Bytes
+}
+
+function Test-AdvancedInstallerFooterOffset {
+  <#
+  .SYNOPSIS
+    Validate an Advanced Installer footer candidate found while scanning from the end of the file
+  .PARAMETER Stream
+    The installer stream
+  .PARAMETER FooterOffset
+    The candidate footer offset
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The installer stream')]
+    [System.IO.Stream]$Stream,
+
+    [Parameter(Mandatory, HelpMessage = 'The candidate footer offset')]
+    [long]$FooterOffset
+  )
+
+  if ($FooterOffset -lt 0 -or $FooterOffset + $Script:ADVANCED_INSTALLER_FOOTER_SIZE -gt $Stream.Length) {
+    return $false
+  }
+
+  $OriginalPosition = $Stream.Position
+
+  try {
+    $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $Script:ADVANCED_INSTALLER_FOOTER_SIZE
+
+    if (-not (Test-AdvancedInstallerBytePattern -Left $FooterBytes[$Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET..($Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET + $Script:ADVANCED_INSTALLER_MAGIC.Length - 1)] -Right $Script:ADVANCED_INSTALLER_MAGIC)) {
+      return $false
+    }
+
+    $FileCount = [System.BitConverter]::ToUInt32($FooterBytes, 4)
+    $InfoOffset = [System.BitConverter]::ToUInt32($FooterBytes, 16)
+    $FileOffset = [System.BitConverter]::ToUInt32($FooterBytes, 20)
+
+    if ($FileCount -eq 0 -or $FileCount -gt 0x10000) { return $false }
+    if ($InfoOffset -ge $FooterOffset) { return $false }
+    if ($FileOffset -ge $FooterOffset) { return $false }
+
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $null = $Stream.Seek($OriginalPosition, 'Begin')
+  }
+}
+
+function Find-AdvancedInstallerFooterOffset {
+  <#
+  .SYNOPSIS
+    Find the final valid Advanced Installer footer even when the signed installer carries a large certificate tail
+  .PARAMETER Stream
+    The installer stream
+  #>
+  [OutputType([long])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The installer stream')]
+    [System.IO.Stream]$Stream
+  )
+
+  $PatternLength = $Script:ADVANCED_INSTALLER_MAGIC.Length
+  $SearchOffset = [long]$Stream.Length
+
+  while ($SearchOffset -gt 0) {
+    $ChunkStart = [long][Math]::Max(0, $SearchOffset - $Script:ADVANCED_INSTALLER_FOOTER_SEARCH_CHUNK_SIZE)
+    $ChunkLength = [int]($SearchOffset - $ChunkStart)
+    $ChunkBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $ChunkStart -Length $ChunkLength
+    $PatternSearchIndex = $ChunkBytes.Length - $PatternLength
+
+    while ($PatternSearchIndex -ge 0) {
+      $MagicOffset = Find-AdvancedInstallerBytePattern -Bytes $ChunkBytes -Pattern $Script:ADVANCED_INSTALLER_MAGIC -StartIndex $PatternSearchIndex
+      if ($MagicOffset -lt 0) { break }
+
+      # The footer stores the ADVINSTSFX marker near the end of the record.
+      $FooterOffset = $ChunkStart + $MagicOffset - $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET
+      if (Test-AdvancedInstallerFooterOffset -Stream $Stream -FooterOffset $FooterOffset) {
+        return $FooterOffset
+      }
+
+      $PatternSearchIndex = $MagicOffset - 1
+    }
+
+    if ($ChunkStart -eq 0) { break }
+    $SearchOffset = $ChunkStart + $PatternLength - 1
+  }
+
+  throw 'The installer does not contain an Advanced Installer footer'
 }
 
 function Resolve-AdvancedInstallerExtractionPath {
@@ -356,21 +519,8 @@ function Get-AdvancedInstallerInfo {
     $Reader = [System.IO.BinaryReader]::new($Stream)
 
     try {
-      $SearchWindowSize = [int][Math]::Min($Stream.Length, $Script:ADVANCED_INSTALLER_FOOTER_SEARCH_BACK + $Script:ADVANCED_INSTALLER_FOOTER_SIZE)
-      $SearchWindowOffset = $Stream.Length - $SearchWindowSize
-      $null = $Stream.Seek($SearchWindowOffset, 'Begin')
-      $SearchWindowBytes = $Reader.ReadBytes($SearchWindowSize)
-
-      $MagicOffset = Find-AdvancedInstallerBytePattern -Bytes $SearchWindowBytes -Pattern $Script:ADVANCED_INSTALLER_MAGIC
-      if ($MagicOffset -lt 0) { throw 'The installer does not contain an Advanced Installer footer' }
-
-      # The footer stores the ADVINSTSFX marker near the end of the record.
-      $FooterOffset = $SearchWindowOffset + $MagicOffset - $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET
-      if ($FooterOffset -lt 0) { throw 'The Advanced Installer footer offset is invalid' }
-
-      $null = $Stream.Seek($FooterOffset, 'Begin')
-      $FooterBytes = $Reader.ReadBytes($Script:ADVANCED_INSTALLER_FOOTER_SIZE)
-      if ($FooterBytes.Length -ne $Script:ADVANCED_INSTALLER_FOOTER_SIZE) { throw 'The Advanced Installer footer is truncated' }
+      $FooterOffset = Find-AdvancedInstallerFooterOffset -Stream $Stream
+      $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $Script:ADVANCED_INSTALLER_FOOTER_SIZE
 
       $FooterMagic = [System.Text.Encoding]::ASCII.GetString($FooterBytes, $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET, $Script:ADVANCED_INSTALLER_MAGIC.Length)
       if ($FooterMagic -ne 'ADVINSTSFX') { throw 'The Advanced Installer footer signature is invalid' }

@@ -68,4 +68,16 @@ Describe 'Advanced Installer parser' {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
+
+  It 'Should locate signed Advanced Installer footers beyond the old 10 KB tail window' {
+    $Fixture = Get-InstallerFixture -Name 'Setup.DVLS.Console.2026.1.15.0.exe' -Url 'https://cdn.devolutions.net/download/Setup.DVLS.Console.2026.1.15.0.exe'
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+
+    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.Files.Name | Should -Contain '72E5885\Setup.DVLS.Console.2026.1.15.0.7z'
+    $MsiInfo.ProductVersion | Should -Be '2026.1.15.0'
+    $MsiInfo.ProductCode | Should -Be '{2EC8D12C-9845-473A-A6D9-DF75172E5885}'
+    $MsiInfo.UpgradeCode | Should -Be '{F036F415-628F-4FE1-A550-13AE231667EF}'
+  }
 }
