@@ -32,6 +32,85 @@ BeforeAll {
 }
 
 Describe 'NSIS parser' {
+  It 'Should keep NSIS blocks as byte arrays for fast entry parsing' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Module = Get-Module NSIS
+    $Result = & $Module {
+      param($Fixture)
+
+      $HeaderData = Get-NSISHeaderData -Path $Fixture
+      $BlockHeaders = Get-NSISBlockHeaders -HeaderBytes $HeaderData.HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
+      $EntryBlock = Get-NSISBlockBytes -HeaderBytes $HeaderData.HeaderBytes -BlockHeaders $BlockHeaders -Index 2
+
+      [pscustomobject]@{
+        IsByteArray = $EntryBlock -is [byte[]]
+        Length      = $EntryBlock.Length
+      }
+    } $Fixture
+
+    $Result.IsByteArray | Should -BeTrue
+    $Result.Length | Should -BeGreaterThan 0
+  }
+
+  It 'Should recover uninstall metadata from WriteRegStr entries' {
+    $Module = Get-Module NSIS
+    $Result = & $Module {
+      $StringBytes = [System.Collections.Generic.List[byte]]::new()
+
+      function Add-TestString {
+        param([string]$Text)
+
+        $Offset = [int]($StringBytes.Count / 2)
+        $StringBytes.AddRange([System.Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+
+      $KeyOffset = Add-TestString 'Software\Microsoft\Windows\CurrentVersion\Uninstall\CCFLink'
+      $NameOffset = Add-TestString 'DisplayVersion'
+      $ValueOffset = Add-TestString '7.7.0-Release.80131'
+      $HklmRawValue = [uint32]$Script:NSIS_REG_ROOT_HKLM
+      $HklmSignedValue = [System.BitConverter]::ToInt32([System.BitConverter]::GetBytes($HklmRawValue), 0)
+
+      $State = [pscustomobject]@{
+        Entries          = @(
+          [pscustomobject]@{
+            Opcode = $Script:NSIS_OPCODE_WRITE_REG_STR
+            Raw    = [uint32[]]@($Script:NSIS_OPCODE_WRITE_REG_STR, $HklmRawValue, $KeyOffset, $NameOffset, $ValueOffset, 1, 1)
+            Values = [int[]]@($Script:NSIS_OPCODE_WRITE_REG_STR, $HklmSignedValue, $KeyOffset, $NameOffset, $ValueOffset, 1, 1)
+          }
+        )
+        StringsBlock     = $StringBytes.ToArray()
+        VersionInfo      = [pscustomobject]@{
+          Unicode = $true
+          IsV3    = $true
+        }
+        Variables        = @{}
+        Registry         = @{}
+        ShellVarContext  = 'HKLM'
+        Metadata         = [ordered]@{
+          DisplayVersion         = $null
+          DisplayName            = $null
+          Publisher              = $null
+          ProductCode            = $null
+          DefaultInstallLocation = $null
+          Scope                  = $null
+          RegistryValues         = @{}
+        }
+      }
+
+      Add-NSISDirectUninstallWrites -State $State
+      [pscustomobject]@{
+        DisplayVersion = $State.Metadata.DisplayVersion
+        ProductCode    = $State.Metadata.ProductCode
+        Scope          = $State.Metadata.Scope
+      }
+    }
+
+    $Result.DisplayVersion | Should -Be '7.7.0-Release.80131'
+    $Result.ProductCode | Should -Be 'CCFLink'
+    $Result.Scope | Should -Be 'machine'
+  }
+
   It 'Should read static metadata from the AList installer' {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture

@@ -115,6 +115,7 @@ $NSIS_OPCODE_INT_FMT = 30
 $NSIS_OPCODE_PUSH_POP = 31
 $NSIS_OPCODE_DELETE_REG = 50
 $NSIS_OPCODE_WRITE_REG = 51
+$NSIS_OPCODE_WRITE_REG_STR = 53
 $NSIS_OPCODE_READ_REG = 52
 $NSIS_OPCODE_WRITE_UNINSTALLER = 62
 
@@ -599,7 +600,7 @@ function Get-NSISBlockBytes {
   )
 
   $Start = [int]$BlockHeaders[$Index].Offset
-  if ($Start -lt 0 -or $Start -gt $HeaderBytes.Length) { return @() }
+  if ($Start -lt 0 -or $Start -gt $HeaderBytes.Length) { return ,([byte[]]::new(0)) }
 
   $End = $HeaderBytes.Length
   foreach ($BlockHeader in $BlockHeaders | Select-Object -Skip ($Index + 1)) {
@@ -609,8 +610,14 @@ function Get-NSISBlockBytes {
     }
   }
 
-  if ($End -lt $Start) { return @() }
-  return $HeaderBytes[$Start..($End - 1)]
+  if ($End -le $Start) { return ,([byte[]]::new(0)) }
+
+  $Length = $End - $Start
+  $BlockBytes = [byte[]]::new($Length)
+
+  # PowerShell array slicing widens byte[] to object[], which makes downstream BitConverter reads extremely slow.
+  [System.Buffer]::BlockCopy($HeaderBytes, $Start, $BlockBytes, 0, $Length)
+  return ,$BlockBytes
 }
 
 function Get-NSISPrimaryLanguageTable {
@@ -1469,14 +1476,14 @@ function Add-NSISDirectUninstallWrites {
   )
 
   foreach ($Entry in $State.Entries) {
-    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG -and $Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG_STR) { continue }
 
     $Root = Resolve-NSISRegistryRoot -State $State -Root $Entry.Raw[1]
     $Key = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
     if ($Key -notmatch $Script:NSIS_UNINSTALL_KEY_PATTERN) { continue }
 
     $Name = Get-NSISString -State $State -RelativeOffset $Entry.Values[3]
-    $Value = if ($Entry.Raw[5] -eq $Script:NSIS_REG_TYPE_DWORD) {
+    $Value = if ($Entry.Opcode -eq $Script:NSIS_OPCODE_WRITE_REG -and $Entry.Raw[5] -eq $Script:NSIS_REG_TYPE_DWORD) {
       [string](Get-NSISInt -State $State -RelativeOffset $Entry.Values[4])
     } else {
       Get-NSISString -State $State -RelativeOffset $Entry.Values[4]
@@ -1740,13 +1747,13 @@ function Invoke-NSISEntry {
       Remove-NSISRegistryValue -State $State -Root $Root -Key $Key -Name $Name
       return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
     }
-    $Script:NSIS_OPCODE_WRITE_REG {
+    { $_ -eq $Script:NSIS_OPCODE_WRITE_REG -or $_ -eq $Script:NSIS_OPCODE_WRITE_REG_STR } {
       $Root = Resolve-NSISRegistryRoot -State $State -Root $Raw[1]
       $Key = Get-NSISString -State $State -RelativeOffset $Values[2]
       $Name = Get-NSISString -State $State -RelativeOffset $Values[3]
       $Value = Get-NSISString -State $State -RelativeOffset $Values[4]
 
-      if ($Raw[5] -eq $Script:NSIS_REG_TYPE_DWORD) {
+      if ($Opcode -eq $Script:NSIS_OPCODE_WRITE_REG -and $Raw[5] -eq $Script:NSIS_REG_TYPE_DWORD) {
         $Value = [string](Get-NSISInt -State $State -RelativeOffset $Values[4])
       }
 
