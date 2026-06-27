@@ -457,6 +457,33 @@ function Test-AdvancedInstallerArchiveHasMsi {
   }
 }
 
+function Test-AdvancedInstallerNestedArchiveCandidate {
+  <#
+  .SYNOPSIS
+    Test whether a nested Advanced Installer archive should be inspected for MSI payloads
+  .PARAMETER Entry
+    The parsed Advanced Installer payload entry
+  .PARAMETER Path
+    The extracted archive path
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The parsed Advanced Installer payload entry')]
+    [psobject]$Entry,
+
+    [Parameter(Mandatory, HelpMessage = 'The extracted archive path')]
+    [string]$Path
+  )
+
+  if ([System.IO.Path]::GetExtension($Path) -ine '.7z') { return $false }
+
+  # Advanced Installer commonly stores application files in FILES.7z.  That archive can be very large
+  # and does not contain the MSI database used for AppsAndFeatures metadata.
+  if ([System.IO.Path]::GetFileName($Entry.Name) -ieq 'FILES.7z') { return $false }
+
+  return $true
+}
+
 function Resolve-AdvancedInstallerMatch {
   <#
   .SYNOPSIS
@@ -613,7 +640,7 @@ function Expand-AdvancedInstaller {
 
       # Advanced Installer commonly nests the actual MSI payload inside a dedicated 7z archive.
       # Skip non-MSI archives such as FILES.7z to keep validation and task runs bounded.
-      if ($EntryFile.Extension -ieq '.7z' -and (Test-AdvancedInstallerArchiveHasMsi -Path $EntryFile.FullName)) {
+      if ((Test-AdvancedInstallerNestedArchiveCandidate -Entry $Entry -Path $EntryFile.FullName) -and (Test-AdvancedInstallerArchiveHasMsi -Path $EntryFile.FullName)) {
         Expand-AdvancedInstallerArchive -Path $EntryFile.FullName -DestinationPath $EntryFile.DirectoryName | Out-Null
       }
     }
