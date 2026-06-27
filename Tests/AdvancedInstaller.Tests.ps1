@@ -69,6 +69,33 @@ Describe 'Advanced Installer parser' {
     }
   }
 
+  It 'Should skip FILES.7z before inspecting nested archives' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'synthetic-files-archive.bin'
+    [System.IO.File]::WriteAllBytes($Fixture, [byte[]]@(0x46, 0x49, 0x4c, 0x45))
+
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'synthetic-files-archive-expanded'
+    Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    $Installer = [pscustomobject]@{
+      Path  = $Fixture
+      Files = @(
+        [pscustomobject]@{
+          Name      = 'ABCDEF0\FILES.7z'
+          Size      = 4
+          Offset    = 0
+          XorLength = 0
+        }
+      )
+    }
+
+    try {
+      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
+      Test-Path -Path (Join-Path $ExpandedPath 'ABCDEF0\FILES.7z') | Should -BeTrue
+    } finally {
+      Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should locate signed Advanced Installer footers beyond the old 10 KB tail window' {
     $Fixture = Get-InstallerFixture -Name 'Setup.DVLS.Console.2026.1.15.0.exe' -Url 'https://cdn.devolutions.net/download/Setup.DVLS.Console.2026.1.15.0.exe'
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
