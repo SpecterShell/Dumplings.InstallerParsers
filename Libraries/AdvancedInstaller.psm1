@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 $ADVANCED_INSTALLER_MAGIC = [System.Text.Encoding]::ASCII.GetBytes('ADVINSTSFX')
 $ADVANCED_INSTALLER_FOOTER_SIZE = 72
 $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET = 60
+$ADVANCED_INSTALLER_MINIMUM_FOOTER_SIZE = $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET + $ADVANCED_INSTALLER_MAGIC.Length
 $ADVANCED_INSTALLER_FOOTER_SEARCH_CHUNK_SIZE = 1048576
 $ADVANCED_INSTALLER_FILE_ENTRY_SIZE = 24
 $ADVANCED_INSTALLER_XOR_HEADER_SIZE = 512
@@ -193,14 +194,15 @@ function Test-AdvancedInstallerFooterOffset {
     [long]$FooterOffset
   )
 
-  if ($FooterOffset -lt 0 -or $FooterOffset + $Script:ADVANCED_INSTALLER_FOOTER_SIZE -gt $Stream.Length) {
+  if ($FooterOffset -lt 0 -or $FooterOffset + $Script:ADVANCED_INSTALLER_MINIMUM_FOOTER_SIZE -gt $Stream.Length) {
     return $false
   }
 
   $OriginalPosition = $Stream.Position
 
   try {
-    $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $Script:ADVANCED_INSTALLER_FOOTER_SIZE
+    $FooterLength = Get-AdvancedInstallerFooterLength -Stream $Stream -FooterOffset $FooterOffset
+    $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $FooterLength
 
     if (-not (Test-AdvancedInstallerBytePattern -Left $FooterBytes[$Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET..($Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET + $Script:ADVANCED_INSTALLER_MAGIC.Length - 1)] -Right $Script:ADVANCED_INSTALLER_MAGIC)) {
       return $false
@@ -220,6 +222,37 @@ function Test-AdvancedInstallerFooterOffset {
   } finally {
     $null = $Stream.Seek($OriginalPosition, 'Begin')
   }
+}
+
+function Get-AdvancedInstallerFooterLength {
+  <#
+  .SYNOPSIS
+    Get the readable Advanced Installer footer length for a candidate offset
+  .PARAMETER Stream
+    The installer stream
+  .PARAMETER FooterOffset
+    The candidate footer offset
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The installer stream')]
+    [System.IO.Stream]$Stream,
+
+    [Parameter(Mandatory, HelpMessage = 'The candidate footer offset')]
+    [long]$FooterOffset
+  )
+
+  if ($FooterOffset -lt 0 -or $FooterOffset -ge $Stream.Length) {
+    throw 'The Advanced Installer footer offset is outside the installer stream'
+  }
+
+  $AvailableLength = $Stream.Length - $FooterOffset
+  if ($AvailableLength -lt $Script:ADVANCED_INSTALLER_MINIMUM_FOOTER_SIZE) {
+    throw 'The Advanced Installer footer is truncated'
+  }
+
+  # Some Advanced Installer SFX builds end immediately after ADVINSTSFX, while older samples have two tail bytes.
+  return [int][Math]::Min([long]$Script:ADVANCED_INSTALLER_FOOTER_SIZE, $AvailableLength)
 }
 
 function Find-AdvancedInstallerFooterOffset {
@@ -547,7 +580,8 @@ function Get-AdvancedInstallerInfo {
 
     try {
       $FooterOffset = Find-AdvancedInstallerFooterOffset -Stream $Stream
-      $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $Script:ADVANCED_INSTALLER_FOOTER_SIZE
+      $FooterLength = Get-AdvancedInstallerFooterLength -Stream $Stream -FooterOffset $FooterOffset
+      $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $FooterLength
 
       $FooterMagic = [System.Text.Encoding]::ASCII.GetString($FooterBytes, $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET, $Script:ADVANCED_INSTALLER_MAGIC.Length)
       if ($FooterMagic -ne 'ADVINSTSFX') { throw 'The Advanced Installer footer signature is invalid' }

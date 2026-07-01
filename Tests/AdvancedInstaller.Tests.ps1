@@ -19,6 +19,44 @@ BeforeAll {
     Invoke-WebRequest -Uri $Url -OutFile $FixturePath
     return $FixturePath
   }
+
+  function New-AdvancedInstallerFooterFixture {
+    param(
+      [Parameter(Mandatory)]
+      [string]$Name,
+
+      [Parameter(Mandatory)]
+      [int]$FooterLength
+    )
+
+    $FixturePath = Join-Path $Script:FixtureDirectory $Name
+    $PayloadBytes = [byte[]]@(0x44, 0x55, 0x4d, 0x50)
+    $EntryName = 'payload.bin'
+    $EntryNameBytes = [System.Text.Encoding]::Unicode.GetBytes($EntryName)
+    $EntryBytes = New-Object 'byte[]' 24
+    [System.BitConverter]::GetBytes([uint32]$PayloadBytes.Length).CopyTo($EntryBytes, 12)
+    [System.BitConverter]::GetBytes([uint32]0).CopyTo($EntryBytes, 16)
+    [System.BitConverter]::GetBytes([uint32]$EntryName.Length).CopyTo($EntryBytes, 20)
+
+    $InfoOffset = $PayloadBytes.Length
+    $FooterBytes = New-Object 'byte[]' $FooterLength
+    [System.BitConverter]::GetBytes([uint32]1).CopyTo($FooterBytes, 4)
+    [System.BitConverter]::GetBytes([uint32]$InfoOffset).CopyTo($FooterBytes, 16)
+    [System.BitConverter]::GetBytes([uint32]0).CopyTo($FooterBytes, 20)
+    [System.Text.Encoding]::ASCII.GetBytes('ADVINSTSFX').CopyTo($FooterBytes, 60)
+
+    $Stream = [System.IO.File]::Open($FixturePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try {
+      $Stream.Write($PayloadBytes, 0, $PayloadBytes.Length)
+      $Stream.Write($EntryBytes, 0, $EntryBytes.Length)
+      $Stream.Write($EntryNameBytes, 0, $EntryNameBytes.Length)
+      $Stream.Write($FooterBytes, 0, $FooterBytes.Length)
+    } finally {
+      $Stream.Close()
+    }
+
+    return $FixturePath
+  }
 }
 
 Describe 'Advanced Installer parser' {
@@ -94,6 +132,16 @@ Describe 'Advanced Installer parser' {
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
+  }
+
+  It 'Should locate Advanced Installer footers ending at the ADVINSTSFX marker' {
+    $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-footer-at-eof.bin' -FooterLength 70
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.FooterOffset | Should -Be ((Get-Item -Path $Fixture).Length - 70)
+    $Info.FileCount | Should -Be 1
+    $Info.Files.Name | Should -Contain 'payload.bin'
   }
 
   It 'Should locate signed Advanced Installer footers beyond the old 10 KB tail window' {
