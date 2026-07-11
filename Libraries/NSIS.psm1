@@ -1,4 +1,6 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
+# Format sources: https://github.com/NSIS-Dev/nsis, https://github.com/ip7z/7zip, https://github.com/russellbanks/Komac, and https://github.com/electron-userland/electron-builder
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -31,19 +33,7 @@ function Import-Assembly {
     Load the managed compression assemblies used for NSIS parsing
   #>
 
-  if (-not ([System.Management.Automation.PSTypeName]'SharpCompress.Compressors.LZMA.LzmaStream').Type) {
-    $LoadContext = [System.Runtime.Loader.AssemblyLoadContext]::Default
-
-    # Load the dependency first so SharpCompress can resolve its optional codec reference in pwsh.
-    foreach ($AssemblyName in @('ZstdSharp.dll', 'SharpCompress.dll')) {
-      $AssemblyPath = (Get-Assembly -Name $AssemblyName).FullName
-      $AssemblySimpleName = [System.IO.Path]::GetFileNameWithoutExtension($AssemblyName)
-
-      if (-not [AppDomain]::CurrentDomain.GetAssemblies().Where({ $_.GetName().Name -eq $AssemblySimpleName }, 'First')) {
-        $LoadContext.LoadFromAssemblyPath($AssemblyPath) | Out-Null
-      }
-    }
-  }
+  Import-InstallerArchiveDependency
 }
 
 Import-Assembly
@@ -51,6 +41,12 @@ Import-Assembly
 # Constants
 $NSIS_FIRST_HEADER_SIZE = 28
 $NSIS_FIRST_HEADER_SIGNATURE = [byte[]](0xEF, 0xBE, 0xAD, 0xDE, 0x4E, 0x75, 0x6C, 0x6C, 0x73, 0x6F, 0x66, 0x74, 0x49, 0x6E, 0x73, 0x74)
+$NSIS_FIRST_HEADER_FLAGS_MASK = [uint32]0x0F
+$NSIS_ARCHIVE_ALIGNMENT = 512
+$NSIS_MAX_BACKWARD_PE_SCAN = 1048576
+$NSIS_MAX_FILE_SIZE = [uint64]4294967295
+$NSIS_MAX_HEADER_SIZE = 134217728
+$NSIS_MAX_ENTRY_COUNT = 33554432
 $NSIS_HEADER_OFFSET_LANG_TABLE_SIZE = 32
 $NSIS_HEADER_OFFSET_CODE_ON_INIT = 40
 $NSIS_HEADER_OFFSET_CODE_ON_INST_SUCCESS = 44
@@ -76,7 +72,6 @@ $NSIS_PREDEFINED_VAR_TEMP = 25
 $NSIS_PREDEFINED_VAR_PLUGINSDIR = 26
 $NSIS_PREDEFINED_VAR_EXEPATH = 27
 $NSIS_PREDEFINED_VAR_EXEFILE = 28
-$NSIS_PREDEFINED_VAR_HWNDPARENT = 29
 $NSIS_PREDEFINED_VAR_CLICK = 30
 $NSIS_PREDEFINED_VAR__OUTDIR = 31
 
@@ -105,6 +100,7 @@ $NSIS_OPCODE_IF_FILE_EXISTS = 12
 $NSIS_OPCODE_SET_FLAG = 13
 $NSIS_OPCODE_IF_FLAG = 14
 $NSIS_OPCODE_GET_FLAG = 15
+$NSIS_OPCODE_EXTRACT_FILE = 20
 $NSIS_OPCODE_STR_LEN = 24
 $NSIS_OPCODE_ASSIGN_VAR = 25
 $NSIS_OPCODE_STR_CMP = 26
@@ -113,14 +109,36 @@ $NSIS_OPCODE_INT_CMP = 28
 $NSIS_OPCODE_INT_OP = 29
 $NSIS_OPCODE_INT_FMT = 30
 $NSIS_OPCODE_PUSH_POP = 31
+$NSIS_OPCODE_SHELL_EXEC = 40
+$NSIS_OPCODE_EXECUTE = 41
 $NSIS_OPCODE_DELETE_REG = 50
 $NSIS_OPCODE_WRITE_REG = 51
-$NSIS_OPCODE_WRITE_REG_STR = 53
 $NSIS_OPCODE_READ_REG = 52
 $NSIS_OPCODE_WRITE_UNINSTALLER = 62
+$NSIS_OPCODE_SECTION_SET = 63
+$NSIS_OPCODE_GET_OS_INFO = 65
+$NSIS_OPCODE_RESERVED = 66
+$NSIS_OPCODE_FILE_WRITE_UTF16 = 68
+$NSIS_OPCODE_FILE_READ_UTF16 = 69
+$NSIS_OPCODE_LOG = 70
+$NSIS_OPCODE_FIND_PROC = 71
+$NSIS_OPCODE_GET_FONT_VERSION = 72
+$NSIS_OPCODE_GET_FONT_NAME = 73
 
-$NSIS_PUSH_OPERATION = 0
+$NSIS_OPCODE_REGISTER_DLL = 44
+$NSIS_OPCODE_FILE_SEEK = 58
+$NSIS_COMMAND_PARAMETER_COUNTS = [int[]]@(
+  0, 0, 1, 1, 0, 2, 6, 1, 0, 2, 2, 3, 3, 4, 4, 2,
+  4, 3, 2, 2, 6, 2, 6, 2, 2, 4, 5, 3, 6, 4, 4, 6,
+  5, 6, 3, 3, 2, 4, 5, 4, 6, 3, 3, 4, 6, 6, 4, 1,
+  5, 4, 5, 6, 5, 5, 1, 4, 3, 4, 4, 1, 2, 3, 4, 5,
+  4, 6, 2, 1, 4, 4, 2, 2, 2, 2
+)
+
 $NSIS_POP_OPERATION = 1
+
+$NSIS_WINDOWS_DIRECTORY = if ($env:windir) { $env:windir } else { 'C:\Windows' }
+$NSIS_SYSTEM_DIRECTORY = Join-Path $Script:NSIS_WINDOWS_DIRECTORY 'System32'
 
 # Deterministic shell folder names adapted to the local machine paths used by task scripts.
 $NSIS_SHELL_STRINGS = @(
@@ -160,12 +178,12 @@ $NSIS_SHELL_STRINGS = @(
   'Cookies',
   'History',
   $env:APPDATA,
-  $env:windir,
-  $env:windir,
+  $Script:NSIS_WINDOWS_DIRECTORY,
+  $Script:NSIS_WINDOWS_DIRECTORY,
   $(if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }),
   'Pictures',
   $env:USERPROFILE,
-  (Join-Path $env:windir 'System32'),
+  $Script:NSIS_SYSTEM_DIRECTORY,
   $(if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }),
   $(if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { $env:CommonProgramFiles }),
   $(if (${env:CommonProgramFiles(x86)}) { ${env:CommonProgramFiles(x86)} } else { $env:CommonProgramFiles }),
@@ -201,27 +219,11 @@ function Get-PEInfo {
     [string]$Path
   )
 
-  $Stream = [System.IO.File]::OpenRead((Get-Item -Path $Path -Force).FullName)
-  $Reader = [System.IO.BinaryReader]::new($Stream)
-
-  try {
-    $Stream.Seek(60, 'Begin') | Out-Null
-    $PEOffset = $Reader.ReadUInt32()
-    $Stream.Seek($PEOffset + 4, 'Begin') | Out-Null
-    $Machine = $Reader.ReadUInt16()
-    $Stream.Seek($PEOffset + 24, 'Begin') | Out-Null
-    $OptionalHeaderMagic = $Reader.ReadUInt16()
-
-    return [pscustomobject]@{
-      Machine  = $Machine
-      Is64Bit  = $OptionalHeaderMagic -eq 0x20B
-      IsArm64  = $Machine -eq 0xAA64
-      IsAmd64  = $Machine -eq 0x8664
-      IsX86    = $Machine -eq 0x014C
-    }
-  } finally {
-    $Reader.Close()
-    $Stream.Close()
+  $Layout = Get-PELayout -Path $Path
+  if (-not $Layout) { throw 'The NSIS stub is not a valid PE image.' }
+  [pscustomobject]@{
+    Machine = $Layout.Machine; Is64Bit = $Layout.OptionalHeaderMagic -eq 0x20B
+    IsArm64 = $Layout.Machine -eq 0xAA64; IsAmd64 = $Layout.Machine -eq 0x8664; IsX86 = $Layout.Machine -eq 0x014C
   }
 }
 
@@ -243,19 +245,161 @@ function Get-BytePatternOffset {
     [byte[]]$Pattern
   )
 
-  for ($i = 0; $i -le $Bytes.Length - $Pattern.Length; $i++) {
+  $Offset = @(Find-BinaryPattern -Bytes $Bytes -Pattern $Pattern -Maximum 1)
+  if ($Offset.Count -eq 0) { return -1 }
+  return [int]$Offset[0]
+}
+
+function Test-NSISPEHeaderBeforeArchiveStream {
+  <#
+  .SYNOPSIS
+    Validate a nearby PE stub without buffering the installer
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][long]$FirstHeaderOffset
+  )
+  if (Get-PELayout -Stream $Stream) { return $true }
+  $MinimumOffset = [Math]::Max(0L, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
+  $StartOffset = $FirstHeaderOffset - ($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT)
+  for ($Offset = $StartOffset; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
+    if ($Offset -eq $FirstHeaderOffset -or $Offset + 64 -gt $Stream.Length) { continue }
+    $Candidate = New-BoundedReadStream -Stream $Stream -Offset $Offset -Length ($FirstHeaderOffset - $Offset) -LeaveOpen
+    try { if (Get-PELayout -Stream $Candidate) { return $true } } catch { } finally { $Candidate.Dispose() }
+  }
+  return $false
+}
+
+function Test-NSISPEHeaderAtOffset {
+  <#
+  .SYNOPSIS
+    Test whether a byte array contains a valid PE header at the requested offset
+  .PARAMETER Bytes
+    The installer bytes
+  .PARAMETER Offset
+    The candidate PE offset
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The installer bytes')]
+    [byte[]]$Bytes,
+
+    [Parameter(Mandatory, HelpMessage = 'The candidate PE offset')]
+    [int]$Offset
+  )
+
+  if ($Offset -lt 0 -or $Offset + 0x40 -gt $Bytes.Length) { return $false }
+  if ($Bytes[$Offset] -ne 0x4D -or $Bytes[$Offset + 1] -ne 0x5A) { return $false }
+
+  $PEOffset = [int][System.BitConverter]::ToUInt32($Bytes, $Offset + 0x3C)
+  if ($PEOffset -lt 0x40 -or $PEOffset -gt 0x1000 -or ($PEOffset -band 7) -ne 0) { return $false }
+
+  $PEAbsoluteOffset = $Offset + $PEOffset
+  if ($PEAbsoluteOffset + 24 -gt $Bytes.Length) { return $false }
+  if ([System.BitConverter]::ToUInt32($Bytes, $PEAbsoluteOffset) -ne 0x00004550) { return $false }
+
+  $OptionalHeaderSize = [System.BitConverter]::ToUInt16($Bytes, $PEAbsoluteOffset + 20)
+  return $OptionalHeaderSize -ge 96
+}
+
+function Test-NSISPEHeaderBeforeArchive {
+  <#
+  .SYNOPSIS
+    Validate that an NSIS archive header belongs to a nearby PE stub
+  .PARAMETER Bytes
+    The installer bytes
+  .PARAMETER FirstHeaderOffset
+    The candidate NSIS first-header offset
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The installer bytes')]
+    [byte[]]$Bytes,
+
+    [Parameter(Mandatory, HelpMessage = 'The candidate NSIS first-header offset')]
+    [int]$FirstHeaderOffset
+  )
+
+  if (Test-NSISPEHeaderAtOffset -Bytes $Bytes -Offset 0) { return $true }
+
+  $MinimumOffset = [Math]::Max(0, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
+  $StartOffset = $FirstHeaderOffset - ($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT)
+  for ($Offset = $StartOffset; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
+    if ($Offset -eq $FirstHeaderOffset) { continue }
+    if (Test-NSISPEHeaderAtOffset -Bytes $Bytes -Offset $Offset) { return $true }
+  }
+
+  return $false
+}
+
+function Get-NSISFirstHeaderCandidate {
+  <#
+  .SYNOPSIS
+    Locate a source-compatible NSIS first header by scanning aligned archive starts
+  .PARAMETER Bytes
+    The installer bytes
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, ParameterSetName = 'Bytes', HelpMessage = 'The installer bytes')][byte[]]$Bytes,
+    [Parameter(Mandatory, ParameterSetName = 'Stream', HelpMessage = 'The installer stream')][System.IO.Stream]$Stream
+  )
+
+  if ($PSCmdlet.ParameterSetName -eq 'Stream') {
+    $SearchStart = 0L
+    $SearchWindowSize = 16777216L
+    while ($SearchStart -lt $Stream.Length) {
+      $SearchLength = [Math]::Min($SearchWindowSize, $Stream.Length - $SearchStart)
+      foreach ($SignatureOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:NSIS_FIRST_HEADER_SIGNATURE -StartOffset $SearchStart -Length $SearchLength -Maximum 256)) {
+        $Offset = $SignatureOffset - 4
+        if ($Offset -lt 0 -or ($Offset % $Script:NSIS_ARCHIVE_ALIGNMENT) -ne 0 -or $Offset + $Script:NSIS_FIRST_HEADER_SIZE -gt $Stream.Length) { continue }
+        $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Script:NSIS_FIRST_HEADER_SIZE
+        $Flags = [BitConverter]::ToUInt32($Header, 0)
+        $InvalidFlagMask = [uint32]([uint64]4294967295 - [uint64]$Script:NSIS_FIRST_HEADER_FLAGS_MASK)
+        if (($Flags -band $InvalidFlagMask) -ne 0) { continue }
+        $LengthOfHeader = [BitConverter]::ToUInt32($Header, 20)
+        $LengthOfFollowingData = [BitConverter]::ToUInt32($Header, 24)
+        if ($LengthOfHeader -le 0 -or $LengthOfHeader -gt $Script:NSIS_MAX_HEADER_SIZE) { continue }
+        if ($LengthOfFollowingData -le $Script:NSIS_FIRST_HEADER_SIZE -or $LengthOfFollowingData -gt $Stream.Length - $Offset) { continue }
+        if (-not (Test-NSISPEHeaderBeforeArchiveStream -Stream $Stream -FirstHeaderOffset $Offset)) { continue }
+        return [pscustomobject]@{ Offset = $Offset; Flags = $Flags; LengthOfHeader = $LengthOfHeader; LengthOfFollowingData = $LengthOfFollowingData }
+      }
+      if ($SearchLength -eq $Stream.Length - $SearchStart) { break }
+      $SearchStart += $SearchLength - ($Script:NSIS_FIRST_HEADER_SIGNATURE.Length - 1)
+    }
+    return $null
+  }
+
+  for ($Offset = 0; $Offset + $Script:NSIS_FIRST_HEADER_SIZE -le $Bytes.Length; $Offset += $Script:NSIS_ARCHIVE_ALIGNMENT) {
     $Matched = $true
-    for ($j = 0; $j -lt $Pattern.Length; $j++) {
-      if ($Bytes[$i + $j] -ne $Pattern[$j]) {
+    for ($Index = 0; $Index -lt $Script:NSIS_FIRST_HEADER_SIGNATURE.Length; $Index++) {
+      if ($Bytes[$Offset + 4 + $Index] -ne $Script:NSIS_FIRST_HEADER_SIGNATURE[$Index]) {
         $Matched = $false
         break
       }
     }
+    if (-not $Matched) { continue }
 
-    if ($Matched) { return $i }
+    $Flags = [System.BitConverter]::ToUInt32($Bytes, $Offset)
+    $InvalidFlagMask = [uint32]([uint64]4294967295 - [uint64]$Script:NSIS_FIRST_HEADER_FLAGS_MASK)
+    if (($Flags -band $InvalidFlagMask) -ne 0) { continue }
+
+    $LengthOfHeader = [System.BitConverter]::ToUInt32($Bytes, $Offset + 20)
+    $LengthOfFollowingData = [System.BitConverter]::ToUInt32($Bytes, $Offset + 24)
+    if ($LengthOfHeader -le 0 -or $LengthOfHeader -gt $Script:NSIS_MAX_HEADER_SIZE) { continue }
+    if ($LengthOfFollowingData -le $Script:NSIS_FIRST_HEADER_SIZE) { continue }
+    if (-not (Test-NSISPEHeaderBeforeArchive -Bytes $Bytes -FirstHeaderOffset $Offset)) { continue }
+
+    return [pscustomobject]@{
+      Offset                = $Offset
+      Flags                 = $Flags
+      LengthOfHeader        = $LengthOfHeader
+      LengthOfFollowingData = $LengthOfFollowingData
+    }
   }
 
-  return -1
+  return $null
 }
 
 function Test-NSISLzmaHeader {
@@ -388,11 +532,11 @@ function New-NSISDecoder {
       if (-not $IsSolid -and $LzmaFilterLength -gt 0) { $null = $PayloadStream.ReadByte() }
       $Properties = New-Object 'byte[]' 5
       if ($PayloadStream.Read($Properties, 0, $Properties.Length) -ne $Properties.Length) { throw 'The NSIS LZMA properties are truncated' }
-      return [SharpCompress.Compressors.LZMA.LzmaStream]::new($Properties, $PayloadStream)
+      return New-InstallerDecompressionStream -Algorithm Lzma -Stream $PayloadStream -Properties $Properties -LeaveOpen
     }
-    'BZip2' { return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($PayloadStream, [SharpCompress.Compressors.CompressionMode]::Decompress, $false) }
-    'Zlib' { return [SharpCompress.Compressors.Deflate.ZlibStream]::new($PayloadStream, [SharpCompress.Compressors.CompressionMode]::Decompress) }
-    'Deflate' { return [System.IO.Compression.DeflateStream]::new($PayloadStream, [System.IO.Compression.CompressionMode]::Decompress, $false) }
+    'BZip2' { return New-InstallerDecompressionStream -Algorithm BZip2 -Stream $PayloadStream -LeaveOpen }
+    'Zlib' { return New-InstallerDecompressionStream -Algorithm Zlib -Stream $PayloadStream -LeaveOpen }
+    'Deflate' { return New-InstallerDecompressionStream -Algorithm Deflate -Stream $PayloadStream -LeaveOpen }
     'None' { return $PayloadStream }
     default { throw "Unsupported NSIS compression format: $Compression" }
   }
@@ -412,22 +556,21 @@ function Get-NSISHeaderData {
   )
 
   $InstallerPath = (Get-Item -Path $Path -Force).FullName
-  $Bytes = [System.IO.File]::ReadAllBytes($InstallerPath)
-  $SignatureOffset = Get-BytePatternOffset -Bytes $Bytes -Pattern $Script:NSIS_FIRST_HEADER_SIGNATURE
-  if ($SignatureOffset -lt 4) { throw 'The NSIS installer header could not be located' }
+  $InstallerItem = Get-Item -LiteralPath $InstallerPath -Force
+  if ([uint64]$InstallerItem.Length -gt $Script:NSIS_MAX_FILE_SIZE) { throw 'The NSIS installer exceeds the supported 4 GiB executable size' }
+  $InstallerStream = [IO.File]::Open($InstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $FirstHeader = Get-NSISFirstHeaderCandidate -Stream $InstallerStream
+    if (-not $FirstHeader) { throw 'The NSIS installer header could not be located at a valid aligned archive start' }
 
-  $FirstHeaderOffset = $SignatureOffset - 4
-  $LengthOfHeader = [System.BitConverter]::ToUInt32($Bytes, $FirstHeaderOffset + 20)
-  $LengthOfFollowingData = [System.BitConverter]::ToUInt32($Bytes, $FirstHeaderOffset + 24)
-  if ($LengthOfHeader -le 0) { throw 'The NSIS installer header size is invalid' }
-  if ($LengthOfFollowingData -le $Script:NSIS_FIRST_HEADER_SIZE) { throw 'The NSIS installer data size is invalid' }
+  $FirstHeaderOffset = $FirstHeader.Offset
+  $LengthOfHeader = $FirstHeader.LengthOfHeader
+  $LengthOfFollowingData = $FirstHeader.LengthOfFollowingData
 
   $PayloadOffset = $FirstHeaderOffset + $Script:NSIS_FIRST_HEADER_SIZE
-  if ($PayloadOffset + 12 -gt $Bytes.Length) { throw 'The NSIS compressed header is truncated' }
-
-  $PayloadStream = [System.IO.MemoryStream]::new($Bytes, $PayloadOffset, $Bytes.Length - $PayloadOffset, $false)
-  $Signature = New-Object 'byte[]' 12
-  $null = $PayloadStream.Read($Signature, 0, $Signature.Length)
+    $PayloadLength = [long]$LengthOfFollowingData - $Script:NSIS_FIRST_HEADER_SIZE
+    if ($PayloadLength -lt 12 -or $PayloadOffset + $PayloadLength -gt $InstallerStream.Length) { throw 'The NSIS compressed header is truncated' }
+    $Signature = Read-BinaryBytes -Stream $InstallerStream -Offset $PayloadOffset -Count 12
 
   $CompressedHeaderSize = [System.BitConverter]::ToUInt32($Signature, 0)
   $IsSolid = $true
@@ -455,11 +598,11 @@ function Get-NSISHeaderData {
 
   # The solid form starts directly with the codec stream. Non-solid installers prefix it with the packed header size.
   $PayloadDataOffset = $PayloadOffset + $(if ($IsSolid) { 0 } else { 4 })
-  $PayloadDataLength = $Bytes.Length - $PayloadDataOffset
+    $PayloadDataLength = $PayloadOffset + $PayloadLength - $PayloadDataOffset
   $LastError = $null
 
   foreach ($Compression in $CompressionCandidates) {
-    $PayloadStream = [System.IO.MemoryStream]::new($Bytes, $PayloadDataOffset, $PayloadDataLength, $false)
+    $PayloadStream = New-BoundedReadStream -Stream $InstallerStream -Offset $PayloadDataOffset -Length $PayloadDataLength -LeaveOpen
     $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $CandidateHeader } else { -1 }
     $Decoder = $null
 
@@ -485,6 +628,8 @@ function Get-NSISHeaderData {
       return [pscustomobject]@{
         Path              = $InstallerPath
         FirstHeaderOffset = $FirstHeaderOffset
+        FirstHeaderFlags  = $FirstHeader.Flags
+        ArchiveSize       = $LengthOfFollowingData
         Compression       = $Compression
         IsSolid           = $IsSolid
         HeaderBytes       = $HeaderBytes
@@ -498,7 +643,10 @@ function Get-NSISHeaderData {
     }
   }
 
-  throw "Failed to decode the NSIS header using $($CompressionCandidates -join ', '): $($LastError.Exception.Message)"
+    throw "Failed to decode the NSIS header using $($CompressionCandidates -join ', '): $($LastError.Exception.Message)"
+  } finally {
+    $InstallerStream.Dispose()
+  }
 }
 
 function Get-NSISBlockHeaders {
@@ -674,32 +822,49 @@ function Get-NSISPrimaryLanguageTable {
 function Get-NSISVersionInfo {
   <#
   .SYNOPSIS
-    Detect whether the installer uses NSIS v2 or v3 string opcodes
+    Detect the NSIS string and command layout used by a compiled installer
   .PARAMETER StringsBlock
     The decompressed NSIS strings block
+  .PARAMETER Entries
+    The raw NSIS command entries
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The decompressed NSIS strings block')]
-    [byte[]]$StringsBlock
+    [byte[]]$StringsBlock,
+
+    [Parameter(HelpMessage = 'The raw NSIS command entries')]
+    [pscustomobject[]]$Entries = @()
   )
 
   $Unicode = $StringsBlock.Length -ge 2 -and $StringsBlock[0] -eq 0x00 -and $StringsBlock[1] -eq 0x00
   $NSIS2Count = 0
   $NSIS3Count = 0
+  $ParkCount = 0
+  $StrongNSIS3 = $false
 
   if ($Unicode) {
     for ($Index = 2; $Index + 3 -lt $StringsBlock.Length; $Index += 2) {
       if ($StringsBlock[$Index] -eq 0x00) {
-        switch ($StringsBlock[$Index + 2]) {
+        $Code = [System.BitConverter]::ToUInt16($StringsBlock, $Index + 2)
+        switch ($Code) {
           1 { $NSIS3Count++ }
           2 { $NSIS3Count++ }
-          3 { $NSIS3Count++ }
+          3 {
+            $NSIS3Count++
+            if ($Index + 5 -lt $StringsBlock.Length -and (([System.BitConverter]::ToUInt16($StringsBlock, $Index + 4) -band 0x8080) -eq 0x8080)) {
+              $StrongNSIS3 = $true
+            }
+          }
           4 { $NSIS3Count++ }
           252 { $NSIS2Count++ }
           253 { $NSIS2Count++ }
           254 { $NSIS2Count++ }
           255 { $NSIS2Count++ }
+          0xE000 { $ParkCount++ }
+          0xE001 { $ParkCount++ }
+          0xE002 { $ParkCount++ }
+          0xE003 { $ParkCount++ }
         }
       }
     }
@@ -709,7 +874,12 @@ function Get-NSISVersionInfo {
         switch ($StringsBlock[$Index + 1]) {
           1 { $NSIS3Count++ }
           2 { $NSIS3Count++ }
-          3 { $NSIS3Count++ }
+          3 {
+            $NSIS3Count++
+            if ($Index + 2 -lt $StringsBlock.Length -and (($StringsBlock[$Index + 2] -band 0x80) -ne 0)) {
+              $StrongNSIS3 = $true
+            }
+          }
           4 { $NSIS3Count++ }
           252 { $NSIS2Count++ }
           253 { $NSIS2Count++ }
@@ -720,10 +890,180 @@ function Get-NSISVersionInfo {
     }
   }
 
-  return [pscustomobject]@{
-    Unicode = $Unicode
-    IsV3    = $NSIS3Count -ge $NSIS2Count
+  $StrongPark = $Unicode -and -not $StrongNSIS3 -and ($ParkCount -gt 0 -or $NSIS3Count -eq 0)
+  $CandidateTypes = if ($StrongNSIS3) {
+    @('NSIS3')
+  } elseif ($StrongPark) {
+    @('Park1', 'Park2', 'Park3')
+  } elseif ($NSIS3Count -gt $NSIS2Count) {
+    @('NSIS3', 'NSIS2')
+  } else {
+    @('NSIS2', 'NSIS3')
   }
+
+  $Candidates = [System.Collections.Generic.List[object]]::new()
+  $Priority = 0
+  foreach ($Type in $CandidateTypes) {
+    foreach ($LogCmdIsEnabled in @($false, $true)) {
+      $Candidates.Add([pscustomobject]@{
+          Type            = $Type
+          LogCmdIsEnabled = $LogCmdIsEnabled
+          Priority        = $Priority
+        })
+      $Priority++
+    }
+  }
+
+  $BestCandidate = $Candidates[0]
+  if ($Entries.Count -gt 0) {
+    $BestCandidate = @($Candidates | ForEach-Object {
+        [pscustomobject]@{
+          Type            = $_.Type
+          LogCmdIsEnabled = $_.LogCmdIsEnabled
+          Priority        = $_.Priority
+          BadCommandCount = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
+        }
+      } | Sort-Object -Property BadCommandCount, Priority | Select-Object -First 1)[0]
+  } else {
+    $BestCandidate | Add-Member -NotePropertyName BadCommandCount -NotePropertyValue 0 -Force
+  }
+
+  return [pscustomobject]@{
+    Unicode          = $Unicode
+    Type             = $BestCandidate.Type
+    IsV3             = $BestCandidate.Type -eq 'NSIS3'
+    IsPark           = $BestCandidate.Type -like 'Park*'
+    LogCmdIsEnabled  = [bool]$BestCandidate.LogCmdIsEnabled
+    BadCommandCount  = [int]$BestCandidate.BadCommandCount
+    StringCodeCounts = [pscustomobject]@{
+      NSIS2 = $NSIS2Count
+      NSIS3 = $NSIS3Count
+      Park  = $ParkCount
+    }
+  }
+}
+
+function Get-NSISNormalizedOpcode {
+  <#
+  .SYNOPSIS
+    Normalize a raw compiled opcode to the NSIS 3 command layout used by the simulator
+  .PARAMETER Opcode
+    The raw command opcode
+  .PARAMETER Type
+    The detected NSIS command layout type
+  .PARAMETER Unicode
+    Whether the installer stores Unicode strings
+  .PARAMETER LogCmdIsEnabled
+    Whether a log opcode was inserted before section commands
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The raw command opcode')]
+    [uint32]$Opcode,
+
+    [Parameter(Mandatory, HelpMessage = 'The detected NSIS command layout type')]
+    [string]$Type,
+
+    [Parameter(Mandatory, HelpMessage = 'Whether the installer stores Unicode strings')]
+    [bool]$Unicode,
+
+    [Parameter(Mandatory, HelpMessage = 'Whether a log opcode was inserted before section commands')]
+    [bool]$LogCmdIsEnabled
+  )
+
+  $Value = [int]$Opcode
+  if ($Type -notlike 'Park*') {
+    if (-not $LogCmdIsEnabled) { return $Value }
+    if ($Value -lt $Script:NSIS_OPCODE_SECTION_SET) { return $Value }
+    if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
+    return $Value - 1
+  }
+
+  if ($Value -lt $Script:NSIS_OPCODE_REGISTER_DLL) { return $Value }
+  if ($Type -in @('Park2', 'Park3')) {
+    if ($Value -eq $Script:NSIS_OPCODE_REGISTER_DLL) { return $Script:NSIS_OPCODE_GET_FONT_VERSION }
+    $Value--
+  }
+  if ($Type -eq 'Park3') {
+    if ($Value -eq $Script:NSIS_OPCODE_REGISTER_DLL) { return $Script:NSIS_OPCODE_GET_FONT_NAME }
+    $Value--
+  }
+  if ($Value -ge $Script:NSIS_OPCODE_FILE_SEEK) {
+    if ($Unicode) {
+      if ($Value -eq $Script:NSIS_OPCODE_FILE_SEEK) { return $Script:NSIS_OPCODE_FILE_WRITE_UTF16 }
+      if ($Value -eq ($Script:NSIS_OPCODE_FILE_SEEK + 1)) { return $Script:NSIS_OPCODE_FILE_READ_UTF16 }
+      $Value -= 2
+    }
+
+    if ($Value -ge $Script:NSIS_OPCODE_SECTION_SET -and $LogCmdIsEnabled) {
+      if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
+      return $Value - 1
+    }
+    if ($Value -eq $Script:NSIS_OPCODE_FILE_WRITE_UTF16) { return $Script:NSIS_OPCODE_FIND_PROC }
+  }
+
+  return $Value
+}
+
+function Measure-NSISCommandLayoutCandidate {
+  <#
+  .SYNOPSIS
+    Score a candidate NSIS command layout by counting impossible commands
+  .PARAMETER Entries
+    The raw NSIS command entries
+  .PARAMETER Type
+    The candidate NSIS command layout type
+  .PARAMETER Unicode
+    Whether the installer stores Unicode strings
+  .PARAMETER LogCmdIsEnabled
+    Whether a log opcode was inserted before section commands
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The raw NSIS command entries')]
+    [pscustomobject[]]$Entries,
+
+    [Parameter(Mandatory, HelpMessage = 'The candidate NSIS command layout type')]
+    [string]$Type,
+
+    [Parameter(Mandatory, HelpMessage = 'Whether the installer stores Unicode strings')]
+    [bool]$Unicode,
+
+    [Parameter(Mandatory, HelpMessage = 'Whether a log opcode was inserted before section commands')]
+    [bool]$LogCmdIsEnabled
+  )
+
+  $BadCommandCount = 0
+  foreach ($Entry in $Entries) {
+    $Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.Raw[0] -Type $Type -Unicode $Unicode -LogCmdIsEnabled $LogCmdIsEnabled
+    if ($Opcode -lt 0 -or $Opcode -ge $Script:NSIS_COMMAND_PARAMETER_COUNTS.Count) {
+      $BadCommandCount++
+      continue
+    }
+
+    if ($Type -eq 'NSIS3') {
+      if ($Opcode -eq $Script:NSIS_OPCODE_RESERVED) {
+        $BadCommandCount++
+        continue
+      }
+    } elseif ($Opcode -eq $Script:NSIS_OPCODE_RESERVED -or $Opcode -eq $Script:NSIS_OPCODE_GET_OS_INFO) {
+      $BadCommandCount++
+      continue
+    }
+
+    $LastNonZeroParameter = 0
+    for ($Index = 6; $Index -ge 1; $Index--) {
+      if ($Entry.Raw[$Index] -ne 0) {
+        $LastNonZeroParameter = $Index
+        break
+      }
+    }
+    if ($Script:NSIS_COMMAND_PARAMETER_COUNTS[$Opcode] -lt $LastNonZeroParameter) {
+      $BadCommandCount++
+    }
+  }
+
+  return $BadCommandCount
 }
 
 function Get-NSISStringCodeKind {
@@ -741,10 +1081,21 @@ function Get-NSISStringCodeKind {
     [uint16]$Character,
 
     [Parameter(Mandatory, HelpMessage = 'Whether the installer uses NSIS v3 control codes')]
-    [bool]$IsV3
+    [bool]$IsV3,
+
+    [Parameter(HelpMessage = 'The detected NSIS command layout type')]
+    [string]$Type = $(if ($IsV3) { 'NSIS3' } else { 'NSIS2' })
   )
 
-  if ($IsV3) {
+  if ($Type -like 'Park*') {
+    switch ($Character) {
+      0xE003 { return 'Lang' }
+      0xE002 { return 'Shell' }
+      0xE001 { return 'Var' }
+      0xE000 { return 'Skip' }
+      default { return $null }
+    }
+  } elseif ($IsV3) {
     switch ($Character) {
       1 { return 'Lang' }
       2 { return 'Shell' }
@@ -763,7 +1114,7 @@ function Get-NSISStringCodeKind {
   }
 }
 
-function Decode-NSISPackedNumber {
+function ConvertFrom-NSISPackedNumber {
   <#
   .SYNOPSIS
     Decode the packed 15-bit NSIS number embedded in a string control code payload
@@ -773,8 +1124,13 @@ function Decode-NSISPackedNumber {
   [OutputType([int])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The raw 16-bit control code payload')]
-    [uint16]$Character
+    [uint16]$Character,
+
+    [Parameter(HelpMessage = 'The detected NSIS command layout type')]
+    [string]$Type = 'NSIS3'
   )
+
+  if ($Type -like 'Park*') { return [int]($Character -band 0x7FFF) }
 
   $MaskedCharacter = $Character -band 0x7F7F
   $Bytes = [System.BitConverter]::GetBytes($MaskedCharacter)
@@ -961,7 +1317,7 @@ function Get-NSISString {
 
   while ($Index -lt $Characters.Count) {
     $Current = $Characters[$Index]
-    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3
+    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
 
     if ($CodeKind) {
       if ($Index + 1 -ge $Characters.Count) { break }
@@ -980,10 +1336,10 @@ function Get-NSISString {
         }
 
         switch ($CodeKind) {
-          'Var' { $null = $Builder.Append((Get-NSISVariableValue -State $State -Index (Decode-NSISPackedNumber -Character $Payload))) }
+          'Var' { $null = $Builder.Append((Get-NSISVariableValue -State $State -Index (ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type))) }
           'Shell' { $null = $Builder.Append((Resolve-NSISShellValue -State $State -Character $Payload)) }
           'Lang' {
-            $LanguageIndex = Decode-NSISPackedNumber -Character $Payload
+            $LanguageIndex = ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type
             if ($State.LanguageTable -and $LanguageIndex -lt $State.LanguageTable.StringOffsets.Count) {
               $StringOffset = $State.LanguageTable.StringOffsets[$LanguageIndex]
               if ($StringOffset -ne 0) { $null = $Builder.Append((Get-NSISString -State $State -RelativeOffset $StringOffset)) }
@@ -1221,15 +1577,147 @@ function Set-NSISRegistryValue {
     $State.Metadata.ProductCode = Split-Path -Path $Key -Leaf
     $State.Metadata.Scope = if ($Root -eq 'HKLM') { 'machine' } elseif ($Root -eq 'HKCU') { 'user' } else { $State.Metadata.Scope }
     $State.Metadata.RegistryValues[$Name] = $Value
+    $State.Metadata.WritesAppsAndFeaturesEntry = $true
 
     switch ($Name) {
       'DisplayName' { $State.Metadata.DisplayName = $Value }
       'DisplayVersion' { $State.Metadata.DisplayVersion = $Value }
       'Publisher' { $State.Metadata.Publisher = $Value }
       'InstallLocation' { $State.Metadata.DefaultInstallLocation = $Value.Trim('"') }
+      'UninstallString' { $State.Metadata.UninstallString = $Value }
+      'QuietUninstallString' { $State.Metadata.QuietUninstallString = $Value }
+      'DisplayIcon' { $State.Metadata.DisplayIcon = $Value }
+      'SystemComponent' {
+        $State.Metadata.SystemComponent = $Value
+        if ($Value -eq '1' -or $Value -eq '0x00000001') { $State.Metadata.WritesAppsAndFeaturesEntry = $false }
+      }
       default { }
     }
   }
+}
+
+function Get-NSISRegistryWriteFromEntry {
+  <#
+  .SYNOPSIS
+    Convert a normalized EW_WRITEREG command into explicit registry-write evidence
+  .PARAMETER State
+    The mutable NSIS execution state
+  .PARAMETER Entry
+    The normalized NSIS command entry
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The normalized NSIS command entry')]
+    [pscustomobject]$Entry
+  )
+
+  if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { return $null }
+
+  $Type = [uint32]$Entry.Raw[5]
+  $RegistryType = [uint32]$Entry.Raw[6]
+  $RegistryKind = switch ($Type) {
+    $Script:NSIS_REG_TYPE_DWORD { 'REG_DWORD'; break }
+    $Script:NSIS_REG_TYPE_EXPAND_STRING { 'REG_EXPAND_SZ'; break }
+    $Script:NSIS_REG_TYPE_STRING {
+      if ($RegistryType -eq $Script:NSIS_REG_TYPE_EXPAND_STRING) { 'REG_EXPAND_SZ' } else { 'REG_SZ' }
+      break
+    }
+    default {
+      switch ($RegistryType) {
+        $Script:NSIS_REG_TYPE_DWORD { 'REG_DWORD'; break }
+        $Script:NSIS_REG_TYPE_EXPAND_STRING { 'REG_EXPAND_SZ'; break }
+        default { 'REG_SZ' }
+      }
+    }
+  }
+
+  $Root = Resolve-NSISRegistryRoot -State $State -Root $Entry.Raw[1]
+  $Key = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
+  $Name = Get-NSISString -State $State -RelativeOffset $Entry.Values[3]
+  $Value = if ($RegistryKind -eq 'REG_DWORD') {
+    [string](Get-NSISInt -State $State -RelativeOffset $Entry.Values[4])
+  } else {
+    Get-NSISString -State $State -RelativeOffset $Entry.Values[4]
+  }
+
+  return [pscustomobject]@{
+    Root           = $Root
+    Key            = $Key
+    Name           = $Name
+    Value          = $Value
+    Type           = $RegistryKind
+    RawType        = $Type
+    RegistryType   = $RegistryType
+    IsUninstallKey = $Key -match $Script:NSIS_UNINSTALL_KEY_PATTERN
+    Opcode         = $Entry.Opcode
+    RawOpcode      = $Entry.RawOpcode
+  }
+}
+
+function Add-NSISRegistryWrite {
+  <#
+  .SYNOPSIS
+    Store source-accurate EW_WRITEREG evidence and apply it to simulated registry state
+  .PARAMETER State
+    The mutable NSIS execution state
+  .PARAMETER Entry
+    The normalized NSIS command entry
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The normalized NSIS command entry')]
+    [pscustomobject]$Entry
+  )
+
+  $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+  if (-not $Write) { return }
+
+  $State.RegistryWrites.Add($Write)
+  Set-NSISRegistryValue -State $State -Root $Write.Root -Key $Write.Key -Name $Write.Name -Value $Write.Value
+}
+
+function Add-NSISExecutedPayload {
+  <#
+  .SYNOPSIS
+    Record static evidence that NSIS runs a nested payload
+  .PARAMETER State
+    The mutable NSIS execution state
+  .PARAMETER Command
+    The executed command or file
+  .PARAMETER Parameters
+    Optional command-line parameters
+  .PARAMETER Kind
+    The NSIS execution command kind
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [AllowEmptyString()]
+    [Parameter(Mandatory, HelpMessage = 'The executed command or file')]
+    [string]$Command,
+
+    [AllowEmptyString()]
+    [Parameter(HelpMessage = 'Optional command-line parameters')]
+    [string]$Parameters = '',
+
+    [Parameter(Mandatory, HelpMessage = 'The NSIS execution command kind')]
+    [string]$Kind
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Command)) { return }
+  $State.ExecutedPayloads.Add([pscustomobject]@{
+      Kind       = $Kind
+      Command    = $Command
+      Parameters = $Parameters
+    })
 }
 
 function Get-NSISRegistryValue {
@@ -1321,10 +1809,14 @@ function Get-NSISEntries {
     [byte[]]$HeaderBytes,
 
     [Parameter(Mandatory, HelpMessage = 'The parsed NSIS block headers')]
-    [pscustomobject[]]$BlockHeaders
+    [pscustomobject[]]$BlockHeaders,
+
+    [Parameter(HelpMessage = 'The detected command layout')]
+    [pscustomobject]$VersionInfo
   )
 
   $EntryBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 2
+  if ($BlockHeaders[2].Count -gt $Script:NSIS_MAX_ENTRY_COUNT) { throw 'The NSIS entry table exceeds the supported parser limit' }
   $EntryCount = [int]$BlockHeaders[2].Count
   if ($EntryBlock.Length -lt ($EntryCount * $Script:NSIS_ENTRY_SIZE)) { throw 'The NSIS entry table is truncated' }
 
@@ -1341,10 +1833,17 @@ function Get-NSISEntries {
       $Values[$ValueIndex] = [System.BitConverter]::ToInt32($EntryBlock, $ValueOffset)
     }
 
+    $Opcode = if ($VersionInfo) {
+      Get-NSISNormalizedOpcode -Opcode $Raw[0] -Type $VersionInfo.Type -Unicode $VersionInfo.Unicode -LogCmdIsEnabled $VersionInfo.LogCmdIsEnabled
+    } else {
+      $Raw[0]
+    }
+
     $Entries.Add([pscustomobject]@{
-        Opcode = $Raw[0]
-        Raw    = $Raw
-        Values = $Values
+        Opcode    = $Opcode
+        RawOpcode = $Raw[0]
+        Raw       = $Raw
+        Values    = $Values
       })
   }
 
@@ -1405,17 +1904,22 @@ function Initialize-NSISState {
   $Layout = Get-NSISHeaderLayout -HeaderBytes $HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
   $StringsBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 3
   $LanguageTable = Get-NSISPrimaryLanguageTable -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Layout $Layout
-  $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock
+  $RawEntries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+  $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock -Entries $RawEntries
+  $Entries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -VersionInfo $VersionInfo
 
   $State = [pscustomobject]@{
     Path            = $HeaderData.Path
-    Entries         = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+    Entries         = $Entries
     Sections        = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
     StringsBlock    = $StringsBlock
     LanguageTable   = $LanguageTable
     VersionInfo     = $VersionInfo
     Variables       = @{}
     Registry        = @{}
+    RegistryWrites  = [System.Collections.Generic.List[object]]::new()
+    ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
+    Warnings        = [System.Collections.Generic.List[string]]::new()
     Stack           = [System.Collections.Generic.List[string]]::new()
     Directories     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     Files           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1430,8 +1934,18 @@ function Initialize-NSISState {
       Publisher              = $null
       ProductCode            = $null
       DefaultInstallLocation = $null
+      UninstallString        = $null
+      QuietUninstallString   = $null
+      DisplayIcon            = $null
+      SystemComponent        = $null
       Scope                  = $null
+      WritesAppsAndFeaturesEntry = $false
       RegistryValues         = @{}
+      RegistryWrites         = @()
+      ExtractedFiles         = @()
+      ExecutedPayloads       = @()
+      Warnings               = @()
+      ParserVersionInfo      = $null
     }
   }
 
@@ -1476,20 +1990,11 @@ function Add-NSISDirectUninstallWrites {
   )
 
   foreach ($Entry in $State.Entries) {
-    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG -and $Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG_STR) { continue }
-
-    $Root = Resolve-NSISRegistryRoot -State $State -Root $Entry.Raw[1]
-    $Key = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
-    if ($Key -notmatch $Script:NSIS_UNINSTALL_KEY_PATTERN) { continue }
-
-    $Name = Get-NSISString -State $State -RelativeOffset $Entry.Values[3]
-    $Value = if ($Entry.Opcode -eq $Script:NSIS_OPCODE_WRITE_REG -and $Entry.Raw[5] -eq $Script:NSIS_REG_TYPE_DWORD) {
-      [string](Get-NSISInt -State $State -RelativeOffset $Entry.Values[4])
-    } else {
-      Get-NSISString -State $State -RelativeOffset $Entry.Values[4]
-    }
-
-    Set-NSISRegistryValue -State $State -Root $Root -Key $Key -Name $Name -Value $Value
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
+    $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+    if (-not $Write -or -not $Write.IsUninstallKey) { continue }
+    $State.RegistryWrites.Add($Write)
+    Set-NSISRegistryValue -State $State -Root $Write.Root -Key $Write.Key -Name $Write.Name -Value $Write.Value
   }
 }
 
@@ -1588,6 +2093,11 @@ function Invoke-NSISEntry {
       $FileName = Get-NSISString -State $State -RelativeOffset $Values[1]
       $Address = if (Test-NSISPathExists -State $State -Path $FileName) { $Values[2] } else { $Values[3] }
       return [pscustomobject]@{ Action = 'Continue'; Address = $Address }
+    }
+    $Script:NSIS_OPCODE_EXTRACT_FILE {
+      $Path = Get-NSISString -State $State -RelativeOffset $Values[2]
+      Add-NSISFile -State $State -Path $Path
+      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
     }
     $Script:NSIS_OPCODE_SET_FLAG {
       $FlagType = $Values[1]
@@ -1740,6 +2250,20 @@ function Invoke-NSISEntry {
 
       return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
     }
+    $Script:NSIS_OPCODE_SHELL_EXEC {
+      $Verb = Get-NSISString -State $State -RelativeOffset $Values[1]
+      $File = Get-NSISString -State $State -RelativeOffset $Values[2]
+      $Parameters = Get-NSISString -State $State -RelativeOffset $Values[3]
+      $Kind = if ([string]::IsNullOrWhiteSpace($Verb)) { 'ShellExec' } else { "ShellExec:$Verb" }
+      Add-NSISExecutedPayload -State $State -Command $File -Parameters $Parameters -Kind $Kind
+      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+    }
+    $Script:NSIS_OPCODE_EXECUTE {
+      $Command = Get-NSISString -State $State -RelativeOffset $Values[1]
+      $Kind = if ($Values[3] -ne 0) { 'ExecWait' } else { 'Exec' }
+      Add-NSISExecutedPayload -State $State -Command $Command -Kind $Kind
+      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+    }
     $Script:NSIS_OPCODE_DELETE_REG {
       $Root = Resolve-NSISRegistryRoot -State $State -Root $Raw[2]
       $Key = Get-NSISString -State $State -RelativeOffset $Values[3]
@@ -1747,17 +2271,8 @@ function Invoke-NSISEntry {
       Remove-NSISRegistryValue -State $State -Root $Root -Key $Key -Name $Name
       return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
     }
-    { $_ -eq $Script:NSIS_OPCODE_WRITE_REG -or $_ -eq $Script:NSIS_OPCODE_WRITE_REG_STR } {
-      $Root = Resolve-NSISRegistryRoot -State $State -Root $Raw[1]
-      $Key = Get-NSISString -State $State -RelativeOffset $Values[2]
-      $Name = Get-NSISString -State $State -RelativeOffset $Values[3]
-      $Value = Get-NSISString -State $State -RelativeOffset $Values[4]
-
-      if ($Opcode -eq $Script:NSIS_OPCODE_WRITE_REG -and $Raw[5] -eq $Script:NSIS_REG_TYPE_DWORD) {
-        $Value = [string](Get-NSISInt -State $State -RelativeOffset $Values[4])
-      }
-
-      Set-NSISRegistryValue -State $State -Root $Root -Key $Key -Name $Name -Value $Value
+    $Script:NSIS_OPCODE_WRITE_REG {
+      Add-NSISRegistryWrite -State $State -Entry $Entry
       return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
     }
     $Script:NSIS_OPCODE_READ_REG {
@@ -1821,20 +2336,58 @@ function Complete-NSISMetadata {
     }
   }
 
+  if ($State.Metadata.SystemComponent -eq '1' -or $State.Metadata.SystemComponent -eq '0x00000001') {
+    $State.Metadata.WritesAppsAndFeaturesEntry = $false
+  }
+
+  $ExtractedFiles = @($State.Files) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
+  $ExecutedPayloads = @($State.ExecutedPayloads)
+  $SeenRegistryWrites = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $RegistryWrites = @(
+    foreach ($Write in @($State.RegistryWrites)) {
+      $WriteKey = "$($Write.Root)`0$($Write.Key)`0$($Write.Name)`0$($Write.Value)`0$($Write.Type)"
+      if ($SeenRegistryWrites.Add($WriteKey)) { $Write }
+    }
+  )
+  $NestedInstallerEvidence = @($ExtractedFiles + @($ExecutedPayloads | ForEach-Object { "$($_.Command) $($_.Parameters)" })).Where({
+      $_ -match '(?i)\.(msi|msp|msu)(\s|$)|(^|[\\/])(setup|install|installer)\.exe(\s|$)'
+    })
+
+  if (-not $State.Metadata.WritesAppsAndFeaturesEntry -and $NestedInstallerEvidence.Count -gt 0) {
+    $State.Warnings.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
+  }
+
+  $State.Metadata.RegistryWrites = @($RegistryWrites)
+  $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
+  foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $State.Warnings.Add($Warning) }
+  $State.Metadata.RegistryAssociationInfo = $RegistryAssociationInfo
+  $State.Metadata.Protocols = $RegistryAssociationInfo.Protocols
+  $State.Metadata.FileExtensions = $RegistryAssociationInfo.FileExtensions
+  $State.Metadata.ExtractedFiles = @($ExtractedFiles)
+  $State.Metadata.ExecutedPayloads = @($ExecutedPayloads)
+  $State.Metadata.Warnings = @($State.Warnings | Select-Object -Unique)
+  $State.Metadata.ParserVersionInfo = $State.VersionInfo
+
   return [pscustomobject]$State.Metadata
 }
 
-function Get-NSISInfo {
+function Invoke-NSISStaticSimulation {
   <#
   .SYNOPSIS
-    Get static metadata from a Nullsoft Scriptable Install System installer
+    Simulate NSIS installer code paths needed for deterministic static metadata
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Mode
+    The simulation mode. Full runs initialization and sections; Fast returns early when direct uninstall metadata is complete.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The simulation mode')]
+    [ValidateSet('Full', 'Fast')]
+    [string]$Mode = 'Full'
   )
 
   process {
@@ -1846,8 +2399,14 @@ function Get-NSISInfo {
     # Prefer direct uninstall registry writes when they already expose a single deterministic ARP identity.
     Add-NSISDirectUninstallWrites -State $State
     $Metadata = Complete-NSISMetadata -State $State
-    if (-not [string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion) -and -not [string]::IsNullOrWhiteSpace($Metadata.ProductCode)) {
-      return $Metadata
+    if ($Mode -eq 'Fast' -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion) -and -not [string]::IsNullOrWhiteSpace($Metadata.ProductCode)) {
+      return [pscustomobject]@{
+        State       = $State
+        Layout      = $Layout
+        HeaderData  = $HeaderData
+        Metadata    = $Metadata
+        IsEarlyExit = $true
+      }
     }
 
     if ($Layout.CodeOnInit -ge 0) {
@@ -1881,7 +2440,327 @@ function Get-NSISInfo {
       Add-NSISDirectUninstallWrites -State $State
     }
 
-    $Metadata = Complete-NSISMetadata -State $State
+    return [pscustomobject]@{
+      State       = $State
+      Layout      = $Layout
+      HeaderData  = $HeaderData
+      Metadata    = Complete-NSISMetadata -State $State
+      IsEarlyExit = $false
+    }
+  }
+}
+
+function Get-NSISPlainStrings {
+  <#
+  .SYNOPSIS
+    Recover plain strings from the decoded NSIS strings block for static feature detection
+  .PARAMETER State
+    The mutable NSIS execution state
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  $Strings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $Encoding = if ($State.VersionInfo.Unicode) { [System.Text.Encoding]::Unicode } else { [System.Text.Encoding]::Default }
+  $Step = if ($State.VersionInfo.Unicode) { 2 } else { 1 }
+  $Start = 0
+  $Index = 0
+
+  while ($Index -lt $State.StringsBlock.Length) {
+    $IsTerminator = if ($State.VersionInfo.Unicode) {
+      $Index + 1 -lt $State.StringsBlock.Length -and $State.StringsBlock[$Index] -eq 0x00 -and $State.StringsBlock[$Index + 1] -eq 0x00
+    } else {
+      $State.StringsBlock[$Index] -eq 0x00
+    }
+
+    if ($IsTerminator) {
+      if ($Index -gt $Start) {
+        $Bytes = $State.StringsBlock[$Start..($Index - 1)]
+        $Text = $Encoding.GetString($Bytes).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($Text)) { $null = $Strings.Add($Text) }
+      }
+
+      $Index += $Step
+      $Start = $Index
+    } else {
+      $Index += $Step
+    }
+  }
+
+  if ($State.LanguageTable) {
+    foreach ($Offset in $State.LanguageTable.StringOffsets) {
+      if ($Offset -eq 0) { continue }
+      $Text = Get-NSISString -State $State -RelativeOffset $Offset
+      if (-not [string]::IsNullOrWhiteSpace($Text)) { $null = $Strings.Add($Text) }
+    }
+  }
+
+  return @($Strings)
+}
+
+function Get-NSISInstallerSwitchInfo {
+  <#
+  .SYNOPSIS
+    Extract command-line switch evidence from a Nullsoft installer
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    $Simulation = Invoke-NSISStaticSimulation -Path $Path
+    $Strings = Get-NSISPlainStrings -State $Simulation.State
+    $Switches = [System.Collections.Generic.List[object]]::new()
+    $RejectedSwitches = [System.Collections.Generic.List[object]]::new()
+    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $Pattern = '(?<![A-Za-z0-9_./\\-])(?:--[A-Za-z][A-Za-z0-9][A-Za-z0-9._-]*|/[A-Za-z][A-Za-z0-9][A-Za-z0-9._-]*)(?::[^\s"''<>]+|=[^\s"''<>]+)?'
+    $DefaultSwitches = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Switch in @('/S', '/NCRC', '/D', '/SD', '/LANG', '/LOG')) { $null = $DefaultSwitches.Add($Switch) }
+    $ScopeSwitches = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Switch in @('/CURRENTUSER', '/currentuser', '/AllUsers', '/ALLUSERS', '/allusers', '--all-users', '--current-user')) { $null = $ScopeSwitches.Add($Switch) }
+    $SilentSwitches = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Switch in @('/S', '/silent', '/verysilent', '--silent', '--updated')) { $null = $SilentSwitches.Add($Switch) }
+    $ParsingMarkers = @($Strings | Where-Object {
+        $_ -match '(?i)\b(TestParameter|GetParameters|GetOptions|IfSilent|StrStr|CommandLine|Parameters)\b'
+      } | Select-Object -First 20)
+
+    foreach ($String in $Strings) {
+      foreach ($Match in [regex]::Matches($String, $Pattern)) {
+        $Value = $Match.Value
+        $Name = if ($Value -match '^([^:=]+)') { $Matches[1] } else { $Value }
+        if ($Name -match '\.(exe|dll|msi|zip|7z|ico|png|jpg|jpeg|json|yml|yaml|txt|html?)$') { continue }
+        if ($Name -match '^/[A-Z]:$') { continue }
+
+        $IsKnownSwitch = $DefaultSwitches.Contains($Name) -or $ScopeSwitches.Contains($Name) -or $SilentSwitches.Contains($Name)
+        $HasParsingEvidence = $String -match '(?i)\b(TestParameter|GetParameters|GetOptions|IfSilent|StrStr|CommandLine|Parameters)\b'
+        $EscapedValue = [regex]::Escape($Value)
+        $TrimmedString = $String.Trim()
+        $IsStandaloneEvidence = $TrimmedString -eq $Value -or ($TrimmedString.Length -le 160 -and $TrimmedString -match "(^|\s)$EscapedValue(\s|$)")
+        $LooksLikeNestedCommand = $String -match '(?i)\b(taskkill|cmd(?:\.exe)?|powershell(?:\.exe)?|reg(?:\.exe)?|regsvr32(?:\.exe)?|msiexec(?:\.exe)?|rundll32(?:\.exe)?)\b'
+        if (-not ($IsKnownSwitch -or $HasParsingEvidence -or ($IsStandaloneEvidence -and -not $LooksLikeNestedCommand))) {
+          $RejectedSwitches.Add([pscustomobject]@{
+              Switch = $Value
+              Reason = 'Internal command-line or non-installer switch evidence'
+              Evidence = $String
+            })
+          continue
+        }
+        if (-not $Seen.Add($Value)) { continue }
+        $Evidence = @($Strings | Where-Object { $_ -like "*$Value*" } | Select-Object -First 5)
+        $Switches.Add([pscustomobject]@{
+            Switch                = $Value
+            Name                  = $Name
+            IsDefaultNsisSwitch   = $DefaultSwitches.Contains($Name)
+            IsScopeSwitch         = $ScopeSwitches.Contains($Name)
+            IsSilentSwitch        = $SilentSwitches.Contains($Name)
+            IsCustomCandidate     = -not $DefaultSwitches.Contains($Name)
+            Evidence              = $Evidence
+          })
+      }
+    }
+
+    $AdditionalSwitches = @($Switches | Where-Object { $_.IsCustomCandidate } | Select-Object -ExpandProperty Switch)
+
+    [pscustomobject]@{
+      Path                        = (Get-Item -Path $Path -Force).FullName
+      InstallerType               = 'Nullsoft'
+      Switches                    = $Switches.ToArray()
+      AdditionalSwitches          = $AdditionalSwitches
+      ScopeSwitches               = @($Switches | Where-Object { $_.IsScopeSwitch } | Select-Object -ExpandProperty Switch)
+      SilentSwitches              = @($Switches | Where-Object { $_.IsSilentSwitch } | Select-Object -ExpandProperty Switch)
+      CommandLineParsingEvidence  = $ParsingMarkers
+      RejectedSwitchCandidates    = $RejectedSwitches.ToArray()
+      Warnings                    = @('Switch extraction is static string evidence. Confirm switch control-flow in the NSIS script or a VM before using custom switches in manifests.')
+    }
+  }
+}
+
+function Read-AdditionalInstallerSwitchesFromNSIS {
+  <#
+  .SYNOPSIS
+    Read non-default command-line switch candidates from a Nullsoft installer
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-NSISInstallerSwitchInfo -Path $Path).AdditionalSwitches
+  }
+}
+
+function Get-ElectronBuilderNSISArchitecture {
+  <#
+  .SYNOPSIS
+    Infer the preferred WinGet architecture from electron-builder app package files
+  .PARAMETER Architectures
+    The detected electron-builder app package architectures
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The detected electron-builder app package architectures')]
+    [string[]]$Architectures
+  )
+
+  # electron-builder universal installers with x86 payloads are x86-compatible,
+  if ($Architectures -contains 'x86') { return 'x86' }
+  if ($Architectures -contains 'x64') { return 'x64' }
+  if ($Architectures -contains 'arm64') { return 'arm64' }
+  return $null
+}
+
+function Get-ElectronBuilderNSISDetection {
+  <#
+  .SYNOPSIS
+    Detect electron-builder payload evidence from simulated NSIS state
+  .PARAMETER State
+    The mutable NSIS execution state
+  .PARAMETER Strings
+    Plain strings recovered from the NSIS strings block
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'Plain strings recovered from the NSIS strings block')]
+    [string[]]$Strings
+  )
+
+  $Architectures = [System.Collections.Generic.List[string]]::new()
+  foreach ($Value in @($State.Files) + @($Strings)) {
+    if ($Value -match '(?i)(^|[\\/])app-32\.(7z|zip)$|(^|[\\/])app-32$') {
+      if (-not $Architectures.Contains('x86')) { $Architectures.Add('x86') }
+    }
+    if ($Value -match '(?i)(^|[\\/])app-64\.(7z|zip)$|(^|[\\/])app-64$') {
+      if (-not $Architectures.Contains('x64')) { $Architectures.Add('x64') }
+    }
+    if ($Value -match '(?i)(^|[\\/])app-arm64\.(7z|zip)$|(^|[\\/])app-arm64$') {
+      if (-not $Architectures.Contains('arm64')) { $Architectures.Add('arm64') }
+    }
+  }
+
+  $AppPackageEvidence = @(
+    foreach ($Value in @($State.Files) + @($Strings)) {
+      if ($Value -match '(?i)(app-(?:32|64|arm64)(?:\.(?:7z|zip))?)') { $Matches[1].ToLowerInvariant() }
+    }
+  ) | Select-Object -Unique
+  $HasDualScopeUi = @($Strings).Where({
+      $_ -like '*make this software available to all users*' -or
+      $_ -like '*Fresh install for all users*' -or
+      $_ -like '*Fresh install for current user*'
+    }, 'First').Count -gt 0
+
+  $OrderedArchitectures = @('arm64', 'x64', 'x86').Where({ $Architectures.Contains($_) })
+
+  return [pscustomobject]@{
+    IsElectronBuilder = $Architectures.Count -gt 0
+    Architectures     = $OrderedArchitectures
+    AppPackageFiles   = $AppPackageEvidence
+    HasUpdatedSwitch  = @($Strings).Where({ $_ -eq '--updated' }, 'First').Count -gt 0
+    HasDualScopeUi    = $HasDualScopeUi
+  }
+}
+
+function Test-ElectronBuilder {
+  <#
+  .SYNOPSIS
+    Test whether a Nullsoft installer was built by electron-builder
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    $Simulation = Invoke-NSISStaticSimulation -Path $Path
+    $Strings = Get-NSISPlainStrings -State $Simulation.State
+    return (Get-ElectronBuilderNSISDetection -State $Simulation.State -Strings $Strings).IsElectronBuilder
+  }
+}
+
+function Get-ElectronBuilderNSISInfo {
+  <#
+  .SYNOPSIS
+    Get static electron-builder traits from a Nullsoft installer
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    $Simulation = Invoke-NSISStaticSimulation -Path $Path
+    $State = $Simulation.State
+    $Strings = Get-NSISPlainStrings -State $State
+    $Detection = Get-ElectronBuilderNSISDetection -State $State -Strings $Strings
+    $Architectures = @($Detection.Architectures)
+
+    $SupportedScopes = if ($Detection.HasDualScopeUi) {
+      @('user', 'machine')
+    } elseif ($State.Metadata.Scope -eq 'machine') {
+      @('machine')
+    } else {
+      @('user')
+    }
+
+    [pscustomobject]@{
+      Path                  = (Get-Item -Path $Path -Force).FullName
+      InstallerType         = 'Nullsoft'
+      Family                = 'electron-builder'
+      IsElectronBuilder     = $Detection.IsElectronBuilder
+      Architectures         = @($Architectures)
+      Architecture          = if ($Architectures.Count -gt 0) { Get-ElectronBuilderNSISArchitecture -Architectures @($Architectures) } else { $null }
+      SupportedScopes       = [string[]]$SupportedScopes
+      SupportsUserScope     = $SupportedScopes -contains 'user'
+      SupportsMachineScope  = $SupportedScopes -contains 'machine'
+      SupportsDualScope     = $SupportedScopes.Count -gt 1
+      ProductCode           = $State.Metadata.ProductCode
+      DisplayName           = $State.Metadata.DisplayName
+      DisplayVersion        = $State.Metadata.DisplayVersion
+      Publisher             = $State.Metadata.Publisher
+      DefaultInstallLocation = $State.Metadata.DefaultInstallLocation
+      Evidence              = [pscustomobject]@{
+        AppPackageFiles = $Detection.AppPackageFiles
+        HasUpdatedSwitch = $Detection.HasUpdatedSwitch
+        HasDualScopeUi   = $Detection.HasDualScopeUi
+      }
+    }
+  }
+}
+
+function Get-NSISInfo {
+  <#
+  .SYNOPSIS
+    Get static metadata from a Nullsoft Scriptable Install System installer
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    $Metadata = (Invoke-NSISStaticSimulation -Path $Path).Metadata
     if ([string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion)) {
       throw 'The NSIS installer does not expose deterministic uninstall metadata'
     }
@@ -1970,4 +2849,4 @@ function Read-ProductCodeFromNSIS {
   }
 }
 
-Export-ModuleMember -Function Get-NSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS
+Export-ModuleMember -Function Get-NSISInfo, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS

@@ -1,4 +1,6 @@
 # License: GPL-2.0. See Modules\InstallerParsers\LICENSE.GPL2.
+# Format sources: https://github.com/HydraDragonAntivirus/HydraDragonAntivirus and https://github.com/russellbanks/Komac
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -10,10 +12,8 @@ $ADVANCED_INSTALLER_MAGIC = [System.Text.Encoding]::ASCII.GetBytes('ADVINSTSFX')
 $ADVANCED_INSTALLER_FOOTER_SIZE = 72
 $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET = 60
 $ADVANCED_INSTALLER_MINIMUM_FOOTER_SIZE = $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET + $ADVANCED_INSTALLER_MAGIC.Length
-$ADVANCED_INSTALLER_FOOTER_SEARCH_CHUNK_SIZE = 1048576
 $ADVANCED_INSTALLER_FILE_ENTRY_SIZE = 24
 $ADVANCED_INSTALLER_XOR_HEADER_SIZE = 512
-$ADVANCED_INSTALLER_BUFFER_SIZE = 81920
 
 function Get-AdvancedInstallerAssembly {
   <#
@@ -41,18 +41,7 @@ function Import-AdvancedInstallerAssembly {
     Load the managed compression assemblies used for Advanced Installer extraction
   #>
 
-  if (-not ([System.Management.Automation.PSTypeName]'SharpCompress.Archives.ArchiveFactory').Type) {
-    $LoadContext = [System.Runtime.Loader.AssemblyLoadContext]::Default
-
-    foreach ($AssemblyName in @('ZstdSharp.dll', 'SharpCompress.dll')) {
-      $AssemblyPath = (Get-AdvancedInstallerAssembly -Name $AssemblyName).FullName
-      $AssemblySimpleName = [System.IO.Path]::GetFileNameWithoutExtension($AssemblyName)
-
-      if (-not [AppDomain]::CurrentDomain.GetAssemblies().Where({ $_.GetName().Name -eq $AssemblySimpleName }, 'First')) {
-        $LoadContext.LoadFromAssemblyPath($AssemblyPath) | Out-Null
-      }
-    }
-  }
+  Import-InstallerArchiveDependency
 }
 
 Import-AdvancedInstallerAssembly
@@ -89,23 +78,9 @@ function Find-AdvancedInstallerBytePattern {
     [int]$StartIndex = -1
   )
 
-  if ($StartIndex -lt 0 -or $StartIndex -gt $Bytes.Length - $Pattern.Length) {
-    $StartIndex = $Bytes.Length - $Pattern.Length
-  }
-
-  for ($Index = $StartIndex; $Index -ge 0; $Index--) {
-    $Matched = $true
-
-    for ($PatternIndex = 0; $PatternIndex -lt $Pattern.Length; $PatternIndex++) {
-      if ($Bytes[$Index + $PatternIndex] -ne $Pattern[$PatternIndex]) {
-        $Matched = $false
-        break
-      }
-    }
-
-    if ($Matched) { return $Index }
-  }
-
+  $SearchLength = if ($StartIndex -lt 0) { 0 } else { [long]$StartIndex + $Pattern.Length }
+  $Match = @(Find-BinaryPattern -Bytes $Bytes -Pattern $Pattern -Length $SearchLength -Maximum 1 -Reverse)
+  if ($Match.Count) { return [int]$Match[0] }
   return -1
 }
 
@@ -127,13 +102,7 @@ function Test-AdvancedInstallerBytePattern {
     [byte[]]$Right
   )
 
-  if ($Left.Length -ne $Right.Length) { return $false }
-
-  for ($Index = 0; $Index -lt $Left.Length; $Index++) {
-    if ($Left[$Index] -ne $Right[$Index]) { return $false }
-  }
-
-  return $true
+  return Test-BinarySequence -Left $Left -Right $Right
 }
 
 function Read-AdvancedInstallerBytes {
@@ -159,21 +128,7 @@ function Read-AdvancedInstallerBytes {
     [int]$Length
   )
 
-  $Bytes = New-Object 'byte[]' $Length
-  $null = $Stream.Seek($Offset, 'Begin')
-  $Read = 0
-
-  while ($Read -lt $Length) {
-    $ChunkRead = $Stream.Read($Bytes, $Read, $Length - $Read)
-    if ($ChunkRead -le 0) { break }
-    $Read += $ChunkRead
-  }
-
-  if ($Read -ne $Length) {
-    throw 'Unexpected end of stream while reading Advanced Installer data'
-  }
-
-  return $Bytes
+  return Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Length
 }
 
 function Test-AdvancedInstallerFooterOffset {
@@ -268,30 +223,9 @@ function Find-AdvancedInstallerFooterOffset {
     [System.IO.Stream]$Stream
   )
 
-  $PatternLength = $Script:ADVANCED_INSTALLER_MAGIC.Length
-  $SearchOffset = [long]$Stream.Length
-
-  while ($SearchOffset -gt 0) {
-    $ChunkStart = [long][Math]::Max(0, $SearchOffset - $Script:ADVANCED_INSTALLER_FOOTER_SEARCH_CHUNK_SIZE)
-    $ChunkLength = [int]($SearchOffset - $ChunkStart)
-    $ChunkBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $ChunkStart -Length $ChunkLength
-    $PatternSearchIndex = $ChunkBytes.Length - $PatternLength
-
-    while ($PatternSearchIndex -ge 0) {
-      $MagicOffset = Find-AdvancedInstallerBytePattern -Bytes $ChunkBytes -Pattern $Script:ADVANCED_INSTALLER_MAGIC -StartIndex $PatternSearchIndex
-      if ($MagicOffset -lt 0) { break }
-
-      # The footer stores the ADVINSTSFX marker near the end of the record.
-      $FooterOffset = $ChunkStart + $MagicOffset - $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET
-      if (Test-AdvancedInstallerFooterOffset -Stream $Stream -FooterOffset $FooterOffset) {
-        return $FooterOffset
-      }
-
-      $PatternSearchIndex = $MagicOffset - 1
-    }
-
-    if ($ChunkStart -eq 0) { break }
-    $SearchOffset = $ChunkStart + $PatternLength - 1
+  foreach ($MagicOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:ADVANCED_INSTALLER_MAGIC -Maximum 4096 -Reverse)) {
+    $FooterOffset = $MagicOffset - $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET
+    if (Test-AdvancedInstallerFooterOffset -Stream $Stream -FooterOffset $FooterOffset) { return $FooterOffset }
   }
 
   throw 'The installer does not contain an Advanced Installer footer'
@@ -315,21 +249,7 @@ function Resolve-AdvancedInstallerExtractionPath {
     [string]$RelativePath
   )
 
-  $DestinationPath = [System.IO.Path]::GetFullPath((Get-Item -Path $DestinationPath -Force).FullName)
-  $RelativePath = $RelativePath -replace '/', '\'
-  $RelativePath = $RelativePath.TrimStart('\')
-
-  if ([System.IO.Path]::IsPathRooted($RelativePath)) { throw 'Advanced Installer extraction does not allow rooted payload paths' }
-
-  # The installer can embed nested folders. Keep them relative to the extraction root only.
-  $TargetPath = [System.IO.Path]::GetFullPath((Join-Path $DestinationPath $RelativePath))
-  $DestinationPrefix = if ($DestinationPath.EndsWith('\')) { $DestinationPath } else { "${DestinationPath}\" }
-
-  if (-not $TargetPath.StartsWith($DestinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Advanced Installer extraction blocked a path traversal attempt: $RelativePath"
-  }
-
-  return $TargetPath
+  return Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
 }
 
 function Write-AdvancedInstallerStream {
@@ -354,16 +274,7 @@ function Write-AdvancedInstallerStream {
     [long]$Length
   )
 
-  $Buffer = New-Object 'byte[]' $Script:ADVANCED_INSTALLER_BUFFER_SIZE
-  $Remaining = $Length
-
-  while ($Remaining -gt 0) {
-    $ChunkSize = [int][Math]::Min($Buffer.Length, $Remaining)
-    $Read = $SourceStream.Read($Buffer, 0, $ChunkSize)
-    if ($Read -le 0) { throw 'Unexpected end of stream while extracting an Advanced Installer payload' }
-    $DestinationStream.Write($Buffer, 0, $Read)
-    $Remaining -= $Read
-  }
+  $null = Copy-BoundedStream -Source $SourceStream -Destination $DestinationStream -MaximumBytes $Length -ExpectedBytes $Length
 }
 
 function Write-AdvancedInstallerEntry {
@@ -436,33 +347,10 @@ function Expand-AdvancedInstallerArchive {
   )
 
   $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-  $Archive = [SharpCompress.Archives.ArchiveFactory]::Open((Get-Item -Path $Path -Force).FullName)
+  $Archive = Get-InstallerArchive -Path $Path
 
   try {
-    foreach ($ArchiveEntry in $Archive.Entries.Where({ -not $_.IsDirectory })) {
-      $ArchiveEntryPath = Resolve-AdvancedInstallerExtractionPath -DestinationPath $DestinationPath -RelativePath $ArchiveEntry.Key
-      $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($ArchiveEntryPath)) -ItemType Directory -Force
-
-      try {
-        $EntryStream = $ArchiveEntry.OpenEntryStream()
-      } catch {
-        if ($ArchiveEntry.Size -eq 0 -and $_.Exception.Message -match 'does not have a stream') {
-          [System.IO.File]::Open($ArchiveEntryPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read).Close()
-          continue
-        }
-        throw
-      }
-
-      $FileStream = [System.IO.File]::Open($ArchiveEntryPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
-
-      try {
-        $EntryStream.CopyTo($FileStream)
-      } finally {
-        $FileStream.Close()
-        $EntryStream.Close()
-      }
-    }
-
+    $null = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath -MaximumExpandedBytes 17179869184 -MaximumEntries 200000
     return (Get-Item -Path $DestinationPath -Force).FullName
   } finally {
     $Archive.Dispose()
@@ -719,6 +607,7 @@ function Get-AdvancedInstallerMsiInfo {
       Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
       $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File)
       $MsiFile = Resolve-AdvancedInstallerMatch -Item $MsiFiles -Pattern $Name
+      $AssociationInfo = Get-MsiAssociationInfo -Path $MsiFile.FullName
 
       return [pscustomobject]@{
         Name           = $MsiFile.Name
@@ -726,6 +615,9 @@ function Get-AdvancedInstallerMsiInfo {
         ProductVersion = $MsiFile.FullName | Read-ProductVersionFromMsi
         ProductCode    = $MsiFile.FullName | Read-ProductCodeFromMsi
         UpgradeCode    = $MsiFile.FullName | Read-UpgradeCodeFromMsi
+        Protocols      = $AssociationInfo.Protocols
+        FileExtensions = $AssociationInfo.FileExtensions
+        RegistryAssociationInfo = $AssociationInfo
       }
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction 'Continue' -ProgressAction 'SilentlyContinue'

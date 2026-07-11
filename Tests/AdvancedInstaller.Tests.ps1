@@ -1,8 +1,14 @@
 BeforeAll {
+  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Compression.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'PE.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'RegistryAssociations.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'AdvancedInstaller.psm1') -Force
 
-  $Script:FixtureDirectory = Join-Path $env:TEMP 'DumplingsAdvancedInstallerTests'
-  $null = New-Item -Path $Script:FixtureDirectory -ItemType Directory -Force
+  $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
 
   function Get-InstallerFixture {
     param(
@@ -13,11 +19,7 @@ BeforeAll {
       [string]$Url
     )
 
-    $FixturePath = Join-Path $Script:FixtureDirectory $Name
-    if (Test-Path -LiteralPath $FixturePath) { return $FixturePath }
-
-    Invoke-WebRequest -Uri $Url -OutFile $FixturePath
-    return $FixturePath
+    Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url
   }
 
   function New-AdvancedInstallerFooterFixture {
@@ -61,7 +63,12 @@ BeforeAll {
 
 Describe 'Advanced Installer parser' {
   It 'Should read direct MSI metadata from the TI-Nspire Computer Link installer' {
-    $Fixture = Get-InstallerFixture -Name 'TINspireComputerLink-3.9.0.455.exe' -Url 'https://education.ti.com/download/en/ed-tech/82035809F7E6474099944056CCB01C20/AC3AAE51297B4902B6B6CA005B8391F0/TINspireComputerLink-3.9.0.455.exe'
+    try {
+      $Fixture = Get-InstallerFixture -Name 'TINspireComputerLink-3.9.0.455.exe' -Url 'https://education.ti.com/download/en/ed-tech/82035809F7E6474099944056CCB01C20/AC3AAE51297B4902B6B6CA005B8391F0/TINspireComputerLink-3.9.0.455.exe'
+    } catch {
+      Set-ItResult -Skipped -Because 'Texas Instruments removed the historical official installer URL.'
+      return
+    }
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -Name 'ComputerLink.msi'
 

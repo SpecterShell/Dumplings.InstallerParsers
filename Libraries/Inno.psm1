@@ -1,4 +1,6 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
+# Format sources: https://github.com/jrsoftware/issrc, https://github.com/jrathlev/InnoUnpacker-Windows-GUI, and https://github.com/russellbanks/Komac
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -15,6 +17,7 @@ $INNO_OFFSET_TABLE_VERSION_1_SIZE = 44
 $INNO_OFFSET_TABLE_VERSION_2_SIZE = 64
 $INNO_ENCRYPTION_HEADER_SIZE_6500 = 49
 $INNO_MAX_CHUNK_SIZE = 4096
+$INNO_MAX_DECOMPRESSED_BLOCK_SIZE = 1073741824
 $INNO_LEAD_BYTES_SIZE = 32
 $INNO_CHUNK_MAGIC = [System.Text.Encoding]::ASCII.GetString([byte[]](0x7A, 0x6C, 0x62, 0x1A))
 $INNO_VERSION_5_HEADER_COUNT_FIELDS = 16
@@ -65,60 +68,10 @@ function Import-Assembly {
     Load the managed compression assemblies used for Inno Setup parsing
   #>
 
-  if (-not ([System.Management.Automation.PSTypeName]'SharpCompress.Compressors.LZMA.LzmaStream').Type) {
-    $LoadContext = [System.Runtime.Loader.AssemblyLoadContext]::Default
-
-    foreach ($AssemblyName in @('ZstdSharp.dll', 'SharpCompress.dll')) {
-      $AssemblyPath = (Get-Assembly -Name $AssemblyName).FullName
-      $AssemblySimpleName = [System.IO.Path]::GetFileNameWithoutExtension($AssemblyName)
-
-      if (-not [AppDomain]::CurrentDomain.GetAssemblies().Where({ $_.GetName().Name -eq $AssemblySimpleName }, 'First')) {
-        $LoadContext.LoadFromAssemblyPath($AssemblyPath) | Out-Null
-      }
-    }
-  }
+  Import-InstallerArchiveDependency
 }
 
 Import-Assembly
-
-function Import-InnoNativeMethods {
-  <#
-  .SYNOPSIS
-    Load the Win32 resource helpers used to read the Inno Setup offset table
-  #>
-
-  if (-not ([System.Management.Automation.PSTypeName]'Dumplings.PackageModule.InnoNativeMethods').Type) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-namespace Dumplings.PackageModule
-{
-    public static class InnoNativeMethods
-    {
-        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
-
-        [DllImport("kernel32", SetLastError = true)]
-        public static extern IntPtr FindResource(IntPtr hModule, IntPtr lpName, IntPtr lpType);
-
-        [DllImport("kernel32", SetLastError = true)]
-        public static extern IntPtr LoadResource(IntPtr hModule, IntPtr hResInfo);
-
-        [DllImport("kernel32", SetLastError = true)]
-        public static extern IntPtr LockResource(IntPtr hResData);
-
-        [DllImport("kernel32", SetLastError = true)]
-        public static extern uint SizeofResource(IntPtr hModule, IntPtr hResInfo);
-
-        [DllImport("kernel32", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        public static extern bool FreeLibrary(IntPtr hModule);
-    }
-}
-'@
-  }
-}
 
 function Get-InstallerCrc32 {
   <#
@@ -133,29 +86,8 @@ function Get-InstallerCrc32 {
     [byte[]]$Bytes
   )
 
-  begin {
-    if (-not $Script:InstallerCrc32Table) {
-      $Script:InstallerCrc32Table = for ($i = 0; $i -lt 256; $i++) {
-        $Crc = [uint32]$i
-        for ($j = 0; $j -lt 8; $j++) {
-          if (($Crc -band 1) -ne 0) {
-            $Crc = 0xEDB88320 -bxor ($Crc -shr 1)
-          } else {
-            $Crc = $Crc -shr 1
-          }
-        }
-        $Crc
-      }
-    }
-  }
-
   process {
-    $Crc = [uint32]4294967295
-    foreach ($Byte in $Bytes) {
-      $Index = ($Crc -bxor $Byte) -band 0xFF
-      $Crc = $Script:InstallerCrc32Table[$Index] -bxor ($Crc -shr 8)
-    }
-    return [System.BitConverter]::ToInt32([System.BitConverter]::GetBytes([uint32]($Crc -bxor [uint32]4294967295)), 0)
+    return [BitConverter]::ToInt32([BitConverter]::GetBytes((Get-BinaryCrc32 -Bytes $Bytes)), 0)
   }
 }
 
@@ -177,25 +109,11 @@ function Get-InnoResourceBytes {
     [int]$Id
   )
 
-  Import-InnoNativeMethods
-
-  $LibraryHandle = [Dumplings.PackageModule.InnoNativeMethods]::LoadLibraryEx((Get-Item -Path $Path -Force).FullName, [IntPtr]::Zero, 2)
-  if ($LibraryHandle -eq [IntPtr]::Zero) { throw 'Failed to load the installer as a data file' }
-
-  try {
-    $ResourceHandle = [Dumplings.PackageModule.InnoNativeMethods]::FindResource($LibraryHandle, [IntPtr]$Id, [IntPtr]$Script:INNO_RT_RCDATA)
-    if ($ResourceHandle -eq [IntPtr]::Zero) { throw 'The requested Inno resource could not be found' }
-
-    $ResourceSize = [Dumplings.PackageModule.InnoNativeMethods]::SizeofResource($LibraryHandle, $ResourceHandle)
-    $ResourceDataHandle = [Dumplings.PackageModule.InnoNativeMethods]::LoadResource($LibraryHandle, $ResourceHandle)
-    $ResourcePointer = [Dumplings.PackageModule.InnoNativeMethods]::LockResource($ResourceDataHandle)
-
-    $Bytes = New-Object 'byte[]' ([int]$ResourceSize)
-    [System.Runtime.InteropServices.Marshal]::Copy($ResourcePointer, $Bytes, 0, [int]$ResourceSize)
-    return $Bytes
-  } finally {
-    [Dumplings.PackageModule.InnoNativeMethods]::FreeLibrary($LibraryHandle) | Out-Null
-  }
+  $Resource = Get-PEResourceInfo -Path $Path |
+    Where-Object { $_.TypeId -eq $Script:INNO_RT_RCDATA -and $_.Id -eq $Id } |
+    Select-Object -First 1
+  if (-not $Resource) { throw 'The requested Inno resource could not be found.' }
+  return Read-PEResourceData -Resource $Resource -MaximumBytes 1048576
 }
 
 function Get-InnoOffsetTable {
@@ -456,18 +374,12 @@ function Expand-InnoLzmaBytes {
 
   $Properties = $Bytes[0..4]
   $CompressedStream = [System.IO.MemoryStream]::new($Bytes, 5, $Bytes.Length - 5, $false)
-  $Decoder = [SharpCompress.Compressors.LZMA.LzmaStream]::new($Properties, $CompressedStream)
-  $Buffer = New-Object 'byte[]' $Script:INNO_MAX_CHUNK_SIZE
   $OutputStream = [System.IO.MemoryStream]::new()
 
   try {
-    while (($Read = $Decoder.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
-      $OutputStream.Write($Buffer, 0, $Read)
-    }
-
+    $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $CompressedStream -Destination $OutputStream -MaximumBytes $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE -Properties $Properties
     return $OutputStream.ToArray()
   } finally {
-    $Decoder.Dispose()
     $CompressedStream.Dispose()
     $OutputStream.Dispose()
   }
@@ -490,18 +402,12 @@ function Expand-InnoLzma2Bytes {
 
   $Properties = $Bytes[0..0]
   $CompressedStream = [System.IO.MemoryStream]::new($Bytes, 1, $Bytes.Length - 1, $false)
-  $Decoder = [SharpCompress.Compressors.LZMA.LzmaStream]::new($Properties, $CompressedStream, -1, -1, $null, $true)
-  $Buffer = New-Object 'byte[]' $Script:INNO_MAX_CHUNK_SIZE
   $OutputStream = [System.IO.MemoryStream]::new()
 
   try {
-    while (($Read = $Decoder.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
-      $OutputStream.Write($Buffer, 0, $Read)
-    }
-
+    $null = Expand-InstallerCompressedStream -Algorithm Lzma2 -Stream $CompressedStream -Destination $OutputStream -MaximumBytes $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE -Properties $Properties
     return $OutputStream.ToArray()
   } finally {
-    $Decoder.Dispose()
     $CompressedStream.Dispose()
     $OutputStream.Dispose()
   }
@@ -788,6 +694,477 @@ function Read-InnoHeaderStrings {
   }
 }
 
+function Get-InnoHeaderFixedDataOffset {
+  <#
+  .SYNOPSIS
+    Get version-specific offsets for fixed Inno Setup header fields after serialized strings
+  .PARAMETER VersionNumber
+    The numeric Inno Setup version
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
+    [int]$VersionNumber
+  )
+
+  # Offsets are relative to the fixed header tail after all Unicode and ANSI header strings.
+  # They follow the packed TSetupHeader records in innounp's Struct*.pas files.
+  if ($VersionNumber -ge 6700) {
+    return [pscustomobject]@{ PrivilegesRequired = 139; PrivilegesRequiredOverridesAllowed = 140 }
+  } elseif ($VersionNumber -ge 6500) {
+    return [pscustomobject]@{ PrivilegesRequired = 112; PrivilegesRequiredOverridesAllowed = 113 }
+  } elseif ($VersionNumber -ge 6400) {
+    return [pscustomobject]@{ PrivilegesRequired = 156; PrivilegesRequiredOverridesAllowed = 157 }
+  } elseif ($VersionNumber -ge 6000) {
+    return [pscustomobject]@{ PrivilegesRequired = 144; PrivilegesRequiredOverridesAllowed = 145 }
+  }
+
+  return $null
+}
+
+function Get-InnoPEInfo {
+  <#
+  .SYNOPSIS
+    Read basic PE architecture information from an installer executable
+  .PARAMETER Path
+    The path to the installer executable
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The path to the installer executable')]
+    [string]$Path
+  )
+
+  $Layout = Get-PELayout -Path $Path
+  if (-not $Layout) { throw 'The file does not contain a valid PE header.' }
+  $Architecture = switch ($Layout.Machine) {
+    0x014C { 'x86' }; 0x8664 { 'x64' }; 0xAA64 { 'arm64' }; 0x01C4 { 'arm' }
+    default { "unknown:0x$($Layout.Machine.ToString('X4'))" }
+  }
+  [pscustomobject]@{ Architecture = $Architecture; Is64Bit = $Layout.Machine -in 0x8664, 0xAA64; Machine = $Layout.Machine }
+}
+
+function Get-InnoHeaderArchitectureData {
+  <#
+  .SYNOPSIS
+    Read architecture directives from Inno Setup header strings when available
+  .PARAMETER HeaderValues
+    The parsed Inno Setup header strings
+  .PARAMETER VersionNumber
+    The numeric Inno Setup version
+  .PARAMETER PEInfo
+    The installer PE architecture information used for default directives
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The parsed Inno Setup header strings')]
+    [AllowEmptyString()]
+    [string[]]$HeaderValues,
+
+    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
+    [int]$VersionNumber,
+
+    [Parameter(Mandatory, HelpMessage = 'The installer PE architecture information used for default directives')]
+    [pscustomobject]$PEInfo
+  )
+
+  $ArchitecturesAllowed = $null
+  $ArchitecturesInstallIn64BitMode = $null
+
+  # Inno Setup 6.3+ stores architecture directives as header strings. Older
+  # versions keep packed enum sets in the fixed header tail, which is handled
+  # conservatively as unknown for now to avoid false unsupported results.
+  if ($VersionNumber -ge 6300 -and $HeaderValues.Count -gt 31) {
+    $ArchitecturesAllowed = $HeaderValues[30]
+    $ArchitecturesInstallIn64BitMode = $HeaderValues[31]
+  }
+
+  $EffectiveArchitecturesAllowed = if ([string]::IsNullOrWhiteSpace($ArchitecturesAllowed)) {
+    if ($PEInfo.Architecture -eq 'x64') { 'x64compatible' } else { 'x86compatible' }
+  } else {
+    $ArchitecturesAllowed
+  }
+
+  $EffectiveArchitecturesInstallIn64BitMode = if ([string]::IsNullOrWhiteSpace($ArchitecturesInstallIn64BitMode) -and $PEInfo.Architecture -eq 'x64') {
+    'x64compatible'
+  } else {
+    $ArchitecturesInstallIn64BitMode
+  }
+
+  return [pscustomobject]@{
+    ArchitecturesAllowed                     = $ArchitecturesAllowed
+    ArchitecturesInstallIn64BitMode          = $ArchitecturesInstallIn64BitMode
+    EffectiveArchitecturesAllowed            = $EffectiveArchitecturesAllowed
+    EffectiveArchitecturesInstallIn64BitMode = $EffectiveArchitecturesInstallIn64BitMode
+    IsKnown                                  = $VersionNumber -ge 6300
+  }
+}
+
+function ConvertTo-InnoArchitectureExpressionToken {
+  <#
+  .SYNOPSIS
+    Tokenize an Inno Setup architecture expression
+  .PARAMETER Expression
+    The ArchitecturesAllowed expression
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The ArchitecturesAllowed expression')]
+    [string]$Expression
+  )
+
+  $Tokens = @([regex]::Matches($Expression.ToLowerInvariant(), '\(|\)|\band\b|\bor\b|\bnot\b|[a-z0-9]+') | ForEach-Object { $_.Value })
+  if (-not $Tokens) { return @() }
+
+  $Normalized = [System.Collections.Generic.List[string]]::new()
+  $PreviousIsOperand = $false
+
+  foreach ($Token in $Tokens) {
+    $CurrentIsOperand = $Token -notin @('and', 'or', 'not', '(', ')')
+    if (($PreviousIsOperand -or ($Normalized.Count -gt 0 -and $Normalized[$Normalized.Count - 1] -eq ')')) -and ($CurrentIsOperand -or $Token -eq '(' -or $Token -eq 'not')) {
+      # A space-separated list is equivalent to a logical OR in Inno Setup.
+      $Normalized.Add('or')
+    }
+    $Normalized.Add($Token)
+    $PreviousIsOperand = $CurrentIsOperand
+  }
+
+  return $Normalized.ToArray()
+}
+
+function Test-InnoArchitectureIdentifier {
+  <#
+  .SYNOPSIS
+    Evaluate a single Inno Setup architecture identifier for a Windows architecture
+  .PARAMETER Identifier
+    The architecture identifier from the Inno expression
+  .PARAMETER Architecture
+    The target Windows architecture to test
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The architecture identifier from the Inno expression')]
+    [string]$Identifier,
+
+    [Parameter(Mandatory, HelpMessage = 'The target Windows architecture to test')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
+  )
+
+  switch ($Architecture) {
+    'x86' {
+      return $Identifier -in @('x86', 'x86os', 'x86compatible')
+    }
+    'x64' {
+      return $Identifier -in @('x64', 'x64os', 'x64compatible', 'win64', 'x86compatible')
+    }
+    'arm64' {
+      return $Identifier -in @('arm64', 'win64', 'x64compatible', 'x86compatible')
+    }
+  }
+}
+
+function Test-InnoArchitectureExpression {
+  <#
+  .SYNOPSIS
+    Evaluate whether an Inno Setup architecture expression supports a Windows architecture
+  .PARAMETER Expression
+    The ArchitecturesAllowed expression
+  .PARAMETER Architecture
+    The target Windows architecture to test
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The ArchitecturesAllowed expression')]
+    [string]$Expression,
+
+    [Parameter(Mandatory, HelpMessage = 'The target Windows architecture to test')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
+  )
+
+  $Tokens = ConvertTo-InnoArchitectureExpressionToken -Expression $Expression
+  if (-not $Tokens) { return $false }
+
+  $Precedence = @{
+    'or'  = 1
+    'and' = 2
+    'not' = 3
+  }
+  $Output = [System.Collections.Generic.List[string]]::new()
+  $Operators = [System.Collections.Generic.Stack[string]]::new()
+
+  foreach ($Token in $Tokens) {
+    if ($Token -notin @('and', 'or', 'not', '(', ')')) {
+      $Output.Add($Token)
+      continue
+    }
+
+    switch ($Token) {
+      '(' { $Operators.Push($Token) }
+      ')' {
+        while ($Operators.Count -gt 0 -and $Operators.Peek() -ne '(') {
+          $Output.Add($Operators.Pop())
+        }
+        if ($Operators.Count -gt 0 -and $Operators.Peek() -eq '(') { $Operators.Pop() | Out-Null }
+      }
+      default {
+        while (
+          $Operators.Count -gt 0 -and
+          $Operators.Peek() -ne '(' -and
+          $Precedence[$Operators.Peek()] -ge $Precedence[$Token]
+        ) {
+          $Output.Add($Operators.Pop())
+        }
+        $Operators.Push($Token)
+      }
+    }
+  }
+
+  while ($Operators.Count -gt 0) {
+    $Operator = $Operators.Pop()
+    if ($Operator -ne '(') { $Output.Add($Operator) }
+  }
+
+  $Values = [System.Collections.Generic.Stack[bool]]::new()
+  foreach ($Token in $Output) {
+    switch ($Token) {
+      'not' {
+        if ($Values.Count -lt 1) { return $false }
+        $Values.Push(-not $Values.Pop())
+      }
+      'and' {
+        if ($Values.Count -lt 2) { return $false }
+        $Right = $Values.Pop()
+        $Left = $Values.Pop()
+        $Values.Push($Left -and $Right)
+      }
+      'or' {
+        if ($Values.Count -lt 2) { return $false }
+        $Right = $Values.Pop()
+        $Left = $Values.Pop()
+        $Values.Push($Left -or $Right)
+      }
+      default {
+        $Values.Push((Test-InnoArchitectureIdentifier -Identifier $Token -Architecture $Architecture))
+      }
+    }
+  }
+
+  $Values.Count -gt 0 -and $Values.Pop()
+}
+
+function Resolve-InnoBooleanDirective {
+  <#
+  .SYNOPSIS
+    Resolve an Inno Setup yes/no directive with its implicit default
+  .PARAMETER Value
+    The serialized directive value from the setup header
+  .PARAMETER Default
+    The default value used by Inno Setup when the directive is omitted
+  #>
+  [OutputType([bool])]
+  param (
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$Value,
+
+    [Parameter(Mandatory, HelpMessage = 'The default value used by Inno Setup when the directive is omitted')]
+    [bool]$Default
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $Default }
+
+  switch -Regex ($Value.Trim()) {
+    '^(?i:yes|true|1)$' { return $true }
+    '^(?i:no|false|0)$' { return $false }
+    default { return $Default }
+  }
+}
+
+function Get-InnoAppsAndFeaturesEntryInfo {
+  <#
+  .SYNOPSIS
+    Determine whether Inno Setup should create its own Apps & Features registry entry
+  .PARAMETER HeaderValues
+    The parsed Inno Setup header strings
+  .PARAMETER VersionNumber
+    The numeric Inno Setup version
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The parsed Inno Setup header strings')]
+    [AllowEmptyString()]
+    [string[]]$HeaderValues,
+
+    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
+    [int]$VersionNumber
+  )
+
+  $CreateUninstallRegKey = if ($HeaderValues.Count -gt 24) { $HeaderValues[24] } else { $null }
+  $Uninstallable = if ($HeaderValues.Count -gt 25) { $HeaderValues[25] } else { $null }
+
+  # Inno writes an ARP entry only when the uninstall registry key is created
+  # and an uninstaller is registered. Both directives default to "yes".
+  $CreatesUninstallRegistryKey = Resolve-InnoBooleanDirective -Value $CreateUninstallRegKey -Default $true
+  $RegistersUninstaller = Resolve-InnoBooleanDirective -Value $Uninstallable -Default $true
+
+  return [pscustomobject]@{
+    WritesAppsAndFeaturesEntry  = $CreatesUninstallRegistryKey -and $RegistersUninstaller
+    CreateUninstallRegKey       = $CreateUninstallRegKey
+    Uninstallable               = $Uninstallable
+    CreatesUninstallRegistryKey = $CreatesUninstallRegistryKey
+    RegistersUninstaller        = $RegistersUninstaller
+    IsKnown                     = $VersionNumber -ge 5310 -or $HeaderValues.Count -gt 24
+  }
+}
+
+function Get-InnoUnsupportedArchitectureList {
+  <#
+  .SYNOPSIS
+    Get Windows architectures not supported by an Inno Setup architecture expression
+  .PARAMETER Expression
+    The effective ArchitecturesAllowed expression
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The effective ArchitecturesAllowed expression')]
+    [AllowEmptyString()]
+    [string]$Expression
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Expression)) { return @() }
+
+  @('x86', 'x64', 'arm64') | Where-Object {
+    -not (Test-InnoArchitectureExpression -Expression $Expression -Architecture $_)
+  }
+}
+
+function Get-InnoSupportedArchitectureList {
+  <#
+  .SYNOPSIS
+    Get Windows architectures supported by an Inno Setup architecture expression
+  .PARAMETER Expression
+    The effective ArchitecturesAllowed expression
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The effective ArchitecturesAllowed expression')]
+    [AllowEmptyString()]
+    [string]$Expression
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Expression)) { return @() }
+
+  @('x86', 'x64', 'arm64') | Where-Object {
+    Test-InnoArchitectureExpression -Expression $Expression -Architecture $_
+  }
+}
+
+function Read-InnoHeaderFixedData {
+  <#
+  .SYNOPSIS
+    Read selected fixed Inno Setup header fields from the decompressed header stream
+  .PARAMETER Bytes
+    The decompressed header stream bytes
+  .PARAMETER Layout
+    The supported Inno header layout
+  .PARAMETER VersionNumber
+    The numeric Inno Setup version
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The decompressed header stream bytes')]
+    [byte[]]$Bytes,
+
+    [Parameter(Mandatory, HelpMessage = 'The supported Inno header layout')]
+    [pscustomobject]$Layout,
+
+    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
+    [int]$VersionNumber
+  )
+
+  $Stream = [System.IO.MemoryStream]::new($Bytes, $false)
+  $Reader = [System.IO.BinaryReader]::new($Stream)
+
+  try {
+    switch ($Layout.StringEncoding) {
+      'Unicode' {
+        $null = Read-InnoReaderStrings -Reader $Reader -Count $Layout.HeaderStringCount -Encoding ([System.Text.Encoding]::Unicode)
+        $null = Read-InnoReaderStrings -Reader $Reader -Count $Layout.HeaderAnsiStringCount -Encoding (Get-InnoAnsiEncoding)
+      }
+      'Ansi' {
+        $AnsiCount = $Layout.HeaderStringCount + $Layout.HeaderAnsiStringCount
+        $null = Read-InnoReaderStrings -Reader $Reader -Count $AnsiCount -Encoding (Get-InnoAnsiEncoding)
+      }
+      default { throw "Unsupported Inno Setup header string encoding: $($Layout.StringEncoding)" }
+    }
+
+    $FixedTailOffset = $Reader.BaseStream.Position
+    $FieldOffset = Get-InnoHeaderFixedDataOffset -VersionNumber $VersionNumber
+    if (-not $FieldOffset) {
+      return [pscustomobject]@{
+        PrivilegesRequired                 = $null
+        PrivilegesRequiredOverridesAllowed = @()
+        SupportsPrivilegeOverride          = $false
+        SupportsCommandLineScopeOverride   = $false
+      }
+    }
+
+    if ($FixedTailOffset + $FieldOffset.PrivilegesRequiredOverridesAllowed -ge $Reader.BaseStream.Length) {
+      throw 'The Inno Setup fixed header is truncated'
+    }
+
+    $Reader.BaseStream.Seek($FixedTailOffset + $FieldOffset.PrivilegesRequired, 'Begin') | Out-Null
+    $PrivilegesRequiredValue = $Reader.ReadByte()
+    $PrivilegesRequired = switch ($PrivilegesRequiredValue) {
+      0 { 'none' }
+      1 { 'poweruser' }
+      2 { 'admin' }
+      3 { 'lowest' }
+      default { "unknown:$PrivilegesRequiredValue" }
+    }
+
+    $Reader.BaseStream.Seek($FixedTailOffset + $FieldOffset.PrivilegesRequiredOverridesAllowed, 'Begin') | Out-Null
+    $OverridesValue = $Reader.ReadByte()
+    $Overrides = @()
+    if (($OverridesValue -band 0x01) -ne 0) { $Overrides += 'commandline' }
+    if (($OverridesValue -band 0x02) -ne 0) { $Overrides += 'dialog' }
+
+    return [pscustomobject]@{
+      PrivilegesRequired                 = $PrivilegesRequired
+      PrivilegesRequiredOverridesAllowed = $Overrides
+      SupportsPrivilegeOverride          = [bool]$Overrides
+      SupportsCommandLineScopeOverride   = $Overrides -contains 'commandline'
+    }
+  } finally {
+    $Reader.Close()
+    $Stream.Close()
+  }
+}
+
+function Convert-InnoPrivilegeToScope {
+  <#
+  .SYNOPSIS
+    Convert an Inno Setup PrivilegesRequired value to its default install scope
+  .PARAMETER PrivilegesRequired
+    The parsed PrivilegesRequired value
+  #>
+  [OutputType([string])]
+  param (
+    [AllowNull()]
+    [string]$PrivilegesRequired
+  )
+
+  switch ($PrivilegesRequired) {
+    'none' { 'user' }
+    'lowest' { 'user' }
+    'poweruser' { 'machine' }
+    'admin' { 'machine' }
+    default { $null }
+  }
+}
+
 function Resolve-InnoDefaultDirectory {
   <#
   .SYNOPSIS
@@ -874,10 +1251,14 @@ function Get-InnoInfo {
     $SignatureMatch = [regex]::Match($Signature, $Script:INNO_SIGNATURE_PATTERN)
     if (-not $SignatureMatch.Success) { throw 'The file is not a supported Inno Setup installer' }
 
+    $PEInfo = Get-InnoPEInfo -Path $InstallerPath
     $VersionNumber = Get-InnoVersionNumber -Version $SignatureMatch.Groups[1].Value
     $Layout = Get-InnoLayout -VersionNumber $VersionNumber -UnicodeVariant ([bool]$SignatureMatch.Groups[2].Success)
     $HeaderBytes = Get-InnoHeaderBlock -Path $InstallerPath -Offset0 $OffsetTable.Offset0 -Layout $Layout -VersionNumber $VersionNumber
     $HeaderValues = Read-InnoHeaderStrings -Bytes $HeaderBytes -Layout $Layout
+    $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBytes -Layout $Layout -VersionNumber $VersionNumber
+    $HeaderArchitectureData = Get-InnoHeaderArchitectureData -HeaderValues $HeaderValues -VersionNumber $VersionNumber -PEInfo $PEInfo
+    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -VersionNumber $VersionNumber
 
     $AppName = $HeaderValues[0]
     $AppVerName = $HeaderValues[1]
@@ -910,6 +1291,14 @@ function Get-InnoInfo {
     } else {
       $null
     }
+    $DefaultScope = Convert-InnoPrivilegeToScope -PrivilegesRequired $HeaderFixedData.PrivilegesRequired
+    $SupportedScopes = if ($HeaderFixedData.SupportsCommandLineScopeOverride -and $DefaultScope) {
+      @('user', 'machine')
+    } elseif ($DefaultScope) {
+      @($DefaultScope)
+    } else {
+      @()
+    }
 
     return [pscustomobject]@{
       Path                   = $InstallerPath
@@ -920,6 +1309,24 @@ function Get-InnoInfo {
       ProductCode            = $AppId
       DefaultInstallLocation = $ResolvedDefaultDirName
       Scope                  = $Scope
+      DefaultScope           = $DefaultScope
+      SupportedScopes        = $SupportedScopes
+      SupportsDualScope      = $SupportedScopes.Count -gt 1
+      PrivilegesRequired     = $HeaderFixedData.PrivilegesRequired
+      PrivilegesRequiredOverridesAllowed = $HeaderFixedData.PrivilegesRequiredOverridesAllowed
+      SupportsCommandLineScopeOverride = $HeaderFixedData.SupportsCommandLineScopeOverride
+      WritesAppsAndFeaturesEntry = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry
+      CreateUninstallRegKey = $AppsAndFeaturesEntryInfo.CreateUninstallRegKey
+      Uninstallable = $AppsAndFeaturesEntryInfo.Uninstallable
+      CreatesUninstallRegistryKey = $AppsAndFeaturesEntryInfo.CreatesUninstallRegistryKey
+      RegistersUninstaller = $AppsAndFeaturesEntryInfo.RegistersUninstaller
+      ArchitecturesAllowed = $HeaderArchitectureData.ArchitecturesAllowed
+      ArchitecturesInstallIn64BitMode = $HeaderArchitectureData.ArchitecturesInstallIn64BitMode
+      EffectiveArchitecturesAllowed = $HeaderArchitectureData.EffectiveArchitecturesAllowed
+      EffectiveArchitecturesInstallIn64BitMode = $HeaderArchitectureData.EffectiveArchitecturesInstallIn64BitMode
+      SupportedArchitectures = if ($HeaderArchitectureData.IsKnown) { Get-InnoSupportedArchitectureList -Expression $HeaderArchitectureData.EffectiveArchitecturesAllowed } else { @() }
+      UnsupportedArchitectures = if ($HeaderArchitectureData.IsKnown) { Get-InnoUnsupportedArchitectureList -Expression $HeaderArchitectureData.EffectiveArchitecturesAllowed } else { @() }
+      InstallerArchitecture = $PEInfo.Architecture
       AppName                = $AppName
       AppVerName             = $AppVerName
       AppVersion             = $AppVersion
@@ -1301,20 +1708,7 @@ function Resolve-InnoExtractionPath {
     [string]$RelativePath
   )
 
-  $DestinationPath = [System.IO.Path]::GetFullPath((Get-Item -Path $DestinationPath -Force).FullName)
-  $RelativePath = $RelativePath -replace '/', '\'
-  $RelativePath = $RelativePath.TrimStart('\')
-
-  if ([System.IO.Path]::IsPathRooted($RelativePath)) { throw 'Inno Setup extraction does not allow rooted payload paths' }
-
-  $TargetPath = [System.IO.Path]::GetFullPath((Join-Path $DestinationPath $RelativePath))
-  $DestinationPrefix = if ($DestinationPath.EndsWith('\')) { $DestinationPath } else { "${DestinationPath}\" }
-
-  if (-not $TargetPath.StartsWith($DestinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Inno Setup extraction blocked a path traversal attempt: $RelativePath"
-  }
-
-  return $TargetPath
+  return Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
 }
 
 function Resolve-InnoVersion5FileMatch {
@@ -1628,6 +2022,66 @@ function Get-InnoVersion5FileBytes {
   }
 }
 
+function Read-UnsupportedArchitecturesFromInno {
+  <#
+  .SYNOPSIS
+    Read Windows architectures that an Inno Setup installer does not support
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).UnsupportedArchitectures
+  }
+}
+
+function Test-InnoUnsupportedArchitecture {
+  <#
+  .SYNOPSIS
+    Test whether an Inno Setup installer does not support a Windows architecture
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  .PARAMETER Architecture
+    The Windows architecture to test
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path,
+
+    [Parameter(Mandatory, HelpMessage = 'The Windows architecture to test')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).UnsupportedArchitectures -contains $Architecture
+  }
+}
+
+function Test-InnoAppsAndFeaturesEntry {
+  <#
+  .SYNOPSIS
+    Test whether an Inno Setup installer writes its own Apps & Features registry entry
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).WritesAppsAndFeaturesEntry
+  }
+}
+
 function Expand-InnoInstaller {
   <#
   .SYNOPSIS
@@ -1749,4 +2203,4 @@ function Expand-InnoInstaller {
   }
 }
 
-Export-ModuleMember -Function Get-InnoInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Expand-InnoInstaller
+Export-ModuleMember -Function Get-InnoInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Read-UnsupportedArchitecturesFromInno, Test-InnoUnsupportedArchitecture, Test-InnoAppsAndFeaturesEntry, Expand-InnoInstaller
