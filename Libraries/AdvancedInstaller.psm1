@@ -14,6 +14,7 @@ $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET = 60
 $ADVANCED_INSTALLER_MINIMUM_FOOTER_SIZE = $ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET + $ADVANCED_INSTALLER_MAGIC.Length
 $ADVANCED_INSTALLER_FILE_ENTRY_SIZE = 24
 $ADVANCED_INSTALLER_XOR_HEADER_SIZE = 512
+$ADVANCED_INSTALLER_MAXIMUM_CONFIGURATION_SIZE = 4194304
 
 function Get-AdvancedInstallerAssembly {
   <#
@@ -446,6 +447,248 @@ function New-AdvancedInstallerTempFolder {
   return $Path
 }
 
+function Read-AdvancedInstallerEntryData {
+  <#
+  .SYNOPSIS
+    Read and decode one bounded Advanced Installer payload entry
+  .PARAMETER Stream
+    The open installer stream
+  .PARAMETER Entry
+    The parsed payload-table entry
+  .PARAMETER MaximumBytes
+    The maximum accepted payload size
+  #>
+  [OutputType([byte[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The open installer stream')]
+    [System.IO.Stream]$Stream,
+
+    [Parameter(Mandatory, HelpMessage = 'The parsed payload-table entry')]
+    [psobject]$Entry,
+
+    [Parameter(Mandatory, HelpMessage = 'The maximum accepted payload size')]
+    [long]$MaximumBytes
+  )
+
+  if ($Entry.Size -lt 0 -or $Entry.Size -gt $MaximumBytes -or $Entry.Size -gt [int]::MaxValue) {
+    throw "The Advanced Installer payload '$($Entry.Name)' exceeds the bounded read limit"
+  }
+
+  $Bytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $Entry.Offset -Length ([int]$Entry.Size)
+  $DecodedHeaderLength = [int][Math]::Min([long]$Entry.XorLength, [long]$Bytes.Length)
+  for ($Index = 0; $Index -lt $DecodedHeaderLength; $Index++) {
+    $Bytes[$Index] = $Bytes[$Index] -bxor 0xFF
+  }
+  return ,$Bytes
+}
+
+function ConvertFrom-AdvancedInstallerIniData {
+  <#
+  .SYNOPSIS
+    Parse an embedded Advanced Installer INI payload without executing the bootstrapper
+  .PARAMETER Bytes
+    The decoded INI bytes
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The decoded INI bytes')]
+    [byte[]]$Bytes
+  )
+
+  if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+    $Text = [System.Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
+  } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+    $Text = [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
+  } elseif ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+    $Text = [System.Text.Encoding]::UTF8.GetString($Bytes, 3, $Bytes.Length - 3)
+  } else {
+    # Advanced Installer normally emits UTF-16LE configuration. Retain support for older ANSI/UTF-8 stubs.
+    $LooksUtf16 = $Bytes.Length -ge 4 -and $Bytes[1] -eq 0 -and $Bytes[3] -eq 0
+    $Text = $LooksUtf16 ? [System.Text.Encoding]::Unicode.GetString($Bytes) : [System.Text.Encoding]::UTF8.GetString($Bytes)
+  }
+
+  $Sections = [ordered]@{}
+  $CurrentSection = $null
+  foreach ($Line in @($Text.TrimStart([char]0xFEFF) -split "\r\n|\n|\r")) {
+    $TrimmedLine = $Line.Trim()
+    if ([string]::IsNullOrWhiteSpace($TrimmedLine) -or $TrimmedLine.StartsWith(';') -or $TrimmedLine.StartsWith('#')) { continue }
+
+    if ($TrimmedLine -match '^\[(?<Name>[^\]]+)\]$') {
+      $CurrentSection = $Matches.Name.Trim()
+      if (-not $Sections.Contains($CurrentSection)) { $Sections[$CurrentSection] = [ordered]@{} }
+      continue
+    }
+
+    if ($null -eq $CurrentSection -or $TrimmedLine -notmatch '^(?<Name>[^=]+?)=(?<Value>.*)$') { continue }
+    $Sections[$CurrentSection][$Matches.Name.Trim()] = $Matches.Value.Trim()
+  }
+
+  $Result = [ordered]@{}
+  foreach ($SectionName in $Sections.Keys) {
+    $Result[$SectionName] = [pscustomobject]$Sections[$SectionName]
+  }
+  return [pscustomobject]$Result
+}
+
+function Get-AdvancedInstallerSettingValue {
+  <#
+  .SYNOPSIS
+    Read a named value from a parsed Advanced Installer INI section
+  .PARAMETER Section
+    The parsed INI section
+  .PARAMETER Name
+    The setting name
+  #>
+  param (
+    [AllowNull()]
+    [psobject]$Section,
+
+    [Parameter(Mandatory, HelpMessage = 'The setting name')]
+    [string]$Name
+  )
+
+  if ($null -eq $Section) { return $null }
+  $Property = $Section.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+  return $null -eq $Property ? $null : $Property.Value
+}
+
+function Add-AdvancedInstallerArchitectureSuffix {
+  <#
+  .SYNOPSIS
+    Insert the architecture suffix used by mixed Advanced Installer packages
+  .PARAMETER Path
+    The base MSI path
+  .PARAMETER Suffix
+    The suffix inserted immediately before the extension
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The base MSI path')]
+    [string]$Path,
+
+    [Parameter(Mandatory, HelpMessage = 'The suffix inserted immediately before the extension')]
+    [string]$Suffix
+  )
+
+  $Extension = [System.IO.Path]::GetExtension($Path)
+  if ([string]::IsNullOrWhiteSpace($Extension)) { return "$Path$Suffix" }
+  return $Path.Substring(0, $Path.Length - $Extension.Length) + $Suffix + $Extension
+}
+
+function Add-AdvancedInstallerUrlArchitectureSuffix {
+  <#
+  .SYNOPSIS
+    Insert an architecture suffix into a download URL while retaining its query and fragment
+  .PARAMETER Url
+    The configured main application URL
+  .PARAMETER Suffix
+    The suffix inserted immediately before the path extension
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The configured main application URL')]
+    [string]$Url,
+
+    [Parameter(Mandatory, HelpMessage = 'The suffix inserted immediately before the path extension')]
+    [string]$Suffix
+  )
+
+  $SuffixStart = $Url.Length
+  foreach ($Delimiter in @('?', '#')) {
+    $DelimiterIndex = $Url.IndexOf($Delimiter, [System.StringComparison]::Ordinal)
+    if ($DelimiterIndex -ge 0 -and $DelimiterIndex -lt $SuffixStart) { $SuffixStart = $DelimiterIndex }
+  }
+
+  $PathPart = $Url.Substring(0, $SuffixStart)
+  $Tail = $Url.Substring($SuffixStart)
+  return (Add-AdvancedInstallerArchitectureSuffix -Path $PathPart -Suffix $Suffix) + $Tail
+}
+
+function Get-AdvancedInstallerMsiPayloadSelection {
+  <#
+  .SYNOPSIS
+    Reproduce the bootstrapper's main MSI path selection from payload-table and INI metadata
+  .PARAMETER File
+    The parsed payload-table entries
+  .PARAMETER GeneralOptions
+    The parsed GeneralOptions INI section
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The parsed payload-table entries')]
+    [object[]]$File,
+
+    [AllowNull()]
+    [psobject]$GeneralOptions
+  )
+
+  $MainAppUrl = [string](Get-AdvancedInstallerSettingValue -Section $GeneralOptions -Name 'MainAppURL')
+  $AllPlatformsValue = [string](Get-AdvancedInstallerSettingValue -Section $GeneralOptions -Name 'AllPlatforms')
+  $AllPlatforms = $AllPlatformsValue -match '^(?i:true|yes|1)$'
+
+  # MainAppURL is checked before the embedded branch by the SFX. Do not silently
+  # substitute an embedded MSI when the runtime would download a different payload.
+  if (-not [string]::IsNullOrWhiteSpace($MainAppUrl)) {
+    $PlatformMainAppUrl = $AllPlatforms ? (Add-AdvancedInstallerUrlArchitectureSuffix -Url $MainAppUrl -Suffix '.x64') : $MainAppUrl
+    return [pscustomobject]@{
+      SelectionMethod          = 'MainAppUrl'
+      ArchitectureSelectionMode = $AllPlatforms ? 'Wow64Suffix' : 'FixedPath'
+      SourceEntryName          = $null
+      SourceEntryIndex         = $null
+      SourceKind               = 'Download'
+      BaseMsiPath              = $null
+      X86MsiPath               = $null
+      X64MsiPath               = $null
+      Arm64MsiPath             = $null
+      AllPlatforms             = $AllPlatforms
+      MainAppUrl               = $MainAppUrl
+      X86MainAppUrl            = $MainAppUrl
+      X64MainAppUrl            = $PlatformMainAppUrl
+      Arm64MainAppUrl          = $PlatformMainAppUrl
+    }
+  }
+
+  # The SFX first resolves selector (1, 0) for a direct MSI or selector (3, 7) for
+  # a compressed main package. For the archive form it replaces the archive extension with .msi.
+  $DirectEntry = $File | Where-Object {
+    $_.SelectorType -eq 1 -and $_.SelectorGroup -eq 0 -and [System.IO.Path]::GetExtension($_.Name) -ieq '.msi'
+  } | Select-Object -First 1
+  $ArchiveEntry = $File | Where-Object {
+    $_.SelectorType -eq 3 -and $_.SelectorGroup -eq 7
+  } | Select-Object -First 1
+
+  $SourceEntry = $DirectEntry ?? $ArchiveEntry
+  $BaseMsiPath = if ($DirectEntry) {
+    $DirectEntry.Name
+  } elseif ($ArchiveEntry) {
+    [System.IO.Path]::ChangeExtension($ArchiveEntry.Name, '.msi')
+  } else {
+    $null
+  }
+
+  if ([string]::IsNullOrWhiteSpace($BaseMsiPath)) { return $null }
+  $PlatformMsiPath = $AllPlatforms ? (Add-AdvancedInstallerArchitectureSuffix -Path $BaseMsiPath -Suffix '.x64') : $BaseMsiPath
+
+  return [pscustomobject]@{
+    SelectionMethod           = 'PayloadTable'
+    ArchitectureSelectionMode = $AllPlatforms ? 'Wow64Suffix' : 'FixedPath'
+    SourceEntryName           = $SourceEntry.Name
+    SourceEntryIndex          = $SourceEntry.Index
+    SourceKind                = $DirectEntry ? 'EmbeddedMsi' : 'EmbeddedArchive'
+    BaseMsiPath               = $BaseMsiPath
+    X86MsiPath                = $BaseMsiPath
+    X64MsiPath                = $PlatformMsiPath
+    # AllPlatforms uses IsWow64Process, so an x86 stub under ARM64 follows the .x64 path.
+    # A fixed-path bootstrapper always selects its base MSI; MSI metadata validates compatibility.
+    Arm64MsiPath              = $PlatformMsiPath
+    AllPlatforms              = $AllPlatforms
+    MainAppUrl                = [string]::IsNullOrWhiteSpace($MainAppUrl) ? $null : $MainAppUrl
+    X86MainAppUrl             = $null
+    X64MainAppUrl             = $null
+    Arm64MainAppUrl           = $null
+  }
+}
+
 function Get-AdvancedInstallerInfo {
   <#
   .SYNOPSIS
@@ -485,6 +728,9 @@ function Get-AdvancedInstallerInfo {
         $EntryBytes = $Reader.ReadBytes($Script:ADVANCED_INSTALLER_FILE_ENTRY_SIZE)
         if ($EntryBytes.Length -ne $Script:ADVANCED_INSTALLER_FILE_ENTRY_SIZE) { throw 'The Advanced Installer file table is truncated' }
 
+        # The first two fields are the selector tuple used by the SFX before it resolves a payload name.
+        $SelectorType = [System.BitConverter]::ToUInt32($EntryBytes, 0)
+        $SelectorGroup = [System.BitConverter]::ToUInt32($EntryBytes, 4)
         $XorFlag = [System.BitConverter]::ToUInt32($EntryBytes, 8)
         $EntrySize = [System.BitConverter]::ToUInt32($EntryBytes, 12)
         $EntryOffset = [System.BitConverter]::ToUInt32($EntryBytes, 16)
@@ -497,20 +743,41 @@ function Get-AdvancedInstallerInfo {
         $Name = if ($NameLength -eq 0) { "unnamed_file_${Index}.bin" } else { [System.Text.Encoding]::Unicode.GetString($NameBytes).TrimEnd([char]0) }
 
         $Files.Add([pscustomobject]@{
-            Name      = $Name
-            Size      = [long]$EntrySize
-            Offset    = [long]$EntryOffset
-            XorLength = $XorFlag -eq 2 ? $Script:ADVANCED_INSTALLER_XOR_HEADER_SIZE : 0
+            Index         = $Index
+            Name          = $Name
+            Size          = [long]$EntrySize
+            Offset        = [long]$EntryOffset
+            SelectorType  = [int]$SelectorType
+            SelectorGroup = [int]$SelectorGroup
+            EncodingFlag  = [int]$XorFlag
+            XorLength     = $XorFlag -eq 2 ? $Script:ADVANCED_INSTALLER_XOR_HEADER_SIZE : 0
           })
       }
 
+      $ConfigurationEntry = $Files | Where-Object {
+        $_.SelectorType -eq 0 -and $_.SelectorGroup -eq 3 -and [System.IO.Path]::GetExtension($_.Name) -ieq '.ini'
+      } | Select-Object -First 1
+      $Configuration = if ($ConfigurationEntry) {
+        $ConfigurationBytes = Read-AdvancedInstallerEntryData -Stream $Stream -Entry $ConfigurationEntry -MaximumBytes $Script:ADVANCED_INSTALLER_MAXIMUM_CONFIGURATION_SIZE
+        ConvertFrom-AdvancedInstallerIniData -Bytes $ConfigurationBytes
+      } else {
+        $null
+      }
+      $GeneralOptionsProperty = $null -eq $Configuration ? $null : $Configuration.PSObject.Properties['GeneralOptions']
+      $GeneralOptions = $null -eq $GeneralOptionsProperty ? $null : $GeneralOptionsProperty.Value
+      $MsiPayloadSelection = Get-AdvancedInstallerMsiPayloadSelection -File $Files.ToArray() -GeneralOptions $GeneralOptions
+
       return [pscustomobject]@{
-        InstallerType = 'AdvancedInstaller'
-        Path          = $InstallerPath
-        FooterOffset  = [long]$FooterOffset
-        FileOffset    = [long]$FileOffset
-        FileCount     = [int]$FileCount
-        Files         = $Files
+        InstallerType       = 'AdvancedInstaller'
+        Path                = $InstallerPath
+        FooterOffset        = [long]$FooterOffset
+        FileOffset          = [long]$FileOffset
+        FileCount           = [int]$FileCount
+        Files               = $Files
+        ConfigurationEntry  = $null -eq $ConfigurationEntry ? $null : $ConfigurationEntry.Name
+        Configuration       = $Configuration
+        GeneralOptions      = $GeneralOptions
+        MsiPayloadSelection = $MsiPayloadSelection
       }
     } finally {
       $Reader.Close()
@@ -571,6 +838,82 @@ function Expand-AdvancedInstaller {
   }
 }
 
+function Resolve-AdvancedInstallerMsiFile {
+  <#
+  .SYNOPSIS
+    Resolve the MSI path that the Advanced Installer bootstrapper would launch
+  .PARAMETER Installer
+    The parsed Advanced Installer metadata object
+  .PARAMETER Item
+    The extracted MSI candidates
+  .PARAMETER ExtractionPath
+    The extraction root used to calculate payload-relative paths
+  .PARAMETER Pattern
+    The optional MSI file name or wildcard constraint
+  .PARAMETER Architecture
+    The target host architecture whose bootstrapper path should be reproduced
+  .PARAMETER NameWasSpecified
+    Whether the caller explicitly supplied the pattern
+  #>
+  [OutputType([System.IO.FileInfo])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The parsed Advanced Installer metadata object')]
+    [psobject]$Installer,
+
+    [Parameter(Mandatory, HelpMessage = 'The extracted MSI candidates')]
+    [System.IO.FileInfo[]]$Item,
+
+    [Parameter(Mandatory, HelpMessage = 'The extraction root used to calculate payload-relative paths')]
+    [string]$ExtractionPath,
+
+    [Parameter(Mandatory, HelpMessage = 'The optional MSI file name or wildcard constraint')]
+    [string]$Pattern,
+
+    [string]$Architecture,
+
+    [bool]$NameWasSpecified
+  )
+
+  $SelectionProperty = $Installer.PSObject.Properties['MsiPayloadSelection']
+  $Selection = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value
+  if ($Selection -and $Selection.SourceKind -eq 'Download') {
+    throw "Advanced Installer obtains its main payload from MainAppURL '$($Selection.MainAppUrl)'; no embedded MSI represents the runtime selection"
+  }
+
+  $Candidates = @($Item | Where-Object {
+      $_.Name -like $Pattern -or $_.FullName -like $Pattern -or ([System.IO.Path]::GetRelativePath($ExtractionPath, $_.FullName)) -like $Pattern
+    })
+  if (-not $Candidates) { throw "No Advanced Installer MSI matched the pattern: $Pattern" }
+
+  $SelectedRelativePath = if ($Selection -and $Architecture) {
+    $ArchitecturePropertyName = "$($Architecture.Substring(0, 1).ToUpperInvariant())$($Architecture.Substring(1))MsiPath"
+    $ArchitecturePathProperty = $Selection.PSObject.Properties[$ArchitecturePropertyName]
+    if ($null -eq $ArchitecturePathProperty -or [string]::IsNullOrWhiteSpace([string]$ArchitecturePathProperty.Value)) {
+      throw "The Advanced Installer payload metadata does not define an MSI path for '$Architecture'"
+    }
+    [string]$ArchitecturePathProperty.Value
+  } elseif ($Selection -and -not $Selection.AllPlatforms) {
+    [string]$Selection.BaseMsiPath
+  } elseif ($Selection -and $NameWasSpecified -and $Candidates.Count -eq 1) {
+    return $Candidates[0]
+  } elseif ($Selection -and $Selection.AllPlatforms) {
+    throw 'This Advanced Installer bootstrapper selects different MSI paths by host architecture; specify -Architecture'
+  } else {
+    $null
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($SelectedRelativePath)) {
+    $Selected = @($Candidates | Where-Object {
+        [System.IO.Path]::GetRelativePath($ExtractionPath, $_.FullName).Equals($SelectedRelativePath, [System.StringComparison]::OrdinalIgnoreCase)
+      })
+    if ($Selected.Count -eq 1) { return $Selected[0] }
+    if ($Selected.Count -gt 1) { throw "Multiple extracted MSI files have the bootstrapper-selected path: $SelectedRelativePath" }
+    throw "The bootstrapper-selected MSI path was not extracted: $SelectedRelativePath"
+  }
+
+  return Resolve-AdvancedInstallerMatch -Item $Candidates -Pattern $Pattern
+}
+
 function Get-AdvancedInstallerMsiInfo {
   <#
   .SYNOPSIS
@@ -581,6 +924,8 @@ function Get-AdvancedInstallerMsiInfo {
     The parsed Advanced Installer metadata object
   .PARAMETER Name
     The MSI file name or wildcard pattern to locate after extraction
+  .PARAMETER Architecture
+    The target host architecture used to reproduce the bootstrapper's MSI path selection
   #>
   [OutputType([pscustomobject])]
   param (
@@ -591,10 +936,15 @@ function Get-AdvancedInstallerMsiInfo {
     [psobject]$Installer,
 
     [Parameter(HelpMessage = 'The MSI file name or wildcard pattern to locate after extraction')]
-    [string]$Name = '*.msi'
+    [string]$Name = '*.msi',
+
+    [Parameter(HelpMessage = "The target host architecture used to reproduce the bootstrapper's MSI path selection")]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
+    $NameWasSpecified = $PSBoundParameters.ContainsKey('Name')
     $Installer = switch ($PSCmdlet.ParameterSetName) {
       'Path' { Get-AdvancedInstallerInfo -Path $Path }
       'Installer' { $Installer }
@@ -605,19 +955,40 @@ function Get-AdvancedInstallerMsiInfo {
 
     try {
       Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
-      $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File)
-      $MsiFile = Resolve-AdvancedInstallerMatch -Item $MsiFiles -Pattern $Name
-      $AssociationInfo = Get-MsiAssociationInfo -Path $MsiFile.FullName
+      $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File | Sort-Object -Property FullName)
+      $MsiFile = Resolve-AdvancedInstallerMsiFile -Installer $Installer -Item $MsiFiles -ExtractionPath $ExpandedPath -Pattern $Name -Architecture $Architecture -NameWasSpecified $NameWasSpecified
+      $MsiInfo = Get-MsiInstallerInfo -Path $MsiFile.FullName
+
+      # MSI metadata validates the already selected payload; it is not used as the selector.
+      if ($Architecture -and $MsiInfo.PackageArchitecture -cne $Architecture) {
+        throw "Advanced Installer selected '$($MsiFile.Name)' for '$Architecture', but the MSI package architecture is '$($MsiInfo.PackageArchitecture)'"
+      }
+
+      $SelectionProperty = $Installer.PSObject.Properties['MsiPayloadSelection']
+      $SelectionMethod = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.SelectionMethod
+      $ArchitectureSelectionMode = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.ArchitectureSelectionMode
 
       return [pscustomobject]@{
-        Name           = $MsiFile.Name
-        Path           = $MsiFile.FullName
-        ProductVersion = $MsiFile.FullName | Read-ProductVersionFromMsi
-        ProductCode    = $MsiFile.FullName | Read-ProductCodeFromMsi
-        UpgradeCode    = $MsiFile.FullName | Read-UpgradeCodeFromMsi
-        Protocols      = $AssociationInfo.Protocols
-        FileExtensions = $AssociationInfo.FileExtensions
-        RegistryAssociationInfo = $AssociationInfo
+        Name                         = $MsiFile.Name
+        Path                         = $MsiFile.FullName
+        PackageArchitecture          = $MsiInfo.PackageArchitecture
+        Template                     = $MsiInfo.Template
+        ProductName                  = $MsiInfo.ProductName
+        ProductVersion               = $MsiInfo.ProductVersion
+        Publisher                    = $MsiInfo.Publisher
+        ProductCode                  = $MsiInfo.ProductCode
+        UpgradeCode                  = $MsiInfo.UpgradeCode
+        InstallerBuilder             = $MsiInfo.InstallerBuilder
+        InstallLocationProperty      = $MsiInfo.InstallLocationProperty
+        InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
+        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
+        Protocols                    = $MsiInfo.Protocols
+        FileExtensions               = $MsiInfo.FileExtensions
+        RegistryAssociationInfo      = $MsiInfo.RegistryAssociationInfo
+        SelectionMethod              = $SelectionMethod
+        ArchitectureSelectionMode    = $ArchitectureSelectionMode
+        SelectedMsiPath              = [System.IO.Path]::GetRelativePath($ExpandedPath, $MsiFile.FullName)
       }
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction 'Continue' -ProgressAction 'SilentlyContinue'
@@ -635,6 +1006,8 @@ function Read-ProductVersionFromAdvancedInstaller {
     The parsed Advanced Installer metadata object
   .PARAMETER Name
     The MSI file name or wildcard pattern to locate after extraction
+  .PARAMETER Architecture
+    The target host architecture used to reproduce the bootstrapper's MSI path selection
   #>
   [OutputType([string])]
   param (
@@ -645,7 +1018,11 @@ function Read-ProductVersionFromAdvancedInstaller {
     [psobject]$Installer,
 
     [Parameter(HelpMessage = 'The MSI file name or wildcard pattern to locate after extraction')]
-    [string]$Name = '*.msi'
+    [string]$Name = '*.msi',
+
+    [Parameter(HelpMessage = "The target host architecture used to reproduce the bootstrapper's MSI path selection")]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
@@ -663,6 +1040,8 @@ function Read-ProductCodeFromAdvancedInstaller {
     The parsed Advanced Installer metadata object
   .PARAMETER Name
     The MSI file name or wildcard pattern to locate after extraction
+  .PARAMETER Architecture
+    The target host architecture used to reproduce the bootstrapper's MSI path selection
   #>
   [OutputType([string])]
   param (
@@ -673,7 +1052,11 @@ function Read-ProductCodeFromAdvancedInstaller {
     [psobject]$Installer,
 
     [Parameter(HelpMessage = 'The MSI file name or wildcard pattern to locate after extraction')]
-    [string]$Name = '*.msi'
+    [string]$Name = '*.msi',
+
+    [Parameter(HelpMessage = "The target host architecture used to reproduce the bootstrapper's MSI path selection")]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
@@ -691,6 +1074,8 @@ function Read-UpgradeCodeFromAdvancedInstaller {
     The parsed Advanced Installer metadata object
   .PARAMETER Name
     The MSI file name or wildcard pattern to locate after extraction
+  .PARAMETER Architecture
+    The target host architecture used to reproduce the bootstrapper's MSI path selection
   #>
   [OutputType([string])]
   param (
@@ -701,7 +1086,11 @@ function Read-UpgradeCodeFromAdvancedInstaller {
     [psobject]$Installer,
 
     [Parameter(HelpMessage = 'The MSI file name or wildcard pattern to locate after extraction')]
-    [string]$Name = '*.msi'
+    [string]$Name = '*.msi',
+
+    [Parameter(HelpMessage = "The target host architecture used to reproduce the bootstrapper's MSI path selection")]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {

@@ -92,12 +92,91 @@ Describe 'Advanced Installer parser' {
   It 'Should read nested 7z MSI metadata from the TeraCopy installer' {
     $Fixture = Get-InstallerFixture -Name 'teracopy3.9.exe' -Url 'https://codesector.com/files/teracopy3.9.exe'
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
-    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -Name 'TeraCopy.msi'
+    $X86Info = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x86
+    $X64Info = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x64
 
     $Info.InstallerType | Should -Be 'AdvancedInstaller'
     $Info.Files.Name | Should -Contain '5DE3EEA\TeraCopy.7z'
-    $MsiInfo.ProductVersion | Should -Be '3.9.0'
-    $MsiInfo.ProductCode | Should -Be '{F8B0BB18-B1E6-4821-8C5B-883AA5DE3EEA}'
+    $Info.Files.Where({ $_.Name -eq '5DE3EEA\TeraCopy.7z' })[0].SelectorType | Should -Be 3
+    $Info.Files.Where({ $_.Name -eq '5DE3EEA\TeraCopy.7z' })[0].SelectorGroup | Should -Be 7
+    $Info.ConfigurationEntry | Should -Be 'teracopy3.9.0.ini'
+    $Info.GeneralOptions.AllPlatforms | Should -Be 'true'
+    $Info.MsiPayloadSelection.SourceKind | Should -Be 'EmbeddedArchive'
+    $Info.MsiPayloadSelection.ArchitectureSelectionMode | Should -Be 'Wow64Suffix'
+    $Info.MsiPayloadSelection.BaseMsiPath | Should -Be '5DE3EEA\TeraCopy.msi'
+    $Info.MsiPayloadSelection.X64MsiPath | Should -Be '5DE3EEA\TeraCopy.x64.msi'
+    $X86Info.Name | Should -Be 'TeraCopy.msi'
+    $X86Info.SelectedMsiPath | Should -Be '5DE3EEA\TeraCopy.msi'
+    $X86Info.SelectionMethod | Should -Be 'PayloadTable'
+    $X86Info.PackageArchitecture | Should -Be 'x86'
+    $X86Info.ProductVersion | Should -Be '3.9.0'
+    $X86Info.ProductCode | Should -Be '{F8B0BB18-B1E6-4821-8C5B-883AA5DE3EEA}'
+    $X64Info.Name | Should -Be 'TeraCopy.x64.msi'
+    $X64Info.SelectedMsiPath | Should -Be '5DE3EEA\TeraCopy.x64.msi'
+    $X64Info.SelectionMethod | Should -Be 'PayloadTable'
+    $X64Info.PackageArchitecture | Should -Be 'x64'
+    $X64Info.ProductVersion | Should -Be '3.9.0'
+    $X64Info.ProductCode | Should -Be '{F8B0BB18-B1E6-4821-8C5B-883AA5DE3EEA}'
+  }
+
+  It 'Should select the mixed x64 and fixed ARM64 FxSound payloads' {
+    $MixedFixture = Get-InstallerFixture -Name 'fxsound_setup-1.2.10.0.exe' -Url 'https://raw.githubusercontent.com/fxsound2/fxsound-app/refs/tags/v1.2.10.0/release/fxsound_setup.exe'
+    $Arm64Fixture = Get-InstallerFixture -Name 'fxsound_setup.arm64-1.2.10.0.exe' -Url 'https://raw.githubusercontent.com/fxsound2/fxsound-app/refs/tags/v1.2.10.0/release/arm64/fxsound_setup.arm64.exe'
+    $MixedInfo = Get-AdvancedInstallerInfo -Path $MixedFixture
+    $Arm64Info = Get-AdvancedInstallerInfo -Path $Arm64Fixture
+    $X64MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $MixedInfo -Architecture x64
+    $Arm64MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Arm64Info -Architecture arm64
+
+    $MixedInfo.MsiPayloadSelection.ArchitectureSelectionMode | Should -Be 'Wow64Suffix'
+    $MixedInfo.MsiPayloadSelection.BaseMsiPath | Should -Be 'fxsound.msi'
+    $MixedInfo.MsiPayloadSelection.X64MsiPath | Should -Be 'fxsound.x64.msi'
+    $MixedInfo.MsiPayloadSelection.Arm64MsiPath | Should -Be 'fxsound.x64.msi'
+    $X64MsiInfo.SelectedMsiPath | Should -Be 'fxsound.x64.msi'
+    $X64MsiInfo.PackageArchitecture | Should -Be 'x64'
+    $X64MsiInfo.ProductCode | Should -Be '{3EE30B3D-8CA9-435C-BFB5-70DE367321B3}'
+
+    $Arm64Info.MsiPayloadSelection.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $Arm64Info.MsiPayloadSelection.BaseMsiPath | Should -Be 'fxsound.arm64.msi'
+    $Arm64Info.MsiPayloadSelection.Arm64MsiPath | Should -Be 'fxsound.arm64.msi'
+    $Arm64MsiInfo.SelectedMsiPath | Should -Be 'fxsound.arm64.msi'
+    $Arm64MsiInfo.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $Arm64MsiInfo.PackageArchitecture | Should -Be 'arm64'
+    $Arm64MsiInfo.Template | Should -Be 'Arm64;1033'
+    $Arm64MsiInfo.ProductCode | Should -Be '{AFD6D03F-AE41-4BB2-9E4D-26E8A9E970B0}'
+    $Arm64MsiInfo.UpgradeCode | Should -Be '{1CA2081B-0D5A-41DF-86E8-2788204CE340}'
+
+    { Get-AdvancedInstallerMsiInfo -Installer $MixedInfo -Architecture arm64 } | Should -Throw "*MSI package architecture is 'x64'*"
+  }
+
+  It 'Should require architecture when mixed-platform metadata selects distinct MSI paths' {
+    $Fixture = Get-InstallerFixture -Name 'teracopy3.9.exe' -Url 'https://codesector.com/files/teracopy3.9.exe'
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    { Get-AdvancedInstallerMsiInfo -Installer $Info } | Should -Throw '*selects different MSI paths by host architecture*'
+  }
+
+  It 'Should give MainAppURL precedence over embedded payload-table entries' {
+    InModuleScope AdvancedInstaller {
+      $Selection = Get-AdvancedInstallerMsiPayloadSelection -File @(
+        [pscustomobject]@{
+          Index         = 0
+          Name          = 'Embedded.msi'
+          SelectorType  = 1
+          SelectorGroup = 0
+        }
+      ) -GeneralOptions ([pscustomobject]@{
+          MainAppURL  = 'https://downloads.example.test/Product.msi?token=value'
+          AllPlatforms = 'true'
+        })
+
+      $Selection.SelectionMethod | Should -Be 'MainAppUrl'
+      $Selection.SourceKind | Should -Be 'Download'
+      $Selection.ArchitectureSelectionMode | Should -Be 'Wow64Suffix'
+      $Selection.X86MainAppUrl | Should -Be 'https://downloads.example.test/Product.msi?token=value'
+      $Selection.X64MainAppUrl | Should -Be 'https://downloads.example.test/Product.x64.msi?token=value'
+      $Selection.Arm64MainAppUrl | Should -Be 'https://downloads.example.test/Product.x64.msi?token=value'
+      $Selection.BaseMsiPath | Should -BeNullOrEmpty
+    }
   }
 
   It 'Should expand nested 7z payloads in place' {
