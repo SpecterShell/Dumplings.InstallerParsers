@@ -55,7 +55,8 @@ function Get-Assembly {
     [string]$Name
   )
 
-  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' $Name)) {
+  $AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\Assets'
+  if (Test-Path -Path ($Path = Join-Path -Path $AssetsPath -ChildPath $Name)) {
     return Get-Item -Path $Path -Force
   } else {
     throw "The $Name assembly could not be found"
@@ -113,7 +114,7 @@ function Get-InnoResourceBytes {
     Where-Object { $_.TypeId -eq $Script:INNO_RT_RCDATA -and $_.Id -eq $Id } |
     Select-Object -First 1
   if (-not $Resource) { throw 'The requested Inno resource could not be found.' }
-  return Read-PEResourceData -Resource $Resource -MaximumBytes 1048576
+  return ,(Read-PEResourceData -Resource $Resource -MaximumBytes 1048576)
 }
 
 function Get-InnoOffsetTable {
@@ -378,7 +379,7 @@ function Expand-InnoLzmaBytes {
 
   try {
     $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $CompressedStream -Destination $OutputStream -MaximumBytes $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE -Properties $Properties
-    return $OutputStream.ToArray()
+    return ,($OutputStream.ToArray())
   } finally {
     $CompressedStream.Dispose()
     $OutputStream.Dispose()
@@ -406,7 +407,7 @@ function Expand-InnoLzma2Bytes {
 
   try {
     $null = Expand-InstallerCompressedStream -Algorithm Lzma2 -Stream $CompressedStream -Destination $OutputStream -MaximumBytes $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE -Properties $Properties
-    return $OutputStream.ToArray()
+    return ,($OutputStream.ToArray())
   } finally {
     $CompressedStream.Dispose()
     $OutputStream.Dispose()
@@ -557,7 +558,7 @@ function Get-InnoHeaderBlock {
     [int]$VersionNumber
   )
 
-  (Get-InnoHeaderBlockInfo -Path $Path -Offset0 $Offset0 -Layout $Layout -VersionNumber $VersionNumber).Bytes
+  return ,((Get-InnoHeaderBlockInfo -Path $Path -Offset0 $Offset0 -Layout $Layout -VersionNumber $VersionNumber).Bytes)
 }
 
 function Read-InnoWideStrings {
@@ -1988,7 +1989,8 @@ function Get-InnoVersion5FileBytes {
         continue
       }
 
-      $RawBytes = $ChunkCandidate.Bytes[$Location.ChunkSuboffset..($Location.ChunkSuboffset + $Location.OriginalSize - 1)]
+      $RawBytes = [byte[]]::new([int]$Location.OriginalSize)
+      [Buffer]::BlockCopy($ChunkCandidate.Bytes, [int]$Location.ChunkSuboffset, $RawBytes, 0, $RawBytes.Length)
       $FileCandidates = [System.Collections.Generic.List[object]]::new()
 
       if ($Location.Flags.CallInstructionOptimized) {
@@ -2006,11 +2008,11 @@ function Get-InnoVersion5FileBytes {
         if ($Location.Sha1.Length -eq 20) {
           $ActualSha1 = [System.Security.Cryptography.SHA1]::HashData($FileCandidate.Bytes)
           if ([System.Linq.Enumerable]::SequenceEqual($ActualSha1, $Location.Sha1)) {
-            return $FileCandidate.Bytes
+            return ,$FileCandidate.Bytes
           }
           $CandidateFailures.Add("$($FileCandidate.Name): SHA1 digest mismatch")
         } else {
-          return $FileCandidate.Bytes
+          return ,$FileCandidate.Bytes
         }
       }
     }

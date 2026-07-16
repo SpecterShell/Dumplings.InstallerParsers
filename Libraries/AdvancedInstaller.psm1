@@ -29,7 +29,8 @@ function Get-AdvancedInstallerAssembly {
     [string]$Name
   )
 
-  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' $Name)) {
+  $AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\Assets'
+  if (Test-Path -Path ($Path = Join-Path -Path $AssetsPath -ChildPath $Name)) {
     return Get-Item -Path $Path -Force
   } else {
     throw "The $Name assembly could not be found"
@@ -54,7 +55,7 @@ function Import-AdvancedInstallerMsiModule {
   #>
 
   if (-not (Get-Command -Name 'Read-ProductVersionFromMsi' -ErrorAction SilentlyContinue)) {
-    Import-Module (Join-Path $PSScriptRoot '..' '..' 'PackageModule' 'Libraries' 'MSI.psm1') -Force
+    Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..\..\PackageModule\Libraries\MSI.psm1') -Force
   }
 }
 
@@ -129,7 +130,7 @@ function Read-AdvancedInstallerBytes {
     [int]$Length
   )
 
-  return Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Length
+  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Length)
 }
 
 function Test-AdvancedInstallerFooterOffset {

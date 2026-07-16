@@ -23,7 +23,7 @@ function Read-SetupFactoryExactBytes {
   $Offset = $Stream.Position
   $Buffer = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count
   $Stream.Position = $Offset + $Count
-  return $Buffer
+  return ,$Buffer
 }
 
 function Read-SetupFactoryUInt32 {
@@ -50,7 +50,7 @@ function Expand-SetupFactoryCompressedBytes {
     [Parameter(Mandatory)][byte[]]$Bytes,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes
   )
-  if ($Bytes.Length -eq 0) { return $Bytes }
+  if ($Bytes.Length -eq 0) { return ,$Bytes }
   Import-InstallerArchiveDependency
   $CompressedStream = $null
   $Output = [IO.MemoryStream]::new()
@@ -73,12 +73,12 @@ function Expand-SetupFactoryCompressedBytes {
         if (-not (Test-Path -LiteralPath $DecoderSource)) { throw "The PKWARE decoder source is missing: $DecoderSource" }
         Add-Type -Path $DecoderSource
       }
-      return [Dumplings.InstallerParsers.PkwareBlast]::Decode($Bytes, $MaximumBytes)
+      return ,([Dumplings.InstallerParsers.PkwareBlast]::Decode($Bytes, $MaximumBytes))
     } else {
       throw 'The Setup Factory compression format is not recognized'
     }
 
-    return $Output.ToArray()
+    return ,($Output.ToArray())
   } finally {
     if ($CompressedStream) { $CompressedStream.Dispose() }
     $Output.Dispose()
@@ -206,13 +206,16 @@ function Expand-SetupFactoryInstaller {
         $SpecialSize = Read-SetupFactoryInt64 -Stream $Stream
       }
       if ($SpecialSize -lt 0 -or $SpecialSize -gt $Script:SetupFactoryMaximumFileBytes) { throw 'The embedded Setup Factory runtime size is invalid' }
-      $Runtime = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$SpecialSize)
-      for ($Index = 0; $Index -lt [Math]::Min(2000, $Runtime.Length); $Index++) { $Runtime[$Index] = $Runtime[$Index] -bxor 7 }
+      if ($SpecialSize -gt $Stream.Length - $Stream.Position) { throw 'The embedded Setup Factory runtime is truncated' }
       if (Test-ExtractionPattern -Path 'irsetup.exe' -Pattern $Name) {
+        $Runtime = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$SpecialSize)
+        for ($Index = 0; $Index -lt [Math]::Min(2000, $Runtime.Length); $Index++) { $Runtime[$Index] = $Runtime[$Index] -bxor 7 }
         $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath 'irsetup.exe'
         [IO.File]::WriteAllBytes($OutputPath, $Runtime)
         $Written += $Runtime.Length
         Get-Item -LiteralPath $OutputPath
+      } else {
+        $Stream.Position += $SpecialSize
       }
 
       $Count = Read-SetupFactoryUInt32 -Stream $Stream
@@ -220,12 +223,15 @@ function Expand-SetupFactoryInstaller {
         $Stream.Position -= 4
         $LuaSize = Read-SetupFactoryInt64 -Stream $Stream
         if ($LuaSize -lt 0 -or $LuaSize -gt $Script:SetupFactoryMaximumFileBytes) { throw 'The embedded Lua runtime size is invalid' }
-        $Lua = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$LuaSize)
+        if ($LuaSize -gt $Stream.Length - $Stream.Position) { throw 'The embedded Lua runtime is truncated' }
         if (Test-ExtractionPattern -Path 'lua5.1.dll' -Pattern $Name) {
+          $Lua = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$LuaSize)
           $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath 'lua5.1.dll'
           [IO.File]::WriteAllBytes($OutputPath, $Lua)
           $Written += $Lua.Length
           Get-Item -LiteralPath $OutputPath
+        } else {
+          $Stream.Position += $LuaSize
         }
         $Count = Read-SetupFactoryUInt32 -Stream $Stream
       }
@@ -238,16 +244,21 @@ function Expand-SetupFactoryInstaller {
         $ExpectedCrc = Read-SetupFactoryUInt32 -Stream $Stream
         if ($Overlay.Version -ne 7) { $Stream.Position += 4 }
         if ($PackedSize -lt 0 -or $PackedSize -gt $Script:SetupFactoryMaximumFileBytes) { throw 'A Setup Factory entry size is invalid' }
+        if ($PackedSize -gt $Stream.Length - $Stream.Position) { throw "The Setup Factory entry '$EntryName' is truncated" }
+        if (-not (Test-ExtractionPattern -Path $EntryName -Pattern $Name)) {
+          $Stream.Position += $PackedSize
+          continue
+        }
         $Packed = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$PackedSize)
         $Expanded = Expand-SetupFactoryCompressedBytes -Bytes $Packed -MaximumBytes ([Math]::Min($MaximumExpandedBytes - $Written, $Script:SetupFactoryMaximumFileBytes))
         if ($ExpectedCrc -ne 0 -and (Get-SetupFactoryCrc32 -Bytes $Expanded) -ne $ExpectedCrc) { throw "The Setup Factory entry '$EntryName' failed its CRC check" }
         $Written += $Expanded.Length
         if ($Written -gt $MaximumExpandedBytes) { throw 'The Setup Factory expansion exceeds the configured limit' }
-        if (Test-ExtractionPattern -Path $EntryName -Pattern $Name) {
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $EntryName
-          [IO.File]::WriteAllBytes($OutputPath, $Expanded)
-          Get-Item -LiteralPath $OutputPath
-        }
+        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $EntryName
+        $Parent = [IO.Path]::GetDirectoryName($OutputPath)
+        if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
+        [IO.File]::WriteAllBytes($OutputPath, $Expanded)
+        Get-Item -LiteralPath $OutputPath
       }
     } finally {
       $Stream.Dispose()

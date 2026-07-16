@@ -20,7 +20,8 @@ function Get-Assembly {
     [string]$Name
   )
 
-  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' $Name)) {
+  $AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\Assets'
+  if (Test-Path -Path ($Path = Join-Path -Path $AssetsPath -ChildPath $Name)) {
     return Get-Item -Path $Path -Force
   } else {
     throw "The $Name assembly could not be found"
@@ -134,6 +135,13 @@ $NSIS_COMMAND_PARAMETER_COUNTS = [int[]]@(
   5, 4, 5, 6, 5, 5, 1, 4, 3, 4, 4, 1, 2, 3, 4, 5,
   4, 6, 2, 1, 4, 4, 2, 2, 2, 2
 )
+
+# The simulator returns Continue/0 for most opcodes; reuse immutable results
+# instead of allocating a new PSCustomObject for every interpreted command.
+$NSIS_CONTINUE_RESULT = [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+$NSIS_RETURN_RESULT = [pscustomobject]@{ Action = 'Return'; Address = 0 }
+$NSIS_ABORT_RESULT = [pscustomobject]@{ Action = 'Abort'; Address = 0 }
+$NSIS_QUIT_RESULT = [pscustomobject]@{ Action = 'Quit'; Address = 0 }
 
 $NSIS_POP_OPERATION = 1
 
@@ -1293,23 +1301,16 @@ function Get-NSISString {
     $EndOffset = $Offset
     while ($EndOffset + 1 -lt $State.StringsBlock.Length -and -not ($State.StringsBlock[$EndOffset] -eq 0x00 -and $State.StringsBlock[$EndOffset + 1] -eq 0x00)) { $EndOffset += 2 }
     if ($EndOffset -le $Offset) { return '' }
-    $StringBytes = $State.StringsBlock[$Offset..($EndOffset - 1)]
+    $Characters = [uint16[]]::new(($EndOffset - $Offset) / 2)
+    [Buffer]::BlockCopy($State.StringsBlock, $Offset, $Characters, 0, $EndOffset - $Offset)
   } else {
     $EndOffset = $Offset
     while ($EndOffset -lt $State.StringsBlock.Length -and $State.StringsBlock[$EndOffset] -ne 0x00) { $EndOffset++ }
     if ($EndOffset -le $Offset) { return '' }
-    $StringBytes = $State.StringsBlock[$Offset..($EndOffset - 1)]
-  }
-
-  if ($StringBytes.Length -eq 0) { return '' }
-
-  $Characters = [System.Collections.Generic.List[uint16]]::new()
-  if ($State.VersionInfo.Unicode) {
-    for ($Index = 0; $Index + 1 -lt $StringBytes.Length; $Index += 2) {
-      $Characters.Add([System.BitConverter]::ToUInt16($StringBytes, $Index))
+    $Characters = [uint16[]]::new($EndOffset - $Offset)
+    for ($CharacterIndex = 0; $CharacterIndex -lt $Characters.Length; $CharacterIndex++) {
+      $Characters[$CharacterIndex] = $State.StringsBlock[$Offset + $CharacterIndex]
     }
-  } else {
-    foreach ($Byte in $StringBytes) { $Characters.Add([uint16]$Byte) }
   }
 
   $Builder = [System.Text.StringBuilder]::new()
@@ -1904,9 +1905,11 @@ function Initialize-NSISState {
   $Layout = Get-NSISHeaderLayout -HeaderBytes $HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
   $StringsBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 3
   $LanguageTable = Get-NSISPrimaryLanguageTable -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Layout $Layout
-  $RawEntries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
-  $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock -Entries $RawEntries
-  $Entries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -VersionInfo $VersionInfo
+  $Entries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+  $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock -Entries $Entries
+  foreach ($Entry in $Entries) {
+    $Entry.Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.RawOpcode -Type $VersionInfo.Type -Unicode $VersionInfo.Unicode -LogCmdIsEnabled $VersionInfo.LogCmdIsEnabled
+  }
 
   $State = [pscustomobject]@{
     Path            = $HeaderData.Path
@@ -2063,17 +2066,17 @@ function Invoke-NSISEntry {
   $Raw = $Entry.Raw
 
   switch ($Opcode) {
-    $Script:NSIS_OPCODE_INVALID { return [pscustomobject]@{ Action = 'Return'; Address = 0 } }
-    $Script:NSIS_OPCODE_RETURN { return [pscustomobject]@{ Action = 'Return'; Address = 0 } }
-    $Script:NSIS_OPCODE_ABORT { return [pscustomobject]@{ Action = 'Abort'; Address = 0 } }
-    $Script:NSIS_OPCODE_QUIT { return [pscustomobject]@{ Action = 'Quit'; Address = 0 } }
+    $Script:NSIS_OPCODE_INVALID { return $Script:NSIS_RETURN_RESULT }
+    $Script:NSIS_OPCODE_RETURN { return $Script:NSIS_RETURN_RESULT }
+    $Script:NSIS_OPCODE_ABORT { return $Script:NSIS_ABORT_RESULT }
+    $Script:NSIS_OPCODE_QUIT { return $Script:NSIS_QUIT_RESULT }
     $Script:NSIS_OPCODE_JUMP { return [pscustomobject]@{ Action = 'Continue'; Address = $Values[1] } }
     $Script:NSIS_OPCODE_CALL {
       $Result = Invoke-NSISCodeSegment -State $State -Position ((Resolve-NSISAddress -State $State -Address $Values[1]) - 1)
       if ($Result -eq 'Quit' -or $Result -eq 'Abort') {
         return [pscustomobject]@{ Action = $Result; Address = 0 }
       } else {
-        return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
       }
     }
     $Script:NSIS_OPCODE_CREATE_DIR {
@@ -2087,7 +2090,7 @@ function Invoke-NSISEntry {
         }
       }
 
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_IF_FILE_EXISTS {
       $FileName = Get-NSISString -State $State -RelativeOffset $Values[1]
@@ -2097,7 +2100,7 @@ function Invoke-NSISEntry {
     $Script:NSIS_OPCODE_EXTRACT_FILE {
       $Path = Get-NSISString -State $State -RelativeOffset $Values[2]
       Add-NSISFile -State $State -Path $Path
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_SET_FLAG {
       $FlagType = $Values[1]
@@ -2123,7 +2126,7 @@ function Invoke-NSISEntry {
         $State.ExecFlags[$FlagType] = $Value
       }
 
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_IF_FLAG {
       $FlagValue = if ($State.ExecFlags.ContainsKey($Values[3])) { $State.ExecFlags[$Values[3]] } else { 0 }
@@ -2132,11 +2135,11 @@ function Invoke-NSISEntry {
     $Script:NSIS_OPCODE_GET_FLAG {
       $FlagValue = if ($State.ExecFlags.ContainsKey($Values[2])) { $State.ExecFlags[$Values[2]] } else { 0 }
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value ([string]$FlagValue)
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_STR_LEN {
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value ([string](Get-NSISString -State $State -RelativeOffset $Values[2]).Length)
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_ASSIGN_VAR {
       $Result = Get-NSISString -State $State -RelativeOffset $Values[2]
@@ -2147,7 +2150,7 @@ function Invoke-NSISEntry {
 
       if ($NewLength -le 0) {
         $null = $State.Variables.Remove([Math]::Abs($Values[1]))
-        return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
       }
 
       if ($Start -lt 0) { $Start += $Result.Length }
@@ -2157,7 +2160,7 @@ function Invoke-NSISEntry {
       $Result = $Result.Substring($Start)
       if ($Result.Length -gt $NewLength) { $Result = $Result.Substring(0, $NewLength) }
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value $Result
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_STR_CMP {
       $Left = Get-NSISString -State $State -RelativeOffset $Values[1]
@@ -2175,7 +2178,7 @@ function Invoke-NSISEntry {
       $EnvironmentValue = [System.Environment]::GetEnvironmentVariable($EnvironmentName)
       if ($null -eq $EnvironmentValue) { $EnvironmentValue = '' }
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value $EnvironmentValue
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_INT_CMP {
       $Left = Get-NSISInt -State $State -RelativeOffset $Values[1]
@@ -2212,7 +2215,7 @@ function Invoke-NSISEntry {
       }
 
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value ([string]$Result)
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_INT_FMT {
       $Format = Get-NSISString -State $State -RelativeOffset $Values[2]
@@ -2223,7 +2226,7 @@ function Invoke-NSISEntry {
       }
 
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value $Result
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_PUSH_POP {
       if ($Values[3] -ne 0) {
@@ -2248,7 +2251,7 @@ function Invoke-NSISEntry {
         $State.Stack.Add((Get-NSISString -State $State -RelativeOffset $Values[1]))
       }
 
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_SHELL_EXEC {
       $Verb = Get-NSISString -State $State -RelativeOffset $Values[1]
@@ -2256,24 +2259,24 @@ function Invoke-NSISEntry {
       $Parameters = Get-NSISString -State $State -RelativeOffset $Values[3]
       $Kind = if ([string]::IsNullOrWhiteSpace($Verb)) { 'ShellExec' } else { "ShellExec:$Verb" }
       Add-NSISExecutedPayload -State $State -Command $File -Parameters $Parameters -Kind $Kind
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_EXECUTE {
       $Command = Get-NSISString -State $State -RelativeOffset $Values[1]
       $Kind = if ($Values[3] -ne 0) { 'ExecWait' } else { 'Exec' }
       Add-NSISExecutedPayload -State $State -Command $Command -Kind $Kind
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_DELETE_REG {
       $Root = Resolve-NSISRegistryRoot -State $State -Root $Raw[2]
       $Key = Get-NSISString -State $State -RelativeOffset $Values[3]
       $Name = Get-NSISString -State $State -RelativeOffset $Values[4]
       Remove-NSISRegistryValue -State $State -Root $Root -Key $Key -Name $Name
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_WRITE_REG {
       Add-NSISRegistryWrite -State $State -Entry $Entry
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_READ_REG {
       $Root = Resolve-NSISRegistryRoot -State $State -Root $Raw[2]
@@ -2281,16 +2284,16 @@ function Invoke-NSISEntry {
       $Name = Get-NSISString -State $State -RelativeOffset $Values[4]
       $Value = Get-NSISRegistryValue -State $State -Root $Root -Key $Key -Name $Name
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value $Value
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_WRITE_UNINSTALLER {
       $UninstallerPath = Get-NSISString -State $State -RelativeOffset $Values[1]
       Add-NSISFile -State $State -Path $UninstallerPath
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
     default {
       # Unsupported entries are ignored unless the resulting metadata stays incomplete and the caller throws.
-      return [pscustomobject]@{ Action = 'Continue'; Address = 0 }
+      return $Script:NSIS_CONTINUE_RESULT
     }
   }
 }
@@ -2478,8 +2481,7 @@ function Get-NSISPlainStrings {
 
     if ($IsTerminator) {
       if ($Index -gt $Start) {
-        $Bytes = $State.StringsBlock[$Start..($Index - 1)]
-        $Text = $Encoding.GetString($Bytes).Trim()
+        $Text = $Encoding.GetString($State.StringsBlock, $Start, $Index - $Start).Trim()
         if (-not [string]::IsNullOrWhiteSpace($Text)) { $null = $Strings.Add($Text) }
       }
 

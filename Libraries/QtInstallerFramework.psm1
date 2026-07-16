@@ -62,7 +62,7 @@ function Read-QtInstallerFrameworkBytes {
   if ($Count -gt $QTIFW_MAX_BYTE_ARRAY_LENGTH) {
     throw "Qt Installer Framework read range is too large: $Count bytes"
   }
-  return Read-BinaryBytes -Stream $Stream -Offset $Offset -Count ([int]$Count)
+  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count ([int]$Count))
 }
 
 function Read-QtInstallerFrameworkInt64 {
@@ -406,7 +406,7 @@ function Read-QtInstallerFrameworkByteArray {
   }
   $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Cursor.Value -Count $Length
   $Cursor.Value += $Length
-  return $Bytes
+  return ,$Bytes
 }
 
 function Get-QtInstallerFrameworkResourceCollection {
@@ -506,7 +506,7 @@ function Expand-QtInstallerFrameworkCompressedRccData {
     if ($ExpectedLength -ne 0 -and $Expanded.Length -ne $ExpectedLength) {
       throw "The compressed Qt RCC payload expanded to $($Expanded.Length) bytes, expected $ExpectedLength"
     }
-    return $Expanded
+    return ,$Expanded
   } finally {
     $OutputStream.Dispose()
     $InputStream.Dispose()
