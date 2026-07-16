@@ -241,4 +241,34 @@ Describe 'Advanced Installer parser' {
     $MsiInfo.ProductCode | Should -Be '{2EC8D12C-9845-473A-A6D9-DF75172E5885}'
     $MsiInfo.UpgradeCode | Should -Be '{F036F415-628F-4FE1-A550-13AE231667EF}'
   }
+
+  It 'Should parse the 2 GB BenchMate installer within the performance watchdog' -Tag 'Performance' {
+    $Name = 'bm-14.2.0.exe'
+    $Url = 'https://dl.benchmate.org/bm-14.2.0.exe'
+    $Sha256 = '123DD975FBE1BEDCE784BF30C755392CE69C92E07D555E9051422DD8EDFC6506'
+    $Fixture = Join-Path $Script:FixtureDirectory $Name
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 $Sha256)) {
+      if ($env:DUMPLINGS_DOWNLOAD_LARGE_TEST_FIXTURES -eq '1') {
+        $Fixture = Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -Sha256 $Sha256
+      } else {
+        Set-ItResult -Skipped -Because 'Set DUMPLINGS_DOWNLOAD_LARGE_TEST_FIXTURES=1 to cache the 2.1 GB BenchMate performance fixture.'
+        return
+      }
+    }
+
+    $Stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+    $Stopwatch.Stop()
+
+    (Get-Item -LiteralPath $Fixture).Length | Should -Be 2167225168
+    $Info.ConfigurationEntry | Should -Be 'bm-14.2.0.0.ini'
+    $Info.MsiPayloadSelection.SourceKind | Should -Be 'EmbeddedArchive'
+    $Info.MsiPayloadSelection.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $MsiInfo.SelectedMsiPath | Should -Be 'C3C022B\bm.msi'
+    $MsiInfo.ProductVersion | Should -Be '14.2.0.0'
+    $MsiInfo.ProductCode | Should -Be '{28D8C509-9AB2-4FFB-A832-85CE7C3C022B}'
+    $MsiInfo.UpgradeCode | Should -Be '{B63C1D13-2833-4F4A-8605-93F87F8599F6}'
+    $Stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 60
+  }
 }
