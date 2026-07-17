@@ -23,7 +23,7 @@ function Read-SetupFactoryExactBytes {
   $Offset = $Stream.Position
   $Buffer = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count
   $Stream.Position = $Offset + $Count
-  return ,$Buffer
+  return , $Buffer
 }
 
 function Read-SetupFactoryUInt32 {
@@ -50,7 +50,7 @@ function Expand-SetupFactoryCompressedBytes {
     [Parameter(Mandatory)][byte[]]$Bytes,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes
   )
-  if ($Bytes.Length -eq 0) { return ,$Bytes }
+  if ($Bytes.Length -eq 0) { return , $Bytes }
   Import-InstallerArchiveDependency
   $CompressedStream = $null
   $Output = [IO.MemoryStream]::new()
@@ -73,12 +73,12 @@ function Expand-SetupFactoryCompressedBytes {
         if (-not (Test-Path -LiteralPath $DecoderSource)) { throw "The PKWARE decoder source is missing: $DecoderSource" }
         Add-Type -Path $DecoderSource
       }
-      return ,([Dumplings.InstallerParsers.PkwareBlast]::Decode($Bytes, $MaximumBytes))
+      return , ([Dumplings.InstallerParsers.PkwareBlast]::Decode($Bytes, $MaximumBytes))
     } else {
       throw 'The Setup Factory compression format is not recognized'
     }
 
-    return ,($Output.ToArray())
+    return , ($Output.ToArray())
   } finally {
     if ($CompressedStream) { $CompressedStream.Dispose() }
     $Output.Dispose()
@@ -144,11 +144,11 @@ function Get-SetupFactoryLiteralRegistryWrites {
   $Text = [Text.Encoding]::UTF8.GetString($Bytes)
   foreach ($Match in [regex]::Matches($Text, '(?im)Registry\.SetValue\s*\(\s*"(HKLM|HKEY_LOCAL_MACHINE|HKCU|HKEY_CURRENT_USER)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"')) {
     [pscustomobject]@{
-      Root = $Match.Groups[1].Value
-      Key  = $Match.Groups[2].Value
-      Name = $Match.Groups[3].Value
+      Root  = $Match.Groups[1].Value
+      Key   = $Match.Groups[2].Value
+      Name  = $Match.Groups[3].Value
       Value = $Match.Groups[4].Value
-      Type = 'REG_SZ'
+      Type  = 'REG_SZ'
     }
   }
 }
@@ -164,9 +164,9 @@ function Get-SetupFactoryOverlayInfo {
     $Probe = Read-SetupFactoryExactBytes -Stream $Stream -Count ([Math]::Min(32, [int]($Stream.Length - $OverlayOffset)))
     $ProbeHex = [BitConverter]::ToString($Probe)
     $Version = if ($Probe.Length -ge 16 -and $ProbeHex.StartsWith([BitConverter]::ToString($Script:SetupFactory89Signature), [StringComparison]::Ordinal)) {
-        if ($File.VersionInfo.FileMajorPart -eq 8) { 8 } else { 9 }
-      } elseif ($Probe.Length -ge 8 -and $ProbeHex.StartsWith([BitConverter]::ToString($Script:SetupFactory7Signature), [StringComparison]::Ordinal)) { 7 }
-      else { 0 }
+      if ($File.VersionInfo.FileMajorPart -eq 8) { 8 } else { 9 }
+    } elseif ($Probe.Length -ge 8 -and $ProbeHex.StartsWith([BitConverter]::ToString($Script:SetupFactory7Signature), [StringComparison]::Ordinal)) { 7 }
+    else { 0 }
     [pscustomobject]@{ Version = $Version; Offset = $OverlayOffset; Length = $Stream.Length - $OverlayOffset }
   } finally {
     $Stream.Dispose()
@@ -303,8 +303,8 @@ function Get-SetupFactoryInfo {
       $ProductCode = if ($HasBuiltInUninstall) { Resolve-SetupFactoryVariable -Value $ProductExpression -Variables $Variables }
       $RegistryRoots = @($RegistryWrites | ForEach-Object { $_.Root })
       $Scope = if ($RegistryRoots -match 'HKCU|HKEY_CURRENT_USER') { 'user' }
-        elseif ($RegistryRoots -match 'HKLM|HKEY_LOCAL_MACHINE' -or $InstallLocation -match '^(?:%ProgramFiles|[A-Za-z]:\\Program Files(?: \(x86\))?\\)') { 'machine' }
-        else { $null }
+      elseif ($RegistryRoots -match 'HKLM|HKEY_LOCAL_MACHINE' -or $InstallLocation -match '^(?:%ProgramFiles|[A-Za-z]:\\Program Files(?: \(x86\))?\\)') { 'machine' }
+      else { $null }
       if (-not $Variables.Count) { $Warnings.Add('CSessionVar records were not found or were malformed') }
       if (-not $HasBuiltInUninstall -and -not $RegistryWrites.Count) { $Warnings.Add('No explicit built-in uninstall configuration or literal registry writes were found') }
       foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }

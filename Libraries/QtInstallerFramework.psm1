@@ -62,7 +62,7 @@ function Read-QtInstallerFrameworkBytes {
   if ($Count -gt $QTIFW_MAX_BYTE_ARRAY_LENGTH) {
     throw "Qt Installer Framework read range is too large: $Count bytes"
   }
-  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count ([int]$Count))
+  return , (Read-BinaryBytes -Stream $Stream -Offset $Offset -Count ([int]$Count))
 }
 
 function Read-QtInstallerFrameworkInt64 {
@@ -406,7 +406,7 @@ function Read-QtInstallerFrameworkByteArray {
   }
   $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Cursor.Value -Count $Length
   $Cursor.Value += $Length
-  return ,$Bytes
+  return , $Bytes
 }
 
 function Get-QtInstallerFrameworkResourceCollection {
@@ -506,7 +506,7 @@ function Expand-QtInstallerFrameworkCompressedRccData {
     if ($ExpectedLength -ne 0 -and $Expanded.Length -ne $ExpectedLength) {
       throw "The compressed Qt RCC payload expanded to $($Expanded.Length) bytes, expected $ExpectedLength"
     }
-    return ,$Expanded
+    return , $Expanded
   } finally {
     $OutputStream.Dispose()
     $InputStream.Dispose()
@@ -1170,23 +1170,23 @@ function ConvertFrom-QtInstallerFrameworkInstallerXml {
   }
 
   [pscustomobject]@{
-    Name                   = $Values['Name']
-    PackageName            = $Values['Name']
-    DisplayName            = $Values['Name']
-    DisplayVersion         = $Values['Version']
-    ProductVersion         = $Values['Version']
-    Publisher              = $Values['Publisher']
-    ProductUrl             = $Values['ProductUrl']
-    Title                  = $Values['Title']
-    ProductCode            = $ProductCode
-    TargetDir              = $Values['TargetDir']
-    AdminTargetDir         = $Values['AdminTargetDir']
+    Name                        = $Values['Name']
+    PackageName                 = $Values['Name']
+    DisplayName                 = $Values['Name']
+    DisplayVersion              = $Values['Version']
+    ProductVersion              = $Values['Version']
+    Publisher                   = $Values['Publisher']
+    ProductUrl                  = $Values['ProductUrl']
+    Title                       = $Values['Title']
+    ProductCode                 = $ProductCode
+    TargetDir                   = $Values['TargetDir']
+    AdminTargetDir              = $Values['AdminTargetDir']
     DisableCommandLineInterface = $Values['DisableCommandLineInterface']
-    StartMenuDir           = $Values['StartMenuDir']
-    MaintenanceToolName    = $MaintenanceToolName
-    MaintenanceToolIniFile = if ([string]::IsNullOrWhiteSpace($Values['MaintenanceToolIniFile'])) { "$MaintenanceToolName.ini" } else { $Values['MaintenanceToolIniFile'] }
-    SupportsModify         = $Values['SupportsModify']
-    RawValues              = $Values
+    StartMenuDir                = $Values['StartMenuDir']
+    MaintenanceToolName         = $MaintenanceToolName
+    MaintenanceToolIniFile      = if ([string]::IsNullOrWhiteSpace($Values['MaintenanceToolIniFile'])) { "$MaintenanceToolName.ini" } else { $Values['MaintenanceToolIniFile'] }
+    SupportsModify              = $Values['SupportsModify']
+    RawValues                   = $Values
   }
 }
 
@@ -1406,8 +1406,8 @@ function Get-QtInstallerFrameworkInstallLocationInfo {
     RequiresExplicitInstallLocation = $RequiresExplicitInstallLocation
     InstallLocationSwitch           = '--root "<INSTALLPATH>"'
     Evidence                        = [pscustomobject]@{
-      SourceRule = 'CommandLineInterface::setTargetDir uses --root when supplied and otherwise uses the embedded TargetDir; an empty target fails targetDirWarning.'
-      ConfigKey  = 'TargetDir'
+      SourceRule  = 'CommandLineInterface::setTargetDir uses --root when supplied and otherwise uses the embedded TargetDir; an empty target fails targetDirWarning.'
+      ConfigKey   = 'TargetDir'
       ConfigValue = $DefaultTargetDir
     }
   }
@@ -1447,10 +1447,10 @@ function Get-QtInstallerFrameworkUpgradeInfo {
 
   [pscustomobject]@{
     SupportsExistingInstallationOverride = $false
-    ExistingInstallationMarker            = $ExistingInstallationMarker
-    RecommendedUpgradeBehavior            = 'uninstallPrevious'
-    Evidence                              = [pscustomobject]@{
-      SourceRule = 'PackageManagerCore::installationAllowedToDirectory returns false when the configured maintenance-tool executable exists in the target directory.'
+    ExistingInstallationMarker           = $ExistingInstallationMarker
+    RecommendedUpgradeBehavior           = 'uninstallPrevious'
+    Evidence                             = [pscustomobject]@{
+      SourceRule          = 'PackageManagerCore::installationAllowedToDirectory returns false when the configured maintenance-tool executable exists in the target directory.'
       MaintenanceToolName = $MaintenanceToolName
     }
   }
@@ -1483,23 +1483,23 @@ function Get-QtInstallerFrameworkScopeInfo {
 
   if (-not $InstallerConfig) {
     return [pscustomobject]@{
-      Scope                              = $null
-      DefaultScope                       = $null
-      SupportedScopes                    = @()
-      SupportsUserScope                  = $false
-      SupportsMachineScope               = $false
-      SupportsDualScope                  = $false
-      SupportsCommandLineScopeOverride   = $false
-      UserScopeSwitch                    = $null
-      MachineScopeSwitch                 = $null
-      DisableCommandLineInterface        = $null
-      Evidence                           = [pscustomobject]@{
-        RegisterPathRule                  = 'IFW registerPath writes HKLM only when AllUsers == true; otherwise it writes HKCU.'
-        DefaultScopeReason                = 'No installer-config metadata was available.'
-        AllUsersMentionSources            = @()
-        AllUsersTrueAssignmentSources     = @()
-        AllUsersFalseAssignmentSources    = @()
-        RequiresAdminRightsSources        = @()
+      Scope                            = $null
+      DefaultScope                     = $null
+      SupportedScopes                  = @()
+      SupportsUserScope                = $false
+      SupportsMachineScope             = $false
+      SupportsDualScope                = $false
+      SupportsCommandLineScopeOverride = $false
+      UserScopeSwitch                  = $null
+      MachineScopeSwitch               = $null
+      DisableCommandLineInterface      = $null
+      Evidence                         = [pscustomobject]@{
+        RegisterPathRule               = 'IFW registerPath writes HKLM only when AllUsers == true; otherwise it writes HKCU.'
+        DefaultScopeReason             = 'No installer-config metadata was available.'
+        AllUsersMentionSources         = @()
+        AllUsersTrueAssignmentSources  = @()
+        AllUsersFalseAssignmentSources = @()
+        RequiresAdminRightsSources     = @()
       }
     }
   }
@@ -1530,26 +1530,26 @@ function Get-QtInstallerFrameworkScopeInfo {
   }
 
   [pscustomobject]@{
-    Scope                              = $DefaultScope
-    DefaultScope                       = $DefaultScope
-    SupportedScopes                    = $SupportedScopes
-    SupportsUserScope                  = $SupportedScopes -contains 'user'
-    SupportsMachineScope               = $SupportedScopes -contains 'machine'
-    SupportsDualScope                  = $SupportedScopes.Count -gt 1
-    SupportsCommandLineScopeOverride   = $SupportsCommandLineScopeOverride
-    UserScopeSwitch                    = if ($SupportsCommandLineScopeOverride) { 'AllUsers=false' } else { $null }
-    MachineScopeSwitch                 = if ($SupportsCommandLineScopeOverride) { 'AllUsers=true' } else { $null }
-    DisableCommandLineInterface        = $DisableCommandLineInterface
-    Evidence                           = [pscustomobject]@{
-      RegisterPathRule                  = 'IFW registerPath writes HKLM only when AllUsers == true; otherwise it writes HKCU.'
-      DefaultScopeReason                = if ($AllUsersDefault) { 'Embedded/user-defined AllUsers value is true.' } else { 'No embedded/user-defined AllUsers=true value was found; IFW defaults to HKCU ARP.' }
-      AllUsersRawValue                  = $AllUsersRaw
-      AllUsersMentionSources            = @($AllUsersMentionSources | Select-Object -Unique)
-      AllUsersTrueAssignmentSources     = @($AllUsersTrueAssignmentSources | Select-Object -Unique)
-      AllUsersFalseAssignmentSources    = @($AllUsersFalseAssignmentSources | Select-Object -Unique)
-      RequiresAdminRightsSources        = @($RequiresAdminRightsSources | Select-Object -Unique)
-      InterfaceVariant                  = $InterfaceInfo.InterfaceVariant
-      CommandLineInterface              = $InterfaceInfo.CommandLineInterface
+    Scope                            = $DefaultScope
+    DefaultScope                     = $DefaultScope
+    SupportedScopes                  = $SupportedScopes
+    SupportsUserScope                = $SupportedScopes -contains 'user'
+    SupportsMachineScope             = $SupportedScopes -contains 'machine'
+    SupportsDualScope                = $SupportedScopes.Count -gt 1
+    SupportsCommandLineScopeOverride = $SupportsCommandLineScopeOverride
+    UserScopeSwitch                  = if ($SupportsCommandLineScopeOverride) { 'AllUsers=false' } else { $null }
+    MachineScopeSwitch               = if ($SupportsCommandLineScopeOverride) { 'AllUsers=true' } else { $null }
+    DisableCommandLineInterface      = $DisableCommandLineInterface
+    Evidence                         = [pscustomobject]@{
+      RegisterPathRule               = 'IFW registerPath writes HKLM only when AllUsers == true; otherwise it writes HKCU.'
+      DefaultScopeReason             = if ($AllUsersDefault) { 'Embedded/user-defined AllUsers value is true.' } else { 'No embedded/user-defined AllUsers=true value was found; IFW defaults to HKCU ARP.' }
+      AllUsersRawValue               = $AllUsersRaw
+      AllUsersMentionSources         = @($AllUsersMentionSources | Select-Object -Unique)
+      AllUsersTrueAssignmentSources  = @($AllUsersTrueAssignmentSources | Select-Object -Unique)
+      AllUsersFalseAssignmentSources = @($AllUsersFalseAssignmentSources | Select-Object -Unique)
+      RequiresAdminRightsSources     = @($RequiresAdminRightsSources | Select-Object -Unique)
+      InterfaceVariant               = $InterfaceInfo.InterfaceVariant
+      CommandLineInterface           = $InterfaceInfo.CommandLineInterface
     }
   }
 }
@@ -1578,7 +1578,7 @@ function Get-QtInstallerFrameworkInfo {
     $InstallerConfig = if ($InstallerXmlResource) {
       ConvertFrom-QtInstallerFrameworkInstallerXml -Xml $InstallerXmlResource[0].Xml
     } else {
-        $null
+      $null
     }
     $InterfaceInfo = Get-QtInstallerFrameworkInterfaceInfo -Path $File.FullName -Layout $Layout -InstallerConfig $InstallerConfig
     $InstallLocationInfo = Get-QtInstallerFrameworkInstallLocationInfo -InstallerConfig $InstallerConfig -InterfaceInfo $InterfaceInfo
@@ -1600,58 +1600,58 @@ function Get-QtInstallerFrameworkInfo {
     }
 
     [pscustomobject]@{
-      Path                       = $File.FullName
-      InstallerType              = 'Qt Installer Framework'
-      BinaryMarker               = $Layout.MagicMarkerName
-      InterfaceVariant           = $InterfaceInfo.InterfaceVariant
-      CommandLineInterface       = $InterfaceInfo.CommandLineInterface
-      HasCommandLineInterface    = $InterfaceInfo.HasCommandLineInterface
-      CommandLineInterfaceEnabled = $InterfaceInfo.CommandLineInterfaceEnabled
-      SupportsSilentInstallation = $InterfaceInfo.SupportsSilentInstallation
-      DisableCommandLineInterface = $InterfaceInfo.DisabledByConfig
-      CommandLineInterfaceEvidence = $InterfaceInfo.Evidence
-      PESubsystem                = $InterfaceInfo.Evidence.PESubsystem
-      PackageName                = $InstallerConfig.PackageName
-      DisplayName                = $InstallerConfig.DisplayName
-      ProductName                = $InstallerConfig.PackageName
-      DisplayVersion             = $InstallerConfig.DisplayVersion
-      ProductVersion             = $InstallerConfig.ProductVersion
-      Publisher                  = $InstallerConfig.Publisher
-      ProductUrl                 = $InstallerConfig.ProductUrl
-      Title                      = $InstallerConfig.Title
-      ProductCode                = $InstallerConfig.ProductCode
-      TargetDir                  = $InstallerConfig.TargetDir
-      AdminTargetDir             = $InstallerConfig.AdminTargetDir
-      HasDefaultTargetDir        = $InstallLocationInfo.HasDefaultTargetDir
-      RequiresExplicitInstallLocation = $InstallLocationInfo.RequiresExplicitInstallLocation
-      InstallLocationSwitch      = $InstallLocationInfo.InstallLocationSwitch
-      InstallLocationEvidence    = $InstallLocationInfo.Evidence
+      Path                                 = $File.FullName
+      InstallerType                        = 'Qt Installer Framework'
+      BinaryMarker                         = $Layout.MagicMarkerName
+      InterfaceVariant                     = $InterfaceInfo.InterfaceVariant
+      CommandLineInterface                 = $InterfaceInfo.CommandLineInterface
+      HasCommandLineInterface              = $InterfaceInfo.HasCommandLineInterface
+      CommandLineInterfaceEnabled          = $InterfaceInfo.CommandLineInterfaceEnabled
+      SupportsSilentInstallation           = $InterfaceInfo.SupportsSilentInstallation
+      DisableCommandLineInterface          = $InterfaceInfo.DisabledByConfig
+      CommandLineInterfaceEvidence         = $InterfaceInfo.Evidence
+      PESubsystem                          = $InterfaceInfo.Evidence.PESubsystem
+      PackageName                          = $InstallerConfig.PackageName
+      DisplayName                          = $InstallerConfig.DisplayName
+      ProductName                          = $InstallerConfig.PackageName
+      DisplayVersion                       = $InstallerConfig.DisplayVersion
+      ProductVersion                       = $InstallerConfig.ProductVersion
+      Publisher                            = $InstallerConfig.Publisher
+      ProductUrl                           = $InstallerConfig.ProductUrl
+      Title                                = $InstallerConfig.Title
+      ProductCode                          = $InstallerConfig.ProductCode
+      TargetDir                            = $InstallerConfig.TargetDir
+      AdminTargetDir                       = $InstallerConfig.AdminTargetDir
+      HasDefaultTargetDir                  = $InstallLocationInfo.HasDefaultTargetDir
+      RequiresExplicitInstallLocation      = $InstallLocationInfo.RequiresExplicitInstallLocation
+      InstallLocationSwitch                = $InstallLocationInfo.InstallLocationSwitch
+      InstallLocationEvidence              = $InstallLocationInfo.Evidence
       SupportsExistingInstallationOverride = $UpgradeInfo.SupportsExistingInstallationOverride
-      ExistingInstallationMarker = $UpgradeInfo.ExistingInstallationMarker
-      RecommendedUpgradeBehavior = $UpgradeInfo.RecommendedUpgradeBehavior
-      UpgradeEvidence            = $UpgradeInfo.Evidence
-      Scope                      = $ScopeInfo.Scope
-      DefaultScope               = $ScopeInfo.DefaultScope
-      SupportedScopes            = $ScopeInfo.SupportedScopes
-      SupportsUserScope          = $ScopeInfo.SupportsUserScope
-      SupportsMachineScope       = $ScopeInfo.SupportsMachineScope
-      SupportsDualScope          = $ScopeInfo.SupportsDualScope
-      SupportsCommandLineScopeOverride = $ScopeInfo.SupportsCommandLineScopeOverride
-      UserScopeSwitch            = $ScopeInfo.UserScopeSwitch
-      MachineScopeSwitch         = $ScopeInfo.MachineScopeSwitch
-      ScopeEvidence              = $ScopeInfo.Evidence
-      StartMenuDir               = $InstallerConfig.StartMenuDir
-      MaintenanceToolName        = $InstallerConfig.MaintenanceToolName
-      MaintenanceToolIniFile     = $InstallerConfig.MaintenanceToolIniFile
-      SupportsModify             = $InstallerConfig.SupportsModify
-      WritesAppsAndFeaturesEntry = $true
-      InstallerConfigSource      = if ($InstallerXmlResource) { $InstallerXmlResource[0].Source } else { $null }
-      MetadataResourceCount      = $Layout.MetaResourceCount
-      ResourceCollectionCount    = @(Get-QtInstallerFrameworkResourceCollection -Path $File.FullName -Layout $Layout).Count
-      MetadataRoots              = @($MetadataResources | Select-Object -ExpandProperty Root -Unique)
-      RawInstallerConfig         = $InstallerConfig.RawValues
-      Warnings                   = $Warnings.ToArray()
-      ParserVersionInfo          = [pscustomobject]@{
+      ExistingInstallationMarker           = $UpgradeInfo.ExistingInstallationMarker
+      RecommendedUpgradeBehavior           = $UpgradeInfo.RecommendedUpgradeBehavior
+      UpgradeEvidence                      = $UpgradeInfo.Evidence
+      Scope                                = $ScopeInfo.Scope
+      DefaultScope                         = $ScopeInfo.DefaultScope
+      SupportedScopes                      = $ScopeInfo.SupportedScopes
+      SupportsUserScope                    = $ScopeInfo.SupportsUserScope
+      SupportsMachineScope                 = $ScopeInfo.SupportsMachineScope
+      SupportsDualScope                    = $ScopeInfo.SupportsDualScope
+      SupportsCommandLineScopeOverride     = $ScopeInfo.SupportsCommandLineScopeOverride
+      UserScopeSwitch                      = $ScopeInfo.UserScopeSwitch
+      MachineScopeSwitch                   = $ScopeInfo.MachineScopeSwitch
+      ScopeEvidence                        = $ScopeInfo.Evidence
+      StartMenuDir                         = $InstallerConfig.StartMenuDir
+      MaintenanceToolName                  = $InstallerConfig.MaintenanceToolName
+      MaintenanceToolIniFile               = $InstallerConfig.MaintenanceToolIniFile
+      SupportsModify                       = $InstallerConfig.SupportsModify
+      WritesAppsAndFeaturesEntry           = $true
+      InstallerConfigSource                = if ($InstallerXmlResource) { $InstallerXmlResource[0].Source } else { $null }
+      MetadataResourceCount                = $Layout.MetaResourceCount
+      ResourceCollectionCount              = @(Get-QtInstallerFrameworkResourceCollection -Path $File.FullName -Layout $Layout).Count
+      MetadataRoots                        = @($MetadataResources | Select-Object -ExpandProperty Root -Unique)
+      RawInstallerConfig                   = $InstallerConfig.RawValues
+      Warnings                             = $Warnings.ToArray()
+      ParserVersionInfo                    = [pscustomobject]@{
         Parser          = 'Dumplings.QtInstallerFramework'
         BinaryLayout    = 'Qt Installer Framework BinaryContent'
         CookieSearch    = 'Last 1 MiB'

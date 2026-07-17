@@ -165,7 +165,7 @@ Describe 'Advanced Installer parser' {
           SelectorGroup = 0
         }
       ) -GeneralOptions ([pscustomobject]@{
-          MainAppURL  = 'https://downloads.example.test/Product.msi?token=value'
+          MainAppURL   = 'https://downloads.example.test/Product.msi?token=value'
           AllPlatforms = 'true'
         })
 

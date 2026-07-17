@@ -388,18 +388,18 @@ function Get-NSISFirstHeaderCandidate {
           [uint64]0
         }
         return [pscustomobject]@{
-          Offset                = $Offset
-          Flags                 = $Flags
-          FirstHeaderSize       = $FirstHeaderSize
-          IsNsisBi              = $IsNsisBi
+          Offset                  = $Offset
+          Flags                   = $Flags
+          FirstHeaderSize         = $FirstHeaderSize
+          IsNsisBi                = $IsNsisBi
           HasLongDataBlockOffsets = ($Flags -band $Script:NSISBI_FLAG_LONG_DATA_BLOCK_OFFSET) -ne 0
-          HasLargeFileSource    = ($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0
-          SupportsExternalFiles = ($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0
-          HasExternalFile       = ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
-          IsStubInstaller       = ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
-          DataBlockLength       = $DataBlockLength
-          LengthOfHeader        = $LengthOfHeader
-          LengthOfFollowingData = $LengthOfFollowingData
+          HasLargeFileSource      = ($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0
+          SupportsExternalFiles   = ($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0
+          HasExternalFile         = ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
+          IsStubInstaller         = ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
+          DataBlockLength         = $DataBlockLength
+          LengthOfHeader          = $LengthOfHeader
+          LengthOfFollowingData   = $LengthOfFollowingData
         }
       }
       if ($SearchLength -eq $Stream.Length - $SearchStart) { break }
@@ -433,18 +433,18 @@ function Get-NSISFirstHeaderCandidate {
     if (-not (Test-NSISPEHeaderBeforeArchive -Bytes $Bytes -FirstHeaderOffset $Offset)) { continue }
 
     return [pscustomobject]@{
-      Offset                = $Offset
-      Flags                 = $Flags
-      FirstHeaderSize       = $FirstHeaderSize
-      IsNsisBi              = $IsNsisBi
+      Offset                  = $Offset
+      Flags                   = $Flags
+      FirstHeaderSize         = $FirstHeaderSize
+      IsNsisBi                = $IsNsisBi
       HasLongDataBlockOffsets = ($Flags -band $Script:NSISBI_FLAG_LONG_DATA_BLOCK_OFFSET) -ne 0
-      HasLargeFileSource    = ($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0
-      SupportsExternalFiles = ($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0
-      HasExternalFile       = ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
-      IsStubInstaller       = ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
-      DataBlockLength       = if ($FirstHeaderSize -eq $Script:NSISBI_FIRST_HEADER_SIZE) { [BitConverter]::ToUInt64($Bytes, $Offset + 28) } else { [uint64]0 }
-      LengthOfHeader        = $LengthOfHeader
-      LengthOfFollowingData = $LengthOfFollowingData
+      HasLargeFileSource      = ($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0
+      SupportsExternalFiles   = ($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0
+      HasExternalFile         = ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
+      IsStubInstaller         = ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
+      DataBlockLength         = if ($FirstHeaderSize -eq $Script:NSISBI_FIRST_HEADER_SIZE) { [BitConverter]::ToUInt64($Bytes, $Offset + 28) } else { [uint64]0 }
+      LengthOfHeader          = $LengthOfHeader
+      LengthOfFollowingData   = $LengthOfFollowingData
     }
   }
 
@@ -660,55 +660,55 @@ function Get-NSISHeaderData {
     if ($PayloadDataLength -le 0 -or $PayloadDataLength -gt $AvailablePayloadDataLength) { throw 'The NSIS compressed header data range is invalid' }
     $LastError = $null
 
-  foreach ($Compression in $CompressionCandidates) {
-    $PayloadStream = New-BoundedReadStream -Stream $InstallerStream -Offset $PayloadDataOffset -Length $PayloadDataLength -LeaveOpen
-    $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $CandidateHeader } else { -1 }
-    $Decoder = $null
+    foreach ($Compression in $CompressionCandidates) {
+      $PayloadStream = New-BoundedReadStream -Stream $InstallerStream -Offset $PayloadDataOffset -Length $PayloadDataLength -LeaveOpen
+      $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $CandidateHeader } else { -1 }
+      $Decoder = $null
 
-    try {
-      $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -IsSolid $IsSolid -LzmaFilterLength $LzmaFilterLength
+      try {
+        $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -IsSolid $IsSolid -LzmaFilterLength $LzmaFilterLength
 
-      if ($IsSolid -and $Compression -ne 'None') {
-        $HeaderSizeBytes = New-Object 'byte[]' 4
-        if ($Decoder.Read($HeaderSizeBytes, 0, $HeaderSizeBytes.Length) -ne $HeaderSizeBytes.Length) { throw 'The NSIS solid header length is truncated' }
-        $EmbeddedHeaderLength = [System.BitConverter]::ToUInt32($HeaderSizeBytes, 0)
-        if ($EmbeddedHeaderLength -ne $LengthOfHeader) { throw 'The NSIS solid header length does not match the first header' }
+        if ($IsSolid -and $Compression -ne 'None') {
+          $HeaderSizeBytes = New-Object 'byte[]' 4
+          if ($Decoder.Read($HeaderSizeBytes, 0, $HeaderSizeBytes.Length) -ne $HeaderSizeBytes.Length) { throw 'The NSIS solid header length is truncated' }
+          $EmbeddedHeaderLength = [System.BitConverter]::ToUInt32($HeaderSizeBytes, 0)
+          if ($EmbeddedHeaderLength -ne $LengthOfHeader) { throw 'The NSIS solid header length does not match the first header' }
+        }
+
+        $HeaderBytes = New-Object 'byte[]' ([int]$LengthOfHeader)
+        $Read = 0
+        while ($Read -lt $HeaderBytes.Length) {
+          $ChunkSize = $Decoder.Read($HeaderBytes, $Read, $HeaderBytes.Length - $Read)
+          if ($ChunkSize -le 0) { break }
+          $Read += $ChunkSize
+        }
+        if ($Read -ne $HeaderBytes.Length) { throw 'The NSIS header stream is truncated' }
+
+        return [pscustomobject]@{
+          Path                    = $InstallerPath
+          FirstHeaderOffset       = $FirstHeaderOffset
+          FirstHeaderFlags        = $FirstHeader.Flags
+          FirstHeaderSize         = $FirstHeader.FirstHeaderSize
+          IsNsisBi                = $FirstHeader.IsNsisBi
+          HasLongDataBlockOffsets = $FirstHeader.HasLongDataBlockOffsets
+          HasLargeFileSource      = $FirstHeader.HasLargeFileSource
+          SupportsExternalFiles   = $FirstHeader.SupportsExternalFiles
+          HasExternalFile         = $FirstHeader.HasExternalFile
+          IsStubInstaller         = $FirstHeader.IsStubInstaller
+          DataBlockLength         = $FirstHeader.DataBlockLength
+          ArchiveSize             = $LengthOfFollowingData
+          Compression             = $Compression
+          IsSolid                 = $IsSolid
+          HeaderBytes             = $HeaderBytes
+          PEInfo                  = Get-PEInfo -Path $InstallerPath
+        }
+      } catch {
+        $LastError = $_
+      } finally {
+        if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
+        $PayloadStream.Dispose()
       }
-
-      $HeaderBytes = New-Object 'byte[]' ([int]$LengthOfHeader)
-      $Read = 0
-      while ($Read -lt $HeaderBytes.Length) {
-        $ChunkSize = $Decoder.Read($HeaderBytes, $Read, $HeaderBytes.Length - $Read)
-        if ($ChunkSize -le 0) { break }
-        $Read += $ChunkSize
-      }
-      if ($Read -ne $HeaderBytes.Length) { throw 'The NSIS header stream is truncated' }
-
-      return [pscustomobject]@{
-        Path              = $InstallerPath
-        FirstHeaderOffset = $FirstHeaderOffset
-        FirstHeaderFlags  = $FirstHeader.Flags
-        FirstHeaderSize   = $FirstHeader.FirstHeaderSize
-        IsNsisBi          = $FirstHeader.IsNsisBi
-        HasLongDataBlockOffsets = $FirstHeader.HasLongDataBlockOffsets
-        HasLargeFileSource = $FirstHeader.HasLargeFileSource
-        SupportsExternalFiles = $FirstHeader.SupportsExternalFiles
-        HasExternalFile   = $FirstHeader.HasExternalFile
-        IsStubInstaller   = $FirstHeader.IsStubInstaller
-        DataBlockLength   = $FirstHeader.DataBlockLength
-        ArchiveSize       = $LengthOfFollowingData
-        Compression       = $Compression
-        IsSolid           = $IsSolid
-        HeaderBytes       = $HeaderBytes
-        PEInfo            = Get-PEInfo -Path $InstallerPath
-      }
-    } catch {
-      $LastError = $_
-    } finally {
-      if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
-      $PayloadStream.Dispose()
     }
-  }
 
     throw "Failed to decode the NSIS header using $($CompressionCandidates -join ', '): $($LastError.Exception.Message)"
   } finally {
@@ -782,12 +782,12 @@ function Get-NSISHeaderLayout {
   $HeaderOffset = 4 + ($BlockHeaderSize * $Script:NSIS_BLOCK_HEADER_COUNT)
 
   return [pscustomobject]@{
-    HeaderOffset                 = $HeaderOffset
-    LanguageTableSize            = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_LANG_TABLE_SIZE)
-    CodeOnInit                   = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_CODE_ON_INIT)
-    CodeOnInstSuccess            = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_CODE_ON_INST_SUCCESS)
-    InstallDirectoryPointer      = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_INSTALL_DIRECTORY)
-    InstallDirectoryAutoAppend   = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_INSTALL_DIRECTORY_AUTO_APPEND)
+    HeaderOffset               = $HeaderOffset
+    LanguageTableSize          = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_LANG_TABLE_SIZE)
+    CodeOnInit                 = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_CODE_ON_INIT)
+    CodeOnInstSuccess          = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_CODE_ON_INST_SUCCESS)
+    InstallDirectoryPointer    = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_INSTALL_DIRECTORY)
+    InstallDirectoryAutoAppend = [System.BitConverter]::ToInt32($HeaderBytes, $HeaderOffset + $Script:NSIS_HEADER_OFFSET_INSTALL_DIRECTORY_AUTO_APPEND)
   }
 }
 
@@ -815,7 +815,7 @@ function Get-NSISBlockBytes {
   )
 
   $Start = [int]$BlockHeaders[$Index].Offset
-  if ($Start -lt 0 -or $Start -gt $HeaderBytes.Length) { return ,([byte[]]::new(0)) }
+  if ($Start -lt 0 -or $Start -gt $HeaderBytes.Length) { return , ([byte[]]::new(0)) }
 
   $End = $HeaderBytes.Length
   foreach ($BlockHeader in $BlockHeaders | Select-Object -Skip ($Index + 1)) {
@@ -825,14 +825,14 @@ function Get-NSISBlockBytes {
     }
   }
 
-  if ($End -le $Start) { return ,([byte[]]::new(0)) }
+  if ($End -le $Start) { return , ([byte[]]::new(0)) }
 
   $Length = $End - $Start
   $BlockBytes = [byte[]]::new($Length)
 
   # PowerShell array slicing widens byte[] to object[], which makes downstream BitConverter reads extremely slow.
   [System.Buffer]::BlockCopy($HeaderBytes, $Start, $BlockBytes, 0, $Length)
-  return ,$BlockBytes
+  return , $BlockBytes
 }
 
 function Get-NSISPrimaryLanguageTable {
@@ -2009,43 +2009,43 @@ function Initialize-NSISState {
   }
 
   $State = [pscustomobject]@{
-    Path            = $HeaderData.Path
-    Entries         = $Entries
-    Sections        = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
-    StringsBlock    = $StringsBlock
-    LanguageTable   = $LanguageTable
-    VersionInfo     = $VersionInfo
-    Variables       = @{}
-    Registry        = @{}
-    RegistryWrites  = [System.Collections.Generic.List[object]]::new()
+    Path             = $HeaderData.Path
+    Entries          = $Entries
+    Sections         = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+    StringsBlock     = $StringsBlock
+    LanguageTable    = $LanguageTable
+    VersionInfo      = $VersionInfo
+    Variables        = @{}
+    Registry         = @{}
+    RegistryWrites   = [System.Collections.Generic.List[object]]::new()
     ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
-    Warnings        = [System.Collections.Generic.List[string]]::new()
-    Stack           = [System.Collections.Generic.List[string]]::new()
-    Directories     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Files           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    ExecFlags       = @{}
-    LastExecFlags   = @{}
-    ShellVarContext = $null
-    Metadata        = [ordered]@{
-      Path                   = $HeaderData.Path
-      InstallerType          = 'Nullsoft'
-      DisplayVersion         = $null
-      DisplayName            = $null
-      Publisher              = $null
-      ProductCode            = $null
-      DefaultInstallLocation = $null
-      UninstallString        = $null
-      QuietUninstallString   = $null
-      DisplayIcon            = $null
-      SystemComponent        = $null
-      Scope                  = $null
+    Warnings         = [System.Collections.Generic.List[string]]::new()
+    Stack            = [System.Collections.Generic.List[string]]::new()
+    Directories      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Files            = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    ExecFlags        = @{}
+    LastExecFlags    = @{}
+    ShellVarContext  = $null
+    Metadata         = [ordered]@{
+      Path                       = $HeaderData.Path
+      InstallerType              = 'Nullsoft'
+      DisplayVersion             = $null
+      DisplayName                = $null
+      Publisher                  = $null
+      ProductCode                = $null
+      DefaultInstallLocation     = $null
+      UninstallString            = $null
+      QuietUninstallString       = $null
+      DisplayIcon                = $null
+      SystemComponent            = $null
+      Scope                      = $null
       WritesAppsAndFeaturesEntry = $false
-      RegistryValues         = @{}
-      RegistryWrites         = @()
-      ExtractedFiles         = @()
-      ExecutedPayloads       = @()
-      Warnings               = @()
-      ParserVersionInfo      = $null
+      RegistryValues             = @{}
+      RegistryWrites             = @()
+      ExtractedFiles             = @()
+      ExecutedPayloads           = @()
+      Warnings                   = @()
+      ParserVersionInfo          = $null
     }
   }
 
@@ -2077,8 +2077,8 @@ function Initialize-NSISState {
   }
 
   return [pscustomobject]@{
-    State       = $State
-    Layout      = $Layout
+    State        = $State
+    Layout       = $Layout
     BlockHeaders = $BlockHeaders
   }
 }
@@ -2180,7 +2180,7 @@ function Invoke-NSISEntry {
       if ($Result -eq 'Quit' -or $Result -eq 'Abort') {
         return [pscustomobject]@{ Action = $Result; Address = 0 }
       } else {
-      return $Script:NSIS_CONTINUE_RESULT
+        return $Script:NSIS_CONTINUE_RESULT
       }
     }
     $Script:NSIS_OPCODE_CREATE_DIR {
@@ -2254,7 +2254,7 @@ function Invoke-NSISEntry {
 
       if ($NewLength -le 0) {
         $null = $State.Variables.Remove([Math]::Abs($Values[1]))
-      return $Script:NSIS_CONTINUE_RESULT
+        return $Script:NSIS_CONTINUE_RESULT
       }
 
       if ($Start -lt 0) { $Start += $Result.Length }
@@ -2652,8 +2652,8 @@ function Get-NSISInstallerSwitchInfo {
         $LooksLikeNestedCommand = $String -match '(?i)\b(taskkill|cmd(?:\.exe)?|powershell(?:\.exe)?|reg(?:\.exe)?|regsvr32(?:\.exe)?|msiexec(?:\.exe)?|rundll32(?:\.exe)?)\b'
         if (-not ($IsKnownSwitch -or $HasParsingEvidence -or ($IsStandaloneEvidence -and -not $LooksLikeNestedCommand))) {
           $RejectedSwitches.Add([pscustomobject]@{
-              Switch = $Value
-              Reason = 'Internal command-line or non-installer switch evidence'
+              Switch   = $Value
+              Reason   = 'Internal command-line or non-installer switch evidence'
               Evidence = $String
             })
           continue
@@ -2661,13 +2661,13 @@ function Get-NSISInstallerSwitchInfo {
         if (-not $Seen.Add($Value)) { continue }
         $Evidence = @($Strings | Where-Object { $_ -like "*$Value*" } | Select-Object -First 5)
         $Switches.Add([pscustomobject]@{
-            Switch                = $Value
-            Name                  = $Name
-            IsDefaultNsisSwitch   = $DefaultSwitches.Contains($Name)
-            IsScopeSwitch         = $ScopeSwitches.Contains($Name)
-            IsSilentSwitch        = $SilentSwitches.Contains($Name)
-            IsCustomCandidate     = -not $DefaultSwitches.Contains($Name)
-            Evidence              = $Evidence
+            Switch              = $Value
+            Name                = $Name
+            IsDefaultNsisSwitch = $DefaultSwitches.Contains($Name)
+            IsScopeSwitch       = $ScopeSwitches.Contains($Name)
+            IsSilentSwitch      = $SilentSwitches.Contains($Name)
+            IsCustomCandidate   = -not $DefaultSwitches.Contains($Name)
+            Evidence            = $Evidence
           })
       }
     }
@@ -2675,15 +2675,15 @@ function Get-NSISInstallerSwitchInfo {
     $AdditionalSwitches = @($Switches | Where-Object { $_.IsCustomCandidate } | Select-Object -ExpandProperty Switch)
 
     [pscustomobject]@{
-      Path                        = (Get-Item -Path $Path -Force).FullName
-      InstallerType               = 'Nullsoft'
-      Switches                    = $Switches.ToArray()
-      AdditionalSwitches          = $AdditionalSwitches
-      ScopeSwitches               = @($Switches | Where-Object { $_.IsScopeSwitch } | Select-Object -ExpandProperty Switch)
-      SilentSwitches              = @($Switches | Where-Object { $_.IsSilentSwitch } | Select-Object -ExpandProperty Switch)
-      CommandLineParsingEvidence  = $ParsingMarkers
-      RejectedSwitchCandidates    = $RejectedSwitches.ToArray()
-      Warnings                    = @('Switch extraction is static string evidence. Confirm switch control-flow in the NSIS script or a VM before using custom switches in manifests.')
+      Path                       = (Get-Item -Path $Path -Force).FullName
+      InstallerType              = 'Nullsoft'
+      Switches                   = $Switches.ToArray()
+      AdditionalSwitches         = $AdditionalSwitches
+      ScopeSwitches              = @($Switches | Where-Object { $_.IsScopeSwitch } | Select-Object -ExpandProperty Switch)
+      SilentSwitches             = @($Switches | Where-Object { $_.IsSilentSwitch } | Select-Object -ExpandProperty Switch)
+      CommandLineParsingEvidence = $ParsingMarkers
+      RejectedSwitchCandidates   = $RejectedSwitches.ToArray()
+      Warnings                   = @('Switch extraction is static string evidence. Confirm switch control-flow in the NSIS script or a VM before using custom switches in manifests.')
     }
   }
 }
@@ -2828,23 +2828,23 @@ function Get-ElectronBuilderNSISInfo {
     }
 
     [pscustomobject]@{
-      Path                  = (Get-Item -Path $Path -Force).FullName
-      InstallerType         = 'Nullsoft'
-      Family                = 'electron-builder'
-      IsElectronBuilder     = $Detection.IsElectronBuilder
-      Architectures         = @($Architectures)
-      Architecture          = if ($Architectures.Count -gt 0) { Get-ElectronBuilderNSISArchitecture -Architectures @($Architectures) } else { $null }
-      SupportedScopes       = [string[]]$SupportedScopes
-      SupportsUserScope     = $SupportedScopes -contains 'user'
-      SupportsMachineScope  = $SupportedScopes -contains 'machine'
-      SupportsDualScope     = $SupportedScopes.Count -gt 1
-      ProductCode           = $State.Metadata.ProductCode
-      DisplayName           = $State.Metadata.DisplayName
-      DisplayVersion        = $State.Metadata.DisplayVersion
-      Publisher             = $State.Metadata.Publisher
+      Path                   = (Get-Item -Path $Path -Force).FullName
+      InstallerType          = 'Nullsoft'
+      Family                 = 'electron-builder'
+      IsElectronBuilder      = $Detection.IsElectronBuilder
+      Architectures          = @($Architectures)
+      Architecture           = if ($Architectures.Count -gt 0) { Get-ElectronBuilderNSISArchitecture -Architectures @($Architectures) } else { $null }
+      SupportedScopes        = [string[]]$SupportedScopes
+      SupportsUserScope      = $SupportedScopes -contains 'user'
+      SupportsMachineScope   = $SupportedScopes -contains 'machine'
+      SupportsDualScope      = $SupportedScopes.Count -gt 1
+      ProductCode            = $State.Metadata.ProductCode
+      DisplayName            = $State.Metadata.DisplayName
+      DisplayVersion         = $State.Metadata.DisplayVersion
+      Publisher              = $State.Metadata.Publisher
       DefaultInstallLocation = $State.Metadata.DefaultInstallLocation
-      Evidence              = [pscustomobject]@{
-        AppPackageFiles = $Detection.AppPackageFiles
+      Evidence               = [pscustomobject]@{
+        AppPackageFiles  = $Detection.AppPackageFiles
         HasUpdatedSwitch = $Detection.HasUpdatedSwitch
         HasDualScopeUi   = $Detection.HasDualScopeUi
       }

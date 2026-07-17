@@ -130,7 +130,7 @@ function Read-AdvancedInstallerBytes {
     [int]$Length
   )
 
-  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Length)
+  return , (Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Length)
 }
 
 function Test-AdvancedInstallerFooterOffset {
@@ -480,7 +480,7 @@ function Read-AdvancedInstallerEntryData {
   for ($Index = 0; $Index -lt $DecodedHeaderLength; $Index++) {
     $Bytes[$Index] = $Bytes[$Index] -bxor 0xFF
   }
-  return ,$Bytes
+  return , $Bytes
 }
 
 function ConvertFrom-AdvancedInstallerIniData {
@@ -510,7 +510,7 @@ function ConvertFrom-AdvancedInstallerIniData {
 
   $Sections = [ordered]@{}
   $CurrentSection = $null
-  foreach ($Line in @($Text.TrimStart([char]0xFEFF) -split "\r\n|\n|\r")) {
+  foreach ($Line in @($Text.TrimStart([char]0xFEFF) -split '\r\n|\n|\r')) {
     $TrimmedLine = $Line.Trim()
     if ([string]::IsNullOrWhiteSpace($TrimmedLine) -or $TrimmedLine.StartsWith(';') -or $TrimmedLine.StartsWith('#')) { continue }
 
@@ -632,20 +632,20 @@ function Get-AdvancedInstallerMsiPayloadSelection {
   if (-not [string]::IsNullOrWhiteSpace($MainAppUrl)) {
     $PlatformMainAppUrl = $AllPlatforms ? (Add-AdvancedInstallerUrlArchitectureSuffix -Url $MainAppUrl -Suffix '.x64') : $MainAppUrl
     return [pscustomobject]@{
-      SelectionMethod          = 'MainAppUrl'
+      SelectionMethod           = 'MainAppUrl'
       ArchitectureSelectionMode = $AllPlatforms ? 'Wow64Suffix' : 'FixedPath'
-      SourceEntryName          = $null
-      SourceEntryIndex         = $null
-      SourceKind               = 'Download'
-      BaseMsiPath              = $null
-      X86MsiPath               = $null
-      X64MsiPath               = $null
-      Arm64MsiPath             = $null
-      AllPlatforms             = $AllPlatforms
-      MainAppUrl               = $MainAppUrl
-      X86MainAppUrl            = $MainAppUrl
-      X64MainAppUrl            = $PlatformMainAppUrl
-      Arm64MainAppUrl          = $PlatformMainAppUrl
+      SourceEntryName           = $null
+      SourceEntryIndex          = $null
+      SourceKind                = 'Download'
+      BaseMsiPath               = $null
+      X86MsiPath                = $null
+      X64MsiPath                = $null
+      Arm64MsiPath              = $null
+      AllPlatforms              = $AllPlatforms
+      MainAppUrl                = $MainAppUrl
+      X86MainAppUrl             = $MainAppUrl
+      X64MainAppUrl             = $PlatformMainAppUrl
+      Arm64MainAppUrl           = $PlatformMainAppUrl
     }
   }
 
