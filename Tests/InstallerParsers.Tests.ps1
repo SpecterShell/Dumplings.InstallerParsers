@@ -174,6 +174,42 @@ Describe 'NSIS parser' {
     $Result.Length | Should -BeGreaterThan 0
   }
 
+  It 'Should recognize the source-backed NSISBI first-header layout' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Bytes = [byte[]]::new(1024)
+      $Bytes[0] = 0x4D
+      $Bytes[1] = 0x5A
+      [Array]::Copy([BitConverter]::GetBytes([uint32]0x40), 0, $Bytes, 0x3C, 4)
+      [Array]::Copy([BitConverter]::GetBytes([uint32]0x00004550), 0, $Bytes, 0x40, 4)
+      [Array]::Copy([BitConverter]::GetBytes([uint16]96), 0, $Bytes, 0x54, 2)
+
+      $HeaderOffset = 512
+      [Array]::Copy([BitConverter]::GetBytes([uint32]0x50), 0, $Bytes, $HeaderOffset, 4)
+      [Array]::Copy($Script:NSIS_FIRST_HEADER_SIGNATURE, 0, $Bytes, $HeaderOffset + 4, $Script:NSIS_FIRST_HEADER_SIGNATURE.Length)
+      [Array]::Copy([BitConverter]::GetBytes([uint32]128), 0, $Bytes, $HeaderOffset + 20, 4)
+      [Array]::Copy([BitConverter]::GetBytes([uint32]512), 0, $Bytes, $HeaderOffset + 24, 4)
+
+      $Candidate = Get-NSISFirstHeaderCandidate -Bytes $Bytes
+      [Array]::Copy([BitConverter]::GetBytes([uint32]0x250), 0, $Bytes, $HeaderOffset, 4)
+      $InvalidCandidate = Get-NSISFirstHeaderCandidate -Bytes $Bytes
+
+      [pscustomobject]@{
+        IsNsisBi                = $Candidate.IsNsisBi
+        FirstHeaderSize         = $Candidate.FirstHeaderSize
+        HasLongDataBlockOffsets = $Candidate.HasLongDataBlockOffsets
+        SupportsExternalFiles   = $Candidate.SupportsExternalFiles
+        InvalidCandidate        = $InvalidCandidate
+      }
+    }
+
+    $Result.IsNsisBi | Should -BeTrue
+    $Result.FirstHeaderSize | Should -Be 36
+    $Result.HasLongDataBlockOffsets | Should -BeTrue
+    $Result.SupportsExternalFiles | Should -BeTrue
+    $Result.InvalidCandidate | Should -BeNullOrEmpty
+  }
+
   It 'Should recover uninstall metadata from source-accurate EW_WRITEREG entries' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -247,6 +283,67 @@ Describe 'NSIS parser' {
     $Result.DisplayVersion | Should -Be '7.7.0-Release.80131'
     $Result.ProductCode | Should -Be 'CCFLink'
     $Result.Scope | Should -Be 'machine'
+  }
+
+  It 'Should normalize NSISBI opcodes and shifted EW_WRITEREG operands' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $StringBytes = [System.Collections.Generic.List[byte]]::new()
+
+      function Add-TestString {
+        param([string]$Text)
+
+        $Offset = [int]($StringBytes.Count / 2)
+        $StringBytes.AddRange([System.Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+
+      $KeyOffset = Add-TestString 'Software\Microsoft\Windows\CurrentVersion\Uninstall\NSISBIApp'
+      $NameOffset = Add-TestString 'DisplayVersion'
+      $ValueOffset = Add-TestString '6.7.3.0'
+      $HklmRawValue = [uint32]$Script:NSIS_REG_ROOT_HKLM
+      $HklmSignedValue = [BitConverter]::ToInt32([BitConverter]::GetBytes($HklmRawValue), 0)
+      $RawOpcode = [uint32]53
+      $LayoutOpcode = ConvertFrom-NSISBiOpcode -Opcode $RawOpcode
+      $State = [pscustomobject]@{
+        Entries = @([pscustomobject]@{
+            Opcode       = $LayoutOpcode
+            RawOpcode    = $RawOpcode
+            LayoutOpcode = $LayoutOpcode
+            Raw          = [uint32[]]@($RawOpcode, $HklmRawValue, $KeyOffset, $NameOffset, $ValueOffset, 0, 1, 1, 0)
+            Values       = [int[]]@($RawOpcode, $HklmSignedValue, $KeyOffset, $NameOffset, $ValueOffset, 0, 1, 1, 0)
+          })
+        StringsBlock     = $StringBytes.ToArray()
+        VersionInfo      = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3'; IsNsisBi = $true }
+        Variables        = @{}
+        Registry         = @{}
+        RegistryWrites   = [System.Collections.Generic.List[object]]::new()
+        ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
+        Warnings         = [System.Collections.Generic.List[string]]::new()
+        Files            = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        ShellVarContext  = 'HKLM'
+        Metadata         = [ordered]@{
+          DisplayVersion = $null; DisplayName = $null; Publisher = $null; ProductCode = $null
+          DefaultInstallLocation = $null; UninstallString = $null; QuietUninstallString = $null
+          DisplayIcon = $null; SystemComponent = $null; Scope = $null; WritesAppsAndFeaturesEntry = $false
+          RegistryValues = @{}; RegistryWrites = @(); ExtractedFiles = @(); ExecutedPayloads = @()
+          Warnings = @(); ParserVersionInfo = $null
+        }
+      }
+
+      Add-NSISDirectUninstallWrites -State $State
+      [pscustomobject]@{
+        LayoutOpcode   = $LayoutOpcode
+        DisplayVersion = $State.Metadata.DisplayVersion
+        ProductCode    = $State.Metadata.ProductCode
+        RegistryType   = $State.RegistryWrites[0].Type
+      }
+    }
+
+    $Result.LayoutOpcode | Should -Be 51
+    $Result.DisplayVersion | Should -Be '6.7.3.0'
+    $Result.ProductCode | Should -Be 'NSISBIApp'
+    $Result.RegistryType | Should -Be 'REG_SZ'
   }
 
   It 'Should not treat the old fake opcode 53 as a registry write' {
@@ -418,6 +515,7 @@ Describe 'NSIS parser' {
         ShiftedSection  = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_SECTION_SET + 1) -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $true
         ParkFileWrite   = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_FILE_SEEK -Type 'Park1' -Unicode $true -LogCmdIsEnabled $false
         RegEnum         = Get-NSISNormalizedOpcode -Opcode 53 -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $false
+        NsisBiWriteReg  = ConvertFrom-NSISBiOpcode -Opcode 53
       }
     }
 
@@ -425,6 +523,7 @@ Describe 'NSIS parser' {
     $Result.ShiftedSection | Should -Be 63
     $Result.ParkFileWrite | Should -Be 68
     $Result.RegEnum | Should -Be 53
+    $Result.NsisBiWriteReg | Should -Be 51
   }
 
   It 'Should fail quickly on malformed NSIS headers' {
