@@ -2101,26 +2101,26 @@ function Initialize-NSISState {
     LastExecFlags    = @{}
     ShellVarContext  = $null
     Metadata         = [ordered]@{
-      Path                       = $HeaderData.Path
-      InstallerType              = 'Nullsoft'
-      DisplayVersion             = $null
-      DisplayName                = $null
-      Publisher                  = $null
-      ProductCode                = $null
-      DefaultInstallLocation     = $null
-      UninstallString            = $null
-      QuietUninstallString       = $null
-      DisplayIcon                = $null
-      SystemComponent            = $null
-      Scope                      = $null
-      WritesAppsAndFeaturesEntry = $false
+      Path                          = $HeaderData.Path
+      InstallerType                 = 'Nullsoft'
+      DisplayVersion                = $null
+      DisplayName                   = $null
+      Publisher                     = $null
+      ProductCode                   = $null
+      DefaultInstallLocation        = $null
+      UninstallString               = $null
+      QuietUninstallString          = $null
+      DisplayIcon                   = $null
+      SystemComponent               = $null
+      Scope                         = $null
+      WritesAppsAndFeaturesEntry    = $false
       DelegatesAppsAndFeaturesEntry = $false
-      RegistryValues             = @{}
-      RegistryWrites             = @()
-      ExtractedFiles             = @()
-      ExecutedPayloads           = @()
-      Warnings                   = @()
-      ParserVersionInfo          = $null
+      RegistryValues                = @{}
+      RegistryWrites                = @()
+      ExtractedFiles                = @()
+      ExecutedPayloads              = @()
+      Warnings                      = @()
+      ParserVersionInfo             = $null
     }
   }
 
