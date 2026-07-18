@@ -1,5 +1,20 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # Format sources: https://github.com/qtproject/installer-framework
+#
+# Binary structure consumed by this parser (trailer fields are int64 LE):
+#
+#   PE installerbase -> appended binary content
+#     +-- resource collection
+#     +-- metadata/resource/archive ranges
+#     `-- trailer ending in F8 68 D6 99 1C 0A 63 C2 (installer cookie)
+#
+#   [ResourceCollection:offset,length][MetaRange:offset,length]*
+#   [Operations:offset,length][ResourceCount][BinaryContentSize]
+#   [MagicMarker][Cookie:8]
+#
+# Segment offsets are relative to the binary-content base until adjusted by
+# EndOfExecutable. Metadata may contain Qt RCC trees; payloads may be 7z archives.
+# Count, range, RCC-node, archive, and expanded-output limits are enforced.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -315,6 +330,8 @@ function Get-QtInstallerFrameworkBinaryLayout {
     $File = Get-Item -Path $Path -Force
     $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
+      # IFW writes the segment table immediately before the terminal cookie. Work backward from
+      # that cookie instead of searching payload data for individual metadata signatures.
       $Cookie = Find-QtInstallerFrameworkMagicCookie -Stream $Stream
       $EndOfBinaryContent = $Cookie.Offset + 8
       $MetaDataCountOffset = $EndOfBinaryContent - 32
@@ -328,6 +345,7 @@ function Get-QtInstallerFrameworkBinaryLayout {
       $ResourceCollectionsSegmentOffset = $EndOfBinaryContent - (($MetaResourceCount * 16) + 64)
       if ($ResourceCollectionsSegmentOffset -lt 0) { throw 'Qt Installer Framework segment table is truncated' }
 
+      # Trailer ranges are relative to the binary-content area, not absolute file offsets.
       $ResourceCollectionsSegment = Read-QtInstallerFrameworkRange -Stream $Stream -Offset $ResourceCollectionsSegmentOffset
       $Cursor = $ResourceCollectionsSegmentOffset + 16
       $MetaResourceSegments = [System.Collections.Generic.List[object]]::new()
@@ -347,6 +365,8 @@ function Get-QtInstallerFrameworkBinaryLayout {
         throw "Invalid Qt Installer Framework executable/content split offset: $EndOfExecutable"
       }
 
+      # Rebase every relative segment only after the executable/content split has passed its
+      # range checks. This prevents a corrupt size from redirecting reads into the PE stub.
       $AdjustedMetaSegments = @(
         foreach ($Segment in $MetaResourceSegments) {
           $Moved = Move-QtInstallerFrameworkRange -Range $Segment -Offset $EndOfExecutable
@@ -429,6 +449,8 @@ function Get-QtInstallerFrameworkResourceCollection {
 
   $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
+    # The collection index and each collection's resource index use the same qint64
+    # length/range framing, but their ranges are independently relative to BinaryContent.
     $Cursor = [ref][int64]$Layout.ResourceCollectionsSegment.Start
     if ($Layout.ResourceCollectionsSegment.Length -lt 8) { return @() }
     $CollectionCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
@@ -446,6 +468,7 @@ function Get-QtInstallerFrameworkResourceCollection {
       $CollectionDataSegment = Move-QtInstallerFrameworkRange -Range $CollectionDataSegment -Offset $Layout.EndOfExecutable
       Assert-QtInstallerFrameworkRange -Range $CollectionDataSegment -FileLength $Stream.Length -Name 'resource collection data'
 
+      # Enter the collection-specific catalog only after validating its rebased file range.
       $DataCursor = [ref][int64]$CollectionDataSegment.Start
       $ResourceCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $DataCursor.Value
       $DataCursor.Value += 8
@@ -493,6 +516,7 @@ function Expand-QtInstallerFrameworkCompressedRccData {
   )
 
   if ($Data.Length -lt 4) { throw 'The compressed Qt RCC payload is truncated' }
+  # qCompress prefixes its Zlib stream with the expected size in network byte order.
   $ExpectedLength = Read-QtInstallerFrameworkUInt32BE -Bytes $Data -Offset 0
   if ($ExpectedLength -gt $QTIFW_MAX_BYTE_ARRAY_LENGTH) {
     throw "The compressed Qt RCC payload expands too large: $ExpectedLength bytes"
@@ -562,6 +586,8 @@ function Get-QtInstallerFrameworkRccResource {
     throw 'The Qt RCC resource does not start with qres'
   }
 
+  # RCC stores three absolute offsets from the start of the qres buffer. Validate the complete
+  # section map before following any tree node or data pointer.
   $Version = Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 4
   $TreeOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 8)
   $DataOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 12)
@@ -571,6 +597,8 @@ function Get-QtInstallerFrameworkRccResource {
     throw 'The Qt RCC section offsets are invalid'
   }
 
+  # Traverse the indexed tree iteratively so maliciously deep directory nesting cannot exhaust
+  # the PowerShell call stack.
   $Resources = [System.Collections.Generic.List[object]]::new()
   $Queue = [System.Collections.Queue]::new()
   $Queue.Enqueue([pscustomobject]@{ Index = 0; Path = ':' })
@@ -587,6 +615,7 @@ function Get-QtInstallerFrameworkRccResource {
     $Path = if ($IsRootNode) { ':' } elseif ($Current.Path -eq ':') { ":/$Name" } else { "$($Current.Path)/$Name" }
 
     if (($Flags -band $QTIFW_RCC_FLAG_DIRECTORY) -ne 0) {
+      # Directory records point to a contiguous run of child nodes in the tree table.
       $ChildCount = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset ($NodeOffset + 6))
       $ChildOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset ($NodeOffset + 10))
       if ($ChildCount -lt 0 -or $ChildCount -gt $QTIFW_MAX_RESOURCE_COUNT) {
@@ -596,6 +625,7 @@ function Get-QtInstallerFrameworkRccResource {
         $Queue.Enqueue([pscustomobject]@{ Index = $ChildOffset + $ChildIndex; Path = $Path })
       }
     } else {
+      # File records point into the data section, where a BE length precedes the payload.
       $DataBlobOffset = $DataOffset + [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset ($NodeOffset + 10))
       $DataLength = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset $DataBlobOffset)
       $PayloadOffset = $DataBlobOffset + 4
@@ -639,6 +669,8 @@ function ConvertFrom-QtInstallerFrameworkXmlBytes {
   $Resources = [System.Collections.Generic.List[object]]::new()
 
   try {
+    # Metadata may itself be an RCC container. Recursively inspect those named resources before
+    # using the conservative raw-text fallback for older IFW variants.
     foreach ($RccResource in Get-QtInstallerFrameworkRccResource -Bytes $Bytes) {
       foreach ($Item in ConvertFrom-QtInstallerFrameworkXmlBytes -Bytes $RccResource.Data -Source $RccResource.Path) {
         $Resources.Add($Item)
@@ -648,6 +680,8 @@ function ConvertFrom-QtInstallerFrameworkXmlBytes {
     # Some metadata resources are not RCC containers. Fall through to bounded XML text scanning.
   }
 
+  # Only complete, known IFW XML roots are accepted; arbitrary XML-looking strings do not become
+  # installer metadata.
   $Text = [System.Text.Encoding]::UTF8.GetString($Bytes)
   foreach ($Pattern in @('<Installer\b[\s\S]*?</Installer>', '<Updates\b[\s\S]*?</Updates>', '<PackageUpdate\b[\s\S]*?</PackageUpdate>')) {
     foreach ($Match in [regex]::Matches($Text, $Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
@@ -731,6 +765,8 @@ function Get-QtInstallerFrameworkMetadataResource {
   try {
     $Results = [System.Collections.Generic.List[object]]::new()
     $Index = 0
+    # Dedicated meta-resource segments are the authoritative location for config.xml and package
+    # metadata in current IFW layouts.
     foreach ($Segment in @($Layout.MetaResourceSegments)) {
       $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Segment.Start -Count $Segment.Length
       foreach ($Resource in ConvertFrom-QtInstallerFrameworkXmlBytes -Bytes $Bytes -Source "MetaResource[$Index]") {
@@ -739,6 +775,8 @@ function Get-QtInstallerFrameworkMetadataResource {
       $Index++
     }
 
+    # Some older builders place metadata beside package archives. Ignore 7z payloads here to keep
+    # metadata discovery bounded and leave archive traversal to Expand-*.
     foreach ($Collection in Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) {
       foreach ($Resource in @($Collection.Resources)) {
         if ([System.IO.Path]::GetExtension([string]$Resource.Name) -ieq '.7z') { continue }
@@ -916,6 +954,8 @@ function Expand-QtInstallerFrameworkPackageArchive {
     $Files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $WrittenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $ExpandedBytes = [long]0
+    # Export only selected regular entries. Links, duplicate paths, and inaccurate expanded sizes
+    # are rejected before they can alter the destination tree.
     foreach ($ArchiveEntry in $Entries) {
       if ($ArchiveEntry.IsDirectory -or [string]::IsNullOrWhiteSpace($ArchiveEntry.Key)) { continue }
       $RelativePath = Join-Path $RelativeRoot ([string]$ArchiveEntry.Key)
@@ -943,6 +983,8 @@ function Expand-QtInstallerFrameworkPackageArchive {
       $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
 
       try {
+        # SharpCompress represents some valid zero-byte entries without an entry stream; create
+        # only that exact case and propagate all other archive failures.
         $EntryStream = $ArchiveEntry.OpenEntryStream()
       } catch {
         if ([long]$ArchiveEntry.Size -eq 0 -and $_.Exception.Message -match 'does not have a stream') {
@@ -1013,6 +1055,8 @@ function Expand-QtInstallerFramework {
   )
 
   process {
+    # Parse and validate the trailer once, then keep one installer stream open for all segment
+    # copies. Nested 7z readers receive isolated temporary files because they require seeking.
     $InstallerPath = (Get-Item -Path $Path -Force).FullName
     $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
     if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
@@ -1028,6 +1072,8 @@ function Expand-QtInstallerFramework {
     $InstallerStream = [System.IO.File]::Open($InstallerPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
       $MetaIndex = 0
+      # Expand embedded RCC resources when possible; preserve an unrecognized metadata segment as
+      # a raw .rcc file so callers can inspect newer layouts without losing evidence.
       foreach ($Segment in @($Layout.MetaResourceSegments)) {
         $Bytes = Read-QtInstallerFrameworkBytes -Stream $InstallerStream -Offset $Segment.Start -Count $Segment.Length
         try {
@@ -1076,12 +1122,15 @@ function Expand-QtInstallerFramework {
         $MetaIndex++
       }
 
+      # Resource catalog entries are copied through bounded streams. A raw resource and its
+      # expanded package contents are accounted independently against the global output limit.
       foreach ($Collection in Get-QtInstallerFrameworkResourceCollection -Path $InstallerPath -Layout $Layout) {
         foreach ($Resource in @($Collection.Resources)) {
           if ($Resource.Segment.Length -gt $MaximumExpandedBytes) {
             throw "The Qt Installer Framework resource '$($Resource.Name)' exceeds the $MaximumExpandedBytes-byte limit"
           }
 
+          # Materialize only the current bounded segment, never the complete installer overlay.
           $TemporaryArchivePath = [System.IO.Path]::GetTempFileName()
           try {
             $TemporaryStream = [System.IO.File]::Open($TemporaryArchivePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
@@ -1110,6 +1159,7 @@ function Expand-QtInstallerFramework {
             }
 
             if ([System.IO.Path]::GetExtension([string]$Resource.Name) -ieq '.7z') {
+              # IFW package payloads retain their collection name as a logical package root.
               $ArchiveRoot = "packages/$($Collection.Name)/$([System.IO.Path]::GetFileNameWithoutExtension([string]$Resource.Name))"
               $RemainingExpandedBytes = $MaximumExpandedBytes - $WrittenBytes
               if ($RemainingExpandedBytes -le 0) {
@@ -1154,6 +1204,8 @@ function ConvertFrom-QtInstallerFrameworkInstallerXml {
     [xml]$Xml
   )
 
+  # Read direct config children only. Script-generated values remain unresolved rather than being
+  # inferred from unrelated XML text.
   $Values = [ordered]@{}
   foreach ($Child in @($Xml.Installer.ChildNodes)) {
     if ($Child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
@@ -1226,6 +1278,7 @@ function Find-QtInstallerFrameworkAsciiMarker {
     [string[]]$Marker
   )
 
+  # Scan in chunks with an overlap long enough to preserve markers crossing buffer boundaries.
   $Found = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
   $MaximumMarkerLength = ($Marker | Measure-Object -Property Length -Maximum).Maximum
   $Carry = ''
@@ -1327,6 +1380,8 @@ function Get-QtInstallerFrameworkInterfaceInfo {
     }
   }
 
+  # The PE subsystem is the builder-selected launcher mode and therefore outranks string markers;
+  # markers remain useful when the PE header cannot be parsed.
   $InterfaceVariant = switch ($PESubsystemInfo.Name) {
     'WindowsCui' { 'CLI'; break }
     'WindowsGui' { 'GUI'; break }
@@ -1395,6 +1450,7 @@ function Get-QtInstallerFrameworkInstallLocationInfo {
     [pscustomobject]$InterfaceInfo
   )
 
+  # IFW's CLI fails an empty targetDir check unless --root supplies a concrete path.
   $DefaultTargetDir = if ($InstallerConfig) { [string]$InstallerConfig.TargetDir } else { $null }
   $HasDefaultTargetDir = -not [string]::IsNullOrWhiteSpace($DefaultTargetDir)
   $SupportsSilentInstallation = [bool]$InterfaceInfo.SupportsSilentInstallation
@@ -1439,6 +1495,8 @@ function Get-QtInstallerFrameworkUpgradeInfo {
     'maintenancetool'
   }
   $TargetDir = if ($InstallLocationInfo) { [string]$InstallLocationInfo.DefaultTargetDir } else { $null }
+  # PackageManagerCore refuses a target containing its maintenance tool; it does not overwrite an
+  # existing installation as an in-place upgrade.
   $ExistingInstallationMarker = if ([string]::IsNullOrWhiteSpace($TargetDir)) {
     "<TARGETDIR>\$MaintenanceToolName.exe"
   } else {
@@ -1505,6 +1563,8 @@ function Get-QtInstallerFrameworkScopeInfo {
   }
 
   $DisableCommandLineInterface = ConvertTo-QtInstallerFrameworkBoolean -Value $InstallerConfig.DisableCommandLineInterface
+  # AllUsers determines whether IFW writes its registration under HKLM or HKCU. A functioning CLI
+  # can override this value; resource mentions alone do not prove unconditional script behavior.
   $AllUsersRaw = if ($InstallerConfig.RawValues.Contains('AllUsers')) { $InstallerConfig.RawValues['AllUsers'] } else { $null }
   $AllUsersDefault = $AllUsersRaw -ceq 'true'
   $DefaultScope = if ($AllUsersDefault) { 'machine' } else { 'user' }
@@ -1515,6 +1575,8 @@ function Get-QtInstallerFrameworkScopeInfo {
   $AllUsersTrueAssignmentSources = [System.Collections.Generic.List[string]]::new()
   $AllUsersFalseAssignmentSources = [System.Collections.Generic.List[string]]::new()
   $RequiresAdminRightsSources = [System.Collections.Generic.List[string]]::new()
+  # Preserve script/config mentions as evidence for manual control-flow review without allowing
+  # those strings to replace the explicit default from installer config.
   foreach ($Resource in @($TextResource)) {
     $Text = [string]$Resource.Text
     if ($Text -match '(?i)\bAllUsers\b') { $AllUsersMentionSources.Add([string]$Resource.Source) }
@@ -1572,6 +1634,8 @@ function Get-QtInstallerFrameworkInfo {
     $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $File.FullName
     if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
 
+    # Recover structured metadata first, then derive interface, install-root, upgrade, and scope
+    # evidence from one shared config object.
     $MetadataResources = @(Get-QtInstallerFrameworkMetadataResource -Path $File.FullName -Layout $Layout)
     $TextResources = @(Get-QtInstallerFrameworkMetadataTextResource -Path $File.FullName -Layout $Layout)
     $InstallerXmlResource = @($MetadataResources | Where-Object { $_.Root -eq 'Installer' } | Select-Object -First 1)

@@ -1,5 +1,19 @@
 # License: GPL-2.0. See Modules\InstallerParsers\LICENSE.GPL2.
 # Format sources: https://github.com/HydraDragonAntivirus/HydraDragonAntivirus and https://github.com/russellbanks/Komac
+#
+# Binary structure consumed by this parser (absolute file offsets, LE integers):
+#
+#   PE bootstrapper
+#   +-- payload ranges
+#   +-- catalog at Footer.InfoOffset
+#   |   `-- [Type:u32][Group:u32][Xor:u32][Size:u32][Offset:u32]
+#   |       [NameChars:u32][Name:UTF-16LE]
+#   `-- footer: FileCount@+04, InfoOffset@+10, FileOffset@+14,
+#       "ADVINSTSFX"@+3C
+#
+# TransformFlag 2 XORs only the first min(512, Size) payload bytes with FF.
+# Catalog offsets point to absolute ranges; they do not imply payload adjacency.
+# Architecture-specific MSI selection follows the parsed configuration paths.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -158,6 +172,8 @@ function Test-AdvancedInstallerFooterOffset {
   $OriginalPosition = $Stream.Position
 
   try {
+    # A raw ADVINSTSFX occurrence is insufficient because signed payloads and nested data may
+    # contain the marker. Validate the footer's catalog pointers and bounded record count as well.
     $FooterLength = Get-AdvancedInstallerFooterLength -Stream $Stream -FooterOffset $FooterOffset
     $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $FooterLength
 
@@ -225,6 +241,8 @@ function Find-AdvancedInstallerFooterOffset {
     [System.IO.Stream]$Stream
   )
 
+  # Search backward so the real terminal footer wins over marker bytes in earlier payloads. Large
+  # Authenticode certificate tails are tolerated because the footer need not be the final bytes.
   foreach ($MagicOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:ADVANCED_INSTALLER_MAGIC -Maximum 4096 -Reverse)) {
     $FooterOffset = $MagicOffset - $Script:ADVANCED_INSTALLER_FOOTER_MAGIC_OFFSET
     if (Test-AdvancedInstallerFooterOffset -Stream $Stream -FooterOffset $FooterOffset) { return $FooterOffset }
@@ -308,6 +326,7 @@ function Write-AdvancedInstallerEntry {
   $DestinationStream = [System.IO.File]::Open($DestinationPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
 
   try {
+    # Catalog offsets are absolute file offsets and sizes are authoritative bounded ranges.
     $null = $SourceStream.Seek($Entry.Offset, 'Begin')
 
     # Advanced Installer marks some payloads with an XOR-obfuscated header. Only the leading block is transformed.
@@ -349,6 +368,7 @@ function Expand-AdvancedInstallerArchive {
   )
 
   $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+  # Delegate path, link, duplicate, and output-limit enforcement to the shared archive exporter.
   $Archive = Get-InstallerArchive -Path $Path
 
   try {
@@ -475,6 +495,7 @@ function Read-AdvancedInstallerEntryData {
     throw "The Advanced Installer payload '$($Entry.Name)' exceeds the bounded read limit"
   }
 
+  # Configuration entries use the same leading-block XOR transform as exported payload files.
   $Bytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $Entry.Offset -Length ([int]$Entry.Size)
   $DecodedHeaderLength = [int][Math]::Min([long]$Entry.XorLength, [long]$Bytes.Length)
   for ($Index = 0; $Index -lt $DecodedHeaderLength; $Index++) {
@@ -496,6 +517,8 @@ function ConvertFrom-AdvancedInstallerIniData {
     [byte[]]$Bytes
   )
 
+  # Prefer explicit BOMs, then recognize the NUL distribution of the builder's usual UTF-16LE
+  # output before falling back to UTF-8 for older stubs.
   if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
     $Text = [System.Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
   } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
@@ -508,6 +531,8 @@ function ConvertFrom-AdvancedInstallerIniData {
     $Text = $LooksUtf16 ? [System.Text.Encoding]::Unicode.GetString($Bytes) : [System.Text.Encoding]::UTF8.GetString($Bytes)
   }
 
+  # Parse literal sections and assignments only. Runtime substitutions remain strings and cannot
+  # redirect static payload selection.
   $Sections = [ordered]@{}
   $CurrentSection = $null
   foreach ($Line in @($Text.TrimStart([char]0xFEFF) -split '\r\n|\n|\r')) {
@@ -623,6 +648,8 @@ function Get-AdvancedInstallerMsiPayloadSelection {
     [psobject]$GeneralOptions
   )
 
+  # Reproduce the SFX's decision order from configuration and selector tuples rather than choosing
+  # an arbitrary MSI by filename or architecture metadata.
   $MainAppUrl = [string](Get-AdvancedInstallerSettingValue -Section $GeneralOptions -Name 'MainAppURL')
   $AllPlatformsValue = [string](Get-AdvancedInstallerSettingValue -Section $GeneralOptions -Name 'AllPlatforms')
   $AllPlatforms = $AllPlatformsValue -match '^(?i:true|yes|1)$'
@@ -711,6 +738,7 @@ function Get-AdvancedInstallerInfo {
     $Reader = [System.IO.BinaryReader]::new($Stream)
 
     try {
+      # Locate and authenticate the footer before following any absolute catalog pointer.
       $FooterOffset = Find-AdvancedInstallerFooterOffset -Stream $Stream
       $FooterLength = Get-AdvancedInstallerFooterLength -Stream $Stream -FooterOffset $FooterOffset
       $FooterBytes = Read-AdvancedInstallerBytes -Stream $Stream -Offset $FooterOffset -Length $FooterLength
@@ -722,6 +750,7 @@ function Get-AdvancedInstallerInfo {
       $InfoOffset = [System.BitConverter]::ToUInt32($FooterBytes, 16)
       $FileOffset = [System.BitConverter]::ToUInt32($FooterBytes, 20)
 
+      # The catalog is a sequence of fixed 24-byte records followed by variable UTF-16LE names.
       $null = $Stream.Seek($InfoOffset, 'Begin')
       $Files = [System.Collections.Generic.List[object]]::new()
 
@@ -755,6 +784,8 @@ function Get-AdvancedInstallerInfo {
           })
       }
 
+      # Selector (0,3) identifies the bootstrapper INI. It is optional, but when present it controls
+      # download-vs-embedded and architecture-specific MSI selection.
       $ConfigurationEntry = $Files | Where-Object {
         $_.SelectorType -eq 0 -and $_.SelectorGroup -eq 3 -and [System.IO.Path]::GetExtension($_.Name) -ieq '.ini'
       } | Select-Object -First 1
@@ -824,6 +855,8 @@ function Expand-AdvancedInstaller {
     }
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
 
+    # Export catalog entries by their declared names. Only archives that actually contain MSI
+    # databases are expanded; large application-file archives remain opaque.
     foreach ($Entry in $Installer.Files) {
       $EntryPath = Resolve-AdvancedInstallerExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.Name
       $EntryFile = Write-AdvancedInstallerEntry -Path $Installer.Path -Entry $Entry -DestinationPath $EntryPath
@@ -881,11 +914,15 @@ function Resolve-AdvancedInstallerMsiFile {
     throw "Advanced Installer obtains its main payload from MainAppURL '$($Selection.MainAppUrl)'; no embedded MSI represents the runtime selection"
   }
 
+  # The caller's pattern narrows the extracted set, but it never replaces the SFX-selected relative
+  # path when configuration metadata is available.
   $Candidates = @($Item | Where-Object {
       $_.Name -like $Pattern -or $_.FullName -like $Pattern -or ([System.IO.Path]::GetRelativePath($ExtractionPath, $_.FullName)) -like $Pattern
     })
   if (-not $Candidates) { throw "No Advanced Installer MSI matched the pattern: $Pattern" }
 
+  # Resolve the architecture branch exactly as the bootstrapper would. Ambiguous all-platform
+  # packages require an explicit host architecture instead of guessing from MSI metadata.
   $SelectedRelativePath = if ($Selection -and $Architecture) {
     $ArchitecturePropertyName = "$($Architecture.Substring(0, 1).ToUpperInvariant())$($Architecture.Substring(1))MsiPath"
     $ArchitecturePathProperty = $Selection.PSObject.Properties[$ArchitecturePropertyName]
@@ -955,6 +992,8 @@ function Get-AdvancedInstallerMsiInfo {
     $ExpandedPath = New-AdvancedInstallerTempFolder
 
     try {
+      # Expansion recovers all catalog paths, then selection metadata chooses the one runtime MSI.
+      # The MSI parser is applied only after that choice to avoid reversing the bootstrapper logic.
       Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
       $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File | Sort-Object -Property FullName)
       $MsiFile = Resolve-AdvancedInstallerMsiFile -Installer $Installer -Item $MsiFiles -ExtractionPath $ExpandedPath -Pattern $Name -Architecture $Architecture -NameWasSpecified $NameWasSpecified

@@ -1,5 +1,18 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # Format sources: https://github.com/jrsoftware/issrc, https://github.com/jrathlev/InnoUnpacker-Windows-GUI, and https://github.com/russellbanks/Komac
+#
+# Binary structure consumed by this parser:
+#
+#   PE/.rsrc/RCDATA/#11111 -> offset table (44-byte v1 or 64-byte v2)
+#     magic[12], version@+0C, Offset0/Offset1, CRC32 at the table tail
+#   Offset0 -> setup signature[64] -> optional encryption header
+#     -> [stored-size][compressed flag][CRC32 + <=4096-byte chunks]*
+#     -> setup header and version-dependent tables
+#   Offset1 -> file locations -> 7A 6C 62 1A ("zlb" 1A) payload blocks
+#
+# Offset-table values become absolute file offsets after resource decoding.
+# Integer fields are little-endian; compressed metadata is stored or raw LZMA.
+# Every declared range, chunk CRC, decompressed size, and table count is bounded.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -130,6 +143,9 @@ function Get-InnoResourceBytes {
   $Resource = Get-PEResourceInfo -Path $Path |
     Where-Object { $_.TypeId -eq $Script:INNO_RT_RCDATA -and $_.Id -eq $Id } |
     Select-Object -First 1
+
+  # Require the exact RCDATA type/ID pair used by the loader. Arbitrary resource
+  # bytes are not accepted as offset-table or setup metadata evidence.
   if (-not $Resource) { throw 'The requested Inno resource could not be found.' }
   return , (Read-PEResourceData -Resource $Resource -MaximumBytes 1048576)
 }
@@ -155,6 +171,8 @@ function Get-InnoOffsetTable {
 
   $Version = [System.BitConverter]::ToUInt32($Bytes, 12)
 
+  # Offset-table v1 uses 32-bit offsets and a 44-byte record; v2 widens the
+  # persisted sizes/offsets to 64 bits and moves the CRC to byte 60.
   switch ($Version) {
     1 {
       if ($Bytes.Length -lt $Script:INNO_OFFSET_TABLE_VERSION_1_SIZE) { throw 'The Inno Setup offset table is truncated' }
@@ -441,6 +459,8 @@ function Test-InnoCompressedBlockHeader {
   $HeaderLength = $UsesInt64BlockHeader ? 9 : 5
   if ($Offset + 4 + $HeaderLength -gt $FileLength) { return }
 
+  # The CRC covers only the size/compressed flag header. Payload chunks carry
+  # their own CRC records and are validated separately during block reading.
   $Reader.BaseStream.Seek($Offset, 'Begin') | Out-Null
   $StoredCrc = $Reader.ReadInt32()
   $HeaderBytes = $Reader.ReadBytes($HeaderLength)
@@ -559,6 +579,8 @@ function Read-InnoCompressedBlock {
   $Remaining = [long]$BlockHeader.StoredSize
   $WriteOffset = 0
 
+  # Reassemble each <=4 KiB data chunk only after its adjacent stored CRC
+  # matches; no partial block is returned after a failed chunk.
   while ($Remaining -gt 0) {
     if ($Remaining -lt 5) { throw 'The Inno Setup compressed block contains a truncated chunk record' }
     $ChunkCrc = $Reader.ReadUInt32()
@@ -635,6 +657,9 @@ function Read-InnoSetupEncryptionHeader {
   }
 
   $EncryptionUseValue = $Bytes[0]
+
+  # EncryptionUse is a closed enum in the source record. Unknown values indicate
+  # an unsupported layout rather than a future mode that can be guessed safely.
   $EncryptionUse = switch ($EncryptionUseValue) {
     0 { 'None' }
     1 { 'Files' }
@@ -1112,6 +1137,8 @@ function Test-InnoArchitectureExpression {
     [string]$Architecture
   )
 
+  # Convert the compiler expression to reverse-polish notation with a small
+  # shunting-yard evaluator. No Inno Pascal code or host architecture is run.
   $Tokens = ConvertTo-InnoArchitectureExpressionToken -Expression $Expression
   if (-not $Tokens) { throw 'The Inno Setup architecture expression is empty' }
 
@@ -1123,6 +1150,7 @@ function Test-InnoArchitectureExpression {
   $Output = [System.Collections.Generic.List[string]]::new()
   $Operators = [System.Collections.Generic.Stack[string]]::new()
 
+  # Build RPN using Inno's not > and > or precedence and explicit parentheses.
   foreach ($Token in $Tokens) {
     if ($Token -notin @('and', 'or', 'not', '(', ')')) {
       $Output.Add($Token)
@@ -1160,6 +1188,8 @@ function Test-InnoArchitectureExpression {
     $Output.Add($Operator)
   }
 
+  # Evaluate identifiers against the requested Windows architecture only after
+  # syntax normalization, rejecting missing operands deterministically.
   $Values = [System.Collections.Generic.Stack[bool]]::new()
   foreach ($Token in $Output) {
     switch ($Token) {
@@ -1355,6 +1385,8 @@ function Read-InnoHeaderFixedData {
   $Reader = [System.IO.BinaryReader]::new($Stream)
 
   try {
+    # Serialized variable-length strings precede a generation-specific fixed
+    # tail. Consume them according to the selected source-backed layout first.
     switch ($Layout.StringEncoding) {
       'Unicode' {
         $null = Read-InnoReaderStrings -Reader $Reader -Count $Layout.HeaderStringCount -Encoding ([System.Text.Encoding]::Unicode)
@@ -1368,6 +1400,8 @@ function Read-InnoHeaderFixedData {
     }
 
     $FixedTailOffset = $Reader.BaseStream.Position
+    # These offsets are relative to the fixed-tail start, not the beginning of
+    # the decompressed block. Validate the furthest field before seeking.
     $RequiredOffsets = @(
       $Layout.PrivilegesRequiredOffset
       $Layout.PrivilegesRequiredOverridesAllowedOffset
@@ -1380,6 +1414,8 @@ function Read-InnoHeaderFixedData {
       throw 'The Inno Setup fixed header is truncated'
     }
 
+    # Decode compiler enums and bitsets without evaluating script expressions;
+    # unknown enum values remain explicit rather than receiving a guessed scope.
     $Reader.BaseStream.Seek($FixedTailOffset + $Layout.PrivilegesRequiredOffset, 'Begin') | Out-Null
     $PrivilegesRequiredValue = $Reader.ReadByte()
     $PrivilegesRequired = switch ($PrivilegesRequiredValue) {
@@ -1591,6 +1627,8 @@ function Get-InnoDefaultDirectoryConstantMap {
     [Nullable[bool]]$InstallIn64BitMode
   )
 
+  # Map only deterministic built-in constants to WinGet-style environment paths.
+  # Dynamic {code:*} constants are intentionally left unresolved elsewhere.
   $Map = [ordered]@{
     'win'           = '%SystemRoot%'
     'sysnative'     = '%SystemRoot%\System32'
@@ -1612,6 +1650,8 @@ function Get-InnoDefaultDirectoryConstantMap {
     'cf64'          = '%ProgramFiles%\Common Files'
   }
 
+  # Generic Program Files constants depend on the install-mode expression and
+  # are omitted when that expression is not statically uniform.
   if ($null -ne $InstallIn64BitMode) {
     $Map['commonpf'] = $Map[[bool]$InstallIn64BitMode ? 'commonpf64' : 'commonpf32']
     $Map['pf'] = $Map['commonpf']
@@ -1619,6 +1659,8 @@ function Get-InnoDefaultDirectoryConstantMap {
     $Map['cf'] = $Map['commoncf']
   }
 
+  # auto* constants select user or common roots from default scope; unresolved
+  # or dual defaults deliberately leave those constants unmapped.
   if ($DefaultScope -eq 'user') {
     foreach ($Name in @('autopf', 'autopf32', 'autopf64')) { $Map[$Name] = $Map['userpf'] }
     foreach ($Name in @('autocf', 'autocf32', 'autocf64')) { $Map[$Name] = $Map['usercf'] }
@@ -1683,6 +1725,10 @@ function Resolve-InnoDefaultDirectory {
     Resolve the common deterministic directory constants used in DefaultDirName
   .PARAMETER Value
     The raw DefaultDirName value
+  .PARAMETER DefaultScope
+    Scope or elevation evidence used to classify user, machine, or conditional installation.
+  .PARAMETER InstallIn64BitMode
+    Target architecture evidence used to reproduce the installer payload or directory selection.
   #>
   [OutputType([string])]
   param (
@@ -1753,6 +1799,8 @@ function Get-InnoInfo {
     $SignatureMatch = [regex]::Match($Signature, $Script:INNO_SIGNATURE_PATTERN)
     if (-not $SignatureMatch.Success) { throw 'The file is not a supported Inno Setup installer' }
 
+    # The serialized setup signature, not PE FileVersion, selects every
+    # version-dependent string count, fixed offset, flag layout, and digest size.
     $PEInfo = Get-InnoPEInfo -Path $InstallerPath
     $VersionNumber = Get-InnoVersionNumber -Version $SignatureMatch.Groups[1].Value
     $Layout = Get-InnoLayout -VersionNumber $VersionNumber -UnicodeVariant ([bool]$SignatureMatch.Groups[2].Success)
@@ -1781,6 +1829,9 @@ function Get-InnoInfo {
     $UninstallDisplayNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[14]
 
     $DefaultScope = Convert-InnoPrivilegeToScope -PrivilegesRequired $HeaderFixedData.PrivilegesRequired
+
+    # PrivilegesRequiredOverridesAllowed exposes explicit command-line scope
+    # selection; without it only the compiled default scope is supported.
     $SupportedScopes = if ($HeaderFixedData.SupportsCommandLineScopeOverride -and $DefaultScope) {
       @('user', 'machine')
     } elseif ($DefaultScope) {
@@ -1794,6 +1845,9 @@ function Get-InnoInfo {
     $DefaultDirectoryConstantMap = Get-InnoDefaultDirectoryConstantMap -DefaultScope $DefaultScope -InstallIn64BitMode $InstallIn64BitMode
     $DefaultDirInfo = Get-InnoStaticStringInfo -Value $DefaultDirName -ConstantMap $DefaultDirectoryConstantMap
     $ResolvedDefaultDirName = $DefaultDirInfo.Value
+
+    # A resolved root token is stronger scope evidence than the launcher PE
+    # architecture. Dynamic {code:...} paths remain unresolved and do not guess.
     $Scope = if ($ResolvedDefaultDirName -and $ResolvedDefaultDirName -match '^(?i)%(?:ProgramFiles(?:\(x86\))?|ProgramData|SystemRoot|SystemDrive)%') {
       'machine'
     } elseif ($ResolvedDefaultDirName -and $ResolvedDefaultDirName -match '^(?i)%(?:LocalAppData|AppData|UserProfile)%') {
@@ -1815,6 +1869,8 @@ function Get-InnoInfo {
     } else {
       $null
     }
+    # Inno appends _is1 to the normalized AppId only when its own uninstall key
+    # is enabled; wrapper installers that suppress ARP receive no ProductCode.
     $ProductCode = if ($AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true -and $UninstallRegKeyBaseName) {
       "${UninstallRegKeyBaseName}_is1"
     } else {
@@ -1822,6 +1878,9 @@ function Get-InnoInfo {
     }
 
     $UnresolvedConstants = [ordered]@{}
+
+    # Preserve dynamic-field evidence explicitly so callers can distinguish an
+    # absent value from one that depends on runtime Pascal Script code.
     $StaticFieldInfo = [ordered]@{
       AppName              = $AppNameInfo
       AppVerName           = $AppVerNameInfo
@@ -2109,6 +2168,8 @@ function Get-InnoVersion5FileEntries {
   $Reader = [System.IO.BinaryReader]::new($Stream)
 
   try {
+    # Inno serializes tables in a fixed order. Skip each preceding table using
+    # its declared count and versioned record width to reach the file table.
     $Reader.BaseStream.Seek($Header.StreamOffset, 'Begin') | Out-Null
 
     for ($i = 0; $i -lt $Header.Counts.NumLanguageEntries; $i++) {
@@ -2135,6 +2196,8 @@ function Get-InnoVersion5FileEntries {
 
     $Entries = [System.Collections.Generic.List[object]]::new()
 
+    # Read only extraction-relevant fields; payload bytes live in the second
+    # metadata block and are joined through LocationEntry rather than guessed.
     for ($i = 0; $i -lt $Header.Counts.NumFileEntries; $i++) {
       $Strings = Read-InnoReaderStrings -Reader $Reader -Count $Script:INNO_FILE_ENTRY_STRINGS -Encoding (Get-InnoAnsiEncoding)
       $null = $Reader.ReadBytes(20) # MinVersion + OnlyBelowVersion
@@ -2216,6 +2279,8 @@ function Get-InnoVersion5FileLocations {
     [int]$Count
   )
 
+  # When no trusted count is available, exact divisibility by the fixed record
+  # size is required before deriving one from the block length.
   if ($Count -le 0) {
     if (($Bytes.Length % $Script:INNO_FILE_LOCATION_ENTRY_SIZE) -ne 0) { throw 'The Inno Setup file location block size is invalid' }
     $Count = [int]($Bytes.Length / $Script:INNO_FILE_LOCATION_ENTRY_SIZE)
@@ -2227,6 +2292,8 @@ function Get-InnoVersion5FileLocations {
   try {
     $Locations = [System.Collections.Generic.List[object]]::new()
 
+    # Location records describe slice/chunk coordinates and integrity evidence;
+    # they do not contain destination names.
     for ($i = 0; $i -lt $Count; $i++) {
       $FirstSlice = $Reader.ReadInt32()
       $LastSlice = $Reader.ReadInt32()
@@ -2337,6 +2404,14 @@ function Read-InnoFileEntryAtOffset {
   <#
   .SYNOPSIS
     Read the extraction-relevant prefix of one versioned Inno file entry
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
+  .PARAMETER FileLocationCount
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2349,6 +2424,8 @@ function Read-InnoFileEntryAtOffset {
   $Stream = [System.IO.MemoryStream]::new($Bytes, $false)
   $Reader = [System.IO.BinaryReader]::new($Stream)
   try {
+    # Modern file entries are variable-length. Read the version-selected string
+    # prefix, optional verification record, then validate its location index.
     $Reader.BaseStream.Position = $Offset
     $Encoding = $Layout.StringEncoding -eq 'Unicode' ? [System.Text.Encoding]::Unicode : (Get-InnoAnsiEncoding)
     $Strings = Read-InnoReaderStrings -Reader $Reader -Count $Layout.FileEntryStringCount -Encoding $Encoding -MaximumLength $Script:INNO_MAX_ENTRY_STRING_SIZE
@@ -2356,6 +2433,8 @@ function Read-InnoFileEntryAtOffset {
     $VerificationAllowedKeys = $null
     $VerificationHash = $null
     $VerificationType = $null
+    # Verification fields were added in newer generations and must not shift the
+    # following fixed fields for older layouts.
     if ($Layout.FileEntryHasVerification) {
       $VerificationAllowedKeys = (Read-InnoReaderStrings -Reader $Reader -Count 1 -Encoding (Get-InnoAnsiEncoding) -MaximumLength $Script:INNO_MAX_ENTRY_STRING_SIZE)[0]
       $VerificationHash = $Reader.ReadBytes(32)
@@ -2403,6 +2482,16 @@ function Find-InnoFileEntry {
   <#
   .SYNOPSIS
     Locate exact named file entries without deserializing unrelated versioned tables
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER FileLocationCount
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
+  .PARAMETER Language
+    Language or template selector applied to format metadata.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2523,6 +2612,10 @@ function ConvertFrom-InnoFileLocationFlags {
   <#
   .SYNOPSIS
     Decode legacy or compact Inno file-location flags
+  .PARAMETER Value
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER Legacy
+    Selects the legacy record flag layout documented by the detected installer generation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2561,6 +2654,14 @@ function Read-InnoFileLocation {
   <#
   .SYNOPSIS
     Parse one indexed record from the versioned Inno file-location metadata block
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER Count
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
+  .PARAMETER Index
+    Current record position or zero-based index within the validated table.
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2571,6 +2672,9 @@ function Read-InnoFileLocation {
   )
 
   $ExpectedLength = [long]$Count * $Layout.FileLocationEntrySize
+
+  # Exact table sizing prevents a wrong version layout from silently indexing
+  # into adjacent compressed-block data.
   if ($ExpectedLength -ne $Bytes.LongLength) {
     throw "The Inno Setup file location block size is invalid: expected $ExpectedLength bytes, found $($Bytes.LongLength)"
   }
@@ -2710,6 +2814,8 @@ function Find-InnoVersion5FileEntry {
   $TargetName = $Name.ToLowerInvariant()
   $FileEntryTrailerSize = $Script:INNO_FILE_ENTRY_FIXED_SIZE
 
+  # Legacy 5.x targeted lookup tests only structurally plausible string-record
+  # starts and validates the fixed trailer before accepting a name match.
   for ($Start = 0; $Start -le $Bytes.Length - (4 + $FileEntryTrailerSize); $Start++) {
     $DeclaredLength = [System.BitConverter]::ToInt32($Bytes, $Start)
     if ($DeclaredLength -lt 0 -or $DeclaredLength -gt 4096) { continue }
@@ -2878,6 +2984,16 @@ function Write-InnoFilePayload {
   <#
   .SYNOPSIS
     Stream one unencrypted embedded Inno payload to disk and verify its digest
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER Offset1
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Location
+    Current structured format node or record being interpreted.
+  .PARAMETER CompressionMethod
+    Compression framing or bounded decoder selected from validated format metadata.
+  .PARAMETER OutputPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
@@ -2889,6 +3005,9 @@ function Write-InnoFilePayload {
   )
 
   if ($Location.Flags.ChunkEncrypted) { throw 'Encrypted Inno Setup file chunks require the setup password and are not supported' }
+
+  # This path handles a single embedded setup.exe data stream. External slices
+  # and password-encrypted chunks require runtime inputs unavailable statically.
   if ($Offset1 -eq 0 -or $Location.FirstSlice -ne 0 -or $Location.LastSlice -ne 0) {
     throw 'Disk-spanning Inno Setup payload extraction requires the external setup slice files and is not supported by this path'
   }
@@ -2915,6 +3034,8 @@ function Write-InnoFilePayload {
     $ChunkMagic = [System.Text.Encoding]::ASCII.GetString((Read-BinaryBytes -Stream $InstallerStream -Offset $ChunkOffset -Count 4))
     if ($ChunkMagic -ne $Script:INNO_CHUNK_MAGIC) { throw 'The Inno Setup chunk marker is invalid' }
 
+    # Bound the decoder to the catalog-declared chunk so it cannot consume a
+    # following chunk, signature, or certificate table on malformed input.
     $ChunkRange = New-BoundedReadStream -Stream $InstallerStream -Offset ($ChunkOffset + 4) -Length $Location.ChunkCompressedSize -LeaveOpen
     $DecoderInfo = Open-InnoFileChunkDecoder -Stream $ChunkRange -CompressionMethod $CompressionMethod `
       -Compressed $Location.Flags.ChunkCompressed -CompressedSize $Location.ChunkCompressedSize
@@ -2941,6 +3062,9 @@ function Write-InnoFilePayload {
 
     $Remaining = [long]$Location.OriginalSize
     $AddressOffset = [uint32]0
+
+    # Decode, reverse the optional CALL/JMP filter, hash, and write each block in
+    # one pass. The final path is replaced only after the stored digest matches.
     while ($Remaining -gt 0) {
       $BlockLength = [int][Math]::Min($Script:INNO_PAYLOAD_BUFFER_SIZE, $Remaining)
       $TotalRead = 0
@@ -3202,6 +3326,9 @@ function Expand-InnoInstaller {
 
     $VersionNumber = Get-InnoVersionNumber -Version $SignatureMatch.Groups[1].Value
     $Layout = Get-InnoLayout -VersionNumber $VersionNumber -UnicodeVariant ([bool]$SignatureMatch.Groups[2].Success)
+
+    # Parse the first metadata block once to obtain counts, compression method,
+    # encryption state, and the exact versioned file-entry layout.
     $HeaderBlockInfo = Get-InnoHeaderBlockInfo -Path $InstallerPath -Offset0 $OffsetTable.Offset0 -Layout $Layout
     if ($HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Files') {
       throw 'The Inno Setup payload files are encrypted and require the setup password'
@@ -3216,6 +3343,9 @@ function Expand-InnoInstaller {
       FileLocationCount = $Header.Counts.NumFileLocationEntries
     }
     if ($PSBoundParameters.ContainsKey('Language')) { $FindArguments.Language = $Language }
+
+    # Resolve one deterministic file entry before opening the separate indexed
+    # location block that points to compressed payload bytes.
     $Entry = Find-InnoFileEntry @FindArguments
 
     $FileStream = [System.IO.File]::OpenRead($InstallerPath)
@@ -3234,6 +3364,9 @@ function Expand-InnoInstaller {
     }
     $Location = Read-InnoFileLocation -Bytes $LocationBlockInfo.Bytes -Count $Header.Counts.NumFileLocationEntries `
       -Index $Entry.LocationEntry -Layout $Layout
+
+    # DestName controls the installed relative path; fall back to the source base
+    # name only when the compiled destination field is empty.
     $RelativePath = if ([string]::IsNullOrWhiteSpace($Entry.DestName)) {
       [System.IO.Path]::GetFileName($Entry.SourceFilename)
     } else {

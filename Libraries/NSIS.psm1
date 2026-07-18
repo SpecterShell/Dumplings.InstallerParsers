@@ -1,5 +1,20 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # Format sources: https://github.com/NSIS-Dev/nsis, https://sourceforge.net/projects/nsisbi/, https://github.com/ip7z/7zip, https://github.com/russellbanks/Komac, and https://github.com/electron-userland/electron-builder
+#
+# Binary structure consumed by this parser (archive-relative, LE integers):
+#
+#   PE stub -> 512-byte-aligned archive
+#     +00 Flags:u32
+#     +04 EF BE AD DE + "NullsoftInst"[12]
+#     +14 DecompressedHeaderSize:u32
+#     +18 ArchiveSize:u32
+#     +1C NSISBI DataBlockLength:u64 (variant)
+#     `-- packed-size word -> compressed logical header -> eight block tables
+#         -> 28-byte standard or 36-byte NSISBI command entries -> payloads
+#
+# The packed-size high bit marks a solid archive. Opcode numbering is normalized
+# for NSIS 2/3, Unicode/Park, log-enabled, and NSISBI layouts before simulation.
+# Explicit EW_WRITEREG commands are authoritative; arbitrary strings are not.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -270,12 +285,19 @@ function Test-NSISPEHeaderBeforeArchiveStream {
   <#
   .SYNOPSIS
     Validate a nearby PE stub without buffering the installer
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER FirstHeaderOffset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
   #>
   [OutputType([bool])]
   param (
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [Parameter(Mandatory)][long]$FirstHeaderOffset
   )
+
+  # Ordinary installers begin with the PE stub at offset zero. Concatenated
+  # launchers are handled by a bounded, 512-byte-aligned backward search.
   if (Get-PELayout -Stream $Stream) { return $true }
   $MinimumOffset = [Math]::Max(0L, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
   $StartOffset = $FirstHeaderOffset - ($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT)
@@ -365,6 +387,9 @@ function Get-NSISFirstHeaderCandidate {
   if ($PSCmdlet.ParameterSetName -eq 'Stream') {
     $SearchStart = 0L
     $SearchWindowSize = 16777216L
+
+    # Search overlapping windows so a NullsoftInst signature crossing a window
+    # boundary is seen once, then derive the first-header start four bytes earlier.
     while ($SearchStart -lt $Stream.Length) {
       $SearchLength = [Math]::Min($SearchWindowSize, $Stream.Length - $SearchStart)
       foreach ($SignatureOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:NSIS_FIRST_HEADER_SIGNATURE -StartOffset $SearchStart -Length $SearchLength -Maximum 256)) {
@@ -372,6 +397,9 @@ function Get-NSISFirstHeaderCandidate {
         if ($Offset -lt 0 -or ($Offset % $Script:NSIS_ARCHIVE_ALIGNMENT) -ne 0 -or $Offset + $Script:NSIS_FIRST_HEADER_SIZE -gt $Stream.Length) { continue }
         $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Script:NSIS_FIRST_HEADER_SIZE
         $Flags = [BitConverter]::ToUInt32($Header, 0)
+
+        # Reject unknown flag bits and impossible declared ranges before testing
+        # the more expensive nearby-PE invariant.
         $InvalidFlagMask = [uint32]([uint64]4294967295 - [uint64]$Script:NSISBI_FIRST_HEADER_FLAGS_MASK)
         if (($Flags -band $InvalidFlagMask) -ne 0) { continue }
         $IsNsisBi = ($Flags -band (-bnot $Script:NSIS_FIRST_HEADER_FLAGS_MASK)) -ne 0
@@ -408,6 +436,8 @@ function Get-NSISFirstHeaderCandidate {
     return $null
   }
 
+  # The byte-array path is retained for synthetic fixtures and follows the same
+  # aligned signature, flag, size, archive-bound, and PE-stub validation order.
   for ($Offset = 0; $Offset + $Script:NSIS_FIRST_HEADER_SIZE -le $Bytes.Length; $Offset += $Script:NSIS_ARCHIVE_ALIGNMENT) {
     $Matched = $true
     for ($Index = 0; $Index -lt $Script:NSIS_FIRST_HEADER_SIGNATURE.Length; $Index++) {
@@ -635,6 +665,8 @@ function Get-NSISHeaderData {
     $CandidateHeader = $Signature
     $LzmaFilterLength = Get-NSISLzmaFilterLength -Bytes $Signature
 
+    # Distinguish stored non-solid, solid codec streams, and packed-size-prefixed
+    # non-solid headers using the exact first bytes consumed by the NSIS stub.
     if ($PackedHeaderSize -eq $LengthOfHeader) {
       $IsSolid = $false
       $CompressionCandidates = @('None')
@@ -660,6 +692,8 @@ function Get-NSISHeaderData {
     if ($PayloadDataLength -le 0 -or $PayloadDataLength -gt $AvailablePayloadDataLength) { throw 'The NSIS compressed header data range is invalid' }
     $LastError = $null
 
+    # Ambiguous DEFLATE framing is resolved by bounded decode plus exact header
+    # length validation; a codec is accepted only when it produces the full header.
     foreach ($Compression in $CompressionCandidates) {
       $PayloadStream = New-BoundedReadStream -Stream $InstallerStream -Offset $PayloadDataOffset -Length $PayloadDataLength -LeaveOpen
       $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $CandidateHeader } else { -1 }
@@ -858,6 +892,8 @@ function Get-NSISPrimaryLanguageTable {
     [pscustomobject]$Layout
   )
 
+  # Block 4 is an array of fixed-size language records. Its layout-derived width
+  # prevents string offsets from one record spilling into the next.
   $LanguageTableBytes = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 4
   if ($LanguageTableBytes.Length -eq 0 -or $Layout.LanguageTableSize -le 0) { return $null }
 
@@ -878,6 +914,8 @@ function Get-NSISPrimaryLanguageTable {
       })
   }
 
+  # Prefer the compiler's default English table for deterministic static string
+  # resolution; otherwise retain the first authored language rather than merging.
   $PreferredTable = $CandidateTables.Where({ $_.LanguageId -eq $Script:NSIS_DEFAULT_LANGUAGE }, 'First')
   if ($PreferredTable) {
     return $PreferredTable[0]
@@ -925,6 +963,9 @@ function Get-NSISVersionInfo {
     [bool]$IsNsisBi = $false
   )
 
+  # NSIS encodes variable/language escape opcodes differently across ANSI,
+  # Unicode, NSIS 2/3, and Park forks. Count only escape codes after NUL string
+  # boundaries so ordinary payload bytes do not influence generation detection.
   $Unicode = $StringsBlock.Length -ge 2 -and $StringsBlock[0] -eq 0x00 -and $StringsBlock[1] -eq 0x00
   $NSIS2Count = 0
   $NSIS3Count = 0
@@ -978,6 +1019,8 @@ function Get-NSISVersionInfo {
     }
   }
 
+  # Strong escape evidence constrains candidates; ambiguous blocks retain a
+  # deterministic fallback order that is scored against actual commands below.
   $StrongPark = $Unicode -and -not $StrongNSIS3 -and ($ParkCount -gt 0 -or $NSIS3Count -eq 0)
   $CandidateTypes = if ($StrongNSIS3) {
     @('NSIS3')
@@ -1002,6 +1045,8 @@ function Get-NSISVersionInfo {
     }
   }
 
+  # Log-enabled builds insert command-layout slots. Select the variant producing
+  # the fewest impossible opcodes instead of assuming the upstream default.
   $BestCandidate = $Candidates[0]
   if ($Entries.Count -gt 0) {
     $BestCandidate = @($Candidates | ForEach-Object {
@@ -1061,6 +1106,9 @@ function Get-NSISNormalizedOpcode {
   )
 
   $Value = [int]$Opcode
+
+  # Official NSIS layouts either insert LOG before section commands or, in Park
+  # variants, insert additional opcodes that shift later command numbers.
   if ($Type -notlike 'Park*') {
     if (-not $LogCmdIsEnabled) { return $Value }
     if ($Value -lt $Script:NSIS_OPCODE_SECTION_SET) { return $Value }
@@ -1123,6 +1171,9 @@ function Measure-NSISCommandLayoutCandidate {
   )
 
   $BadCommandCount = 0
+
+  # Score a layout by impossible opcode values and nonzero parameters beyond the
+  # source-defined arity. The lowest score selects the command normalization.
   foreach ($Entry in $Entries) {
     $Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.LayoutOpcode -Type $Type -Unicode $Unicode -LogCmdIsEnabled $LogCmdIsEnabled
     if ($Opcode -lt 0 -or $Opcode -ge $Script:NSIS_COMMAND_PARAMETER_COUNTS.Count) {
@@ -1315,10 +1366,14 @@ function Resolve-NSISShellValue {
     [uint16]$Character
   )
 
+  # NSIS packs two shell-folder indexes or an indirect string reference into one
+  # 16-bit control payload. Decode both bytes without consulting the host shell.
   $Bytes = [System.BitConverter]::GetBytes($Character)
   $Index1 = $Bytes[0]
   $Index2 = $Bytes[1]
 
+  # The high bit selects an indirect registry-name string; bit 6 distinguishes
+  # 64-bit Program Files/Common Files from their 32-bit counterparts.
   if (($Index1 -band 0x80) -ne 0) {
     $StringOffset = $Index1 -band 0x3F
     $Is64BitFolder = ($Index1 -band 0x40) -ne 0
@@ -1343,6 +1398,8 @@ function Resolve-NSISShellValue {
     }
   }
 
+  # Ordinary payloads carry primary/fallback CSIDL indexes. Return the first
+  # mapped deterministic path and leave unknown identifiers unresolved.
   if ($Index1 -lt $Script:NSIS_SHELL_STRINGS.Count -and $Script:NSIS_SHELL_STRINGS[$Index1]) { return [string]$Script:NSIS_SHELL_STRINGS[$Index1] }
   if ($Index2 -lt $Script:NSIS_SHELL_STRINGS.Count -and $Script:NSIS_SHELL_STRINGS[$Index2]) { return [string]$Script:NSIS_SHELL_STRINGS[$Index2] }
   return ''
@@ -1367,6 +1424,7 @@ function Get-NSISString {
   )
 
   if ($RelativeOffset -lt 0) {
+    # Negative offsets encode language-table indices rather than byte positions.
     $LanguageIndex = [Math]::Abs($RelativeOffset + 1)
     if (-not $State.LanguageTable -or $LanguageIndex -ge $State.LanguageTable.StringOffsets.Count) { return '' }
     $ResolvedOffset = $State.LanguageTable.StringOffsets[$LanguageIndex]
@@ -1379,6 +1437,8 @@ function Get-NSISString {
   if ($Offset -lt 0 -or $Offset -ge $State.StringsBlock.Length) { return '' }
 
   if ($State.VersionInfo.Unicode) {
+    # Decode the bounded NUL-terminated UTF-16LE or ANSI code-unit sequence first;
+    # control-code expansion is performed in a second pass below.
     $EndOffset = $Offset
     while ($EndOffset + 1 -lt $State.StringsBlock.Length -and -not ($State.StringsBlock[$EndOffset] -eq 0x00 -and $State.StringsBlock[$EndOffset + 1] -eq 0x00)) { $EndOffset += 2 }
     if ($EndOffset -le $Offset) { return '' }
@@ -1397,6 +1457,8 @@ function Get-NSISString {
   $Builder = [System.Text.StringBuilder]::new()
   $Index = 0
 
+  # Expand variable, shell-folder, and language indirections while preserving
+  # escaped control characters. Truncated control payloads terminate safely.
   while ($Index -lt $Characters.Count) {
     $Current = $Characters[$Index]
     $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
@@ -1651,10 +1713,14 @@ function Set-NSISRegistryValue {
     [string]$Value
   )
 
+  # The simulated registry exists only to make later ReadReg/branch operations
+  # deterministic; it never reads from or writes to the host registry.
   if (-not $State.Registry.ContainsKey($Root)) { $State.Registry[$Root] = @{} }
   if (-not $State.Registry[$Root].ContainsKey($Key)) { $State.Registry[$Root][$Key] = @{} }
   $State.Registry[$Root][$Key][$Name] = $Value
 
+  # Only explicit writes beneath the Windows uninstall path become ARP evidence.
+  # SystemComponent=1 hides the otherwise-created entry from WinGet matching.
   if ($Key -match $Script:NSIS_UNINSTALL_KEY_PATTERN) {
     $State.Metadata.ProductCode = Split-Path -Path $Key -Leaf
     $State.Metadata.Scope = if ($Root -eq 'HKLM') { 'machine' } elseif ($Root -eq 'HKCU') { 'user' } else { $State.Metadata.Scope }
@@ -1698,6 +1764,8 @@ function Get-NSISRegistryWriteFromEntry {
 
   if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { return $null }
 
+  # EW_WRITEREG operand positions differ for NSISBI's expanded records. Decode
+  # type fields from the detected layout instead of the obsolete fake opcode map.
   $IsNsisBi = $State.VersionInfo.PSObject.Properties.Name -contains 'IsNsisBi' -and $State.VersionInfo.IsNsisBi
   $TypeIndex = if ($IsNsisBi) { 6 } else { 5 }
   $RegistryTypeIndex = if ($IsNsisBi) { 7 } else { 6 }
@@ -1719,6 +1787,8 @@ function Get-NSISRegistryWriteFromEntry {
     }
   }
 
+  # String operands pass through the NSIS string decoder so variable and language
+  # references resolve using the same state as simulated execution.
   $Root = Resolve-NSISRegistryRoot -State $State -Root $Entry.Raw[1]
   $Key = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
   $Name = Get-NSISString -State $State -RelativeOffset $Entry.Values[3]
@@ -1903,6 +1973,8 @@ function Get-NSISEntries {
     [bool]$IsNsisBi = $false
   )
 
+  # Block 2 is the compiled command table. Its declared count and generation-
+  # specific record width must fit before any operand is read.
   $EntryBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 2
   if ($BlockHeaders[2].Count -gt $Script:NSIS_MAX_ENTRY_COUNT) { throw 'The NSIS entry table exceeds the supported parser limit' }
   $EntryCount = [int]$BlockHeaders[2].Count
@@ -1923,6 +1995,8 @@ function Get-NSISEntries {
       $Values[$ValueIndex] = [System.BitConverter]::ToInt32($EntryBlock, $ValueOffset)
     }
 
+    # Retain raw operands for source-accurate registry decoding while exposing a
+    # normalized opcode for the static simulator.
     $LayoutOpcode = if ($IsNsisBi) { ConvertFrom-NSISBiOpcode -Opcode $Raw[0] } else { [int]$Raw[0] }
     $Opcode = if ($VersionInfo) {
       Get-NSISNormalizedOpcode -Opcode $LayoutOpcode -Type $VersionInfo.Type -Unicode $VersionInfo.Unicode -LogCmdIsEnabled $VersionInfo.LogCmdIsEnabled
@@ -2040,6 +2114,7 @@ function Initialize-NSISState {
       SystemComponent            = $null
       Scope                      = $null
       WritesAppsAndFeaturesEntry = $false
+      DelegatesAppsAndFeaturesEntry = $false
       RegistryValues             = @{}
       RegistryWrites             = @()
       ExtractedFiles             = @()
@@ -2126,6 +2201,8 @@ function Invoke-NSISCodeSegment {
   $Watchdog = 0
   $WatchdogLimit = [Math]::Max($State.Entries.Count * $Script:NSIS_MAX_WATCHDOG_MULTIPLIER, 1)
 
+  # Follow only statically resolvable control flow. Every dispatched instruction
+  # consumes watchdog budget so loops and recursive callback patterns fail fast.
   while ($Position -ge 0 -and $Position -lt $State.Entries.Count) {
     $Result = Invoke-NSISEntry -State $State -Entry $State.Entries[$Position]
 
@@ -2169,6 +2246,8 @@ function Invoke-NSISEntry {
   $Values = $Entry.Values
   $Raw = $Entry.Raw
 
+  # Simulate only deterministic state needed for paths, variables, registry
+  # writes, and nested execution. UI and unsupported runtime opcodes are no-ops.
   switch ($Opcode) {
     $Script:NSIS_OPCODE_INVALID { return $Script:NSIS_RETURN_RESULT }
     $Script:NSIS_OPCODE_RETURN { return $Script:NSIS_RETURN_RESULT }
@@ -2212,6 +2291,8 @@ function Invoke-NSISEntry {
       $Mode = $Values[3]
       $RestoreControl = $Values[4]
 
+      # Save/restore semantics matter for ShellVarContext and registry-view
+      # selection, which determine whether uninstall evidence belongs to HKCU/HKLM.
       if ($Mode -le 0) {
         if ($State.ExecFlags.ContainsKey($FlagType)) {
           $State.LastExecFlags[$FlagType] = $State.ExecFlags[$FlagType]
@@ -2246,6 +2327,8 @@ function Invoke-NSISEntry {
       return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_ASSIGN_VAR {
+      # Reproduce NSIS substring assignment, including negative start offsets and
+      # packed maximum-length fields, before updating derived install paths.
       $Result = Get-NSISString -State $State -RelativeOffset $Values[2]
       $Start = $Values[4]
       $MaxLengthLow = $Values[3] -band 0xFFFF
@@ -2358,6 +2441,7 @@ function Invoke-NSISEntry {
       return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_SHELL_EXEC {
+      # Record configured nested execution as evidence only; never launch it.
       $Verb = Get-NSISString -State $State -RelativeOffset $Values[1]
       $File = Get-NSISString -State $State -RelativeOffset $Values[2]
       $Parameters = Get-NSISString -State $State -RelativeOffset $Values[3]
@@ -2379,6 +2463,8 @@ function Invoke-NSISEntry {
       return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_WRITE_REG {
+      # Registry parsing maps the source-accurate EW_WRITEREG operands and updates
+      # ARP metadata only for explicit uninstall-key writes.
       Add-NSISRegistryWrite -State $State -Entry $Entry
       return $Script:NSIS_CONTINUE_RESULT
     }
@@ -2415,6 +2501,8 @@ function Complete-NSISMetadata {
     [pscustomobject]$State
   )
 
+  # Language-table name and split VersionMajor/VersionMinor values are structured
+  # fallbacks only; arbitrary strings are never probed as metadata candidates.
   if (-not $State.Metadata.DisplayName -and $State.LanguageTable -and $State.LanguageTable.StringOffsets.Count -gt 2) {
     $NameOffset = $State.LanguageTable.StringOffsets[2]
     if ($NameOffset -ne 0) { $State.Metadata.DisplayName = Get-NSISString -State $State -RelativeOffset $NameOffset }
@@ -2433,6 +2521,8 @@ function Complete-NSISMetadata {
   }
 
   if (-not $State.Metadata.Scope) {
+    # Scope fallback uses the resolved install root only when no explicit
+    # uninstall hive or ShellVarContext evidence established it during simulation.
     if ($State.Metadata.DefaultInstallLocation -and (
         $State.Metadata.DefaultInstallLocation.StartsWith($env:ProgramFiles, [System.StringComparison]::OrdinalIgnoreCase) -or
         (${env:ProgramFiles(x86)} -and $State.Metadata.DefaultInstallLocation.StartsWith(${env:ProgramFiles(x86)}, [System.StringComparison]::OrdinalIgnoreCase))
@@ -2450,6 +2540,8 @@ function Complete-NSISMetadata {
   $ExtractedFiles = @($State.Files) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
   $ExecutedPayloads = @($State.ExecutedPayloads)
   $SeenRegistryWrites = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+  # Deduplicate exact registry evidence while preserving first-observed order.
   $RegistryWrites = @(
     foreach ($Write in @($State.RegistryWrites)) {
       $WriteKey = "$($Write.Root)`0$($Write.Key)`0$($Write.Name)`0$($Write.Value)`0$($Write.Type)"
@@ -2461,7 +2553,10 @@ function Complete-NSISMetadata {
     })
 
   if (-not $State.Metadata.WritesAppsAndFeaturesEntry -and $NestedInstallerEvidence.Count -gt 0) {
+    # A wrapper that extracts or executes another installer may delegate ARP
+    # ownership; surface that ambiguity instead of inventing an NSIS ProductCode.
     $State.Warnings.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
+    $State.Metadata.DelegatesAppsAndFeaturesEntry = $true
   }
 
   $State.Metadata.RegistryWrites = @($RegistryWrites)
@@ -2498,6 +2593,8 @@ function Invoke-NSISStaticSimulation {
   )
 
   process {
+    # Parse and normalize the compiled header once; all later phases share the
+    # same mutable state so callbacks and sections observe prior variable writes.
     $HeaderData = Get-NSISHeaderData -Path $Path
     $InitializedState = Initialize-NSISState -HeaderData $HeaderData
     $State = $InitializedState.State
@@ -2507,6 +2604,8 @@ function Invoke-NSISStaticSimulation {
     Add-NSISDirectUninstallWrites -State $State
     $Metadata = Complete-NSISMetadata -State $State
     if ($Mode -eq 'Fast' -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion) -and -not [string]::IsNullOrWhiteSpace($Metadata.ProductCode)) {
+      # Fast mode is an explicit optimization: direct uninstall writes must
+      # already provide complete deterministic identity before callbacks are skipped.
       return [pscustomobject]@{
         State       = $State
         Layout      = $Layout
@@ -2527,6 +2626,8 @@ function Invoke-NSISStaticSimulation {
     foreach ($Section in $State.Sections) {
       if ($Section.CodeOffset -lt 0) { continue }
 
+      # Sections are independent entry points. Unsupported or looping sections
+      # do not discard evidence already recovered from other sections.
       try {
         $Result = Invoke-NSISCodeSegment -State $State -Position $Section.CodeOffset
       } catch {
@@ -2544,6 +2645,8 @@ function Invoke-NSISStaticSimulation {
     }
 
     if ([string]::IsNullOrWhiteSpace($State.Metadata.DisplayVersion) -or [string]::IsNullOrWhiteSpace($State.Metadata.ProductCode)) {
+      # Re-scan literal EW_WRITEREG instructions only when dynamic control flow
+      # did not reach enough explicit uninstall metadata.
       Add-NSISDirectUninstallWrites -State $State
     }
 
@@ -2621,6 +2724,8 @@ function Get-NSISInstallerSwitchInfo {
   )
 
   process {
+    # Reuse one full parse/simulation and inspect its decoded string table; do not
+    # invoke individual metadata readers, which would parse the installer again.
     $Simulation = Invoke-NSISStaticSimulation -Path $Path
     $Strings = Get-NSISPlainStrings -State $Simulation.State
     $Switches = [System.Collections.Generic.List[object]]::new()
@@ -2637,6 +2742,8 @@ function Get-NSISInstallerSwitchInfo {
         $_ -match '(?i)\b(TestParameter|GetParameters|GetOptions|IfSilent|StrStr|CommandLine|Parameters)\b'
       } | Select-Object -First 20)
 
+    # A slash token is accepted only when known, adjacent to command-line parser
+    # evidence, or a short standalone token. This filters nested process switches.
     foreach ($String in $Strings) {
       foreach ($Match in [regex]::Matches($String, $Pattern)) {
         $Value = $Match.Value
@@ -2744,6 +2851,8 @@ function Get-ElectronBuilderNSISDetection {
     [string[]]$Strings
   )
 
+  # electron-builder's architecture payload names are compiler-generated format
+  # evidence; generic Electron strings or `--updated` alone are insufficient.
   $Architectures = [System.Collections.Generic.List[string]]::new()
   foreach ($Value in @($State.Files) + @($Strings)) {
     if ($Value -match '(?i)(^|[\\/])app-32\.(7z|zip)$|(^|[\\/])app-32$') {
@@ -2762,6 +2871,8 @@ function Get-ElectronBuilderNSISDetection {
       if ($Value -match '(?i)(app-(?:32|64|arm64)(?:\.(?:7z|zip))?)') { $Matches[1].ToLowerInvariant() }
     }
   ) | Select-Object -Unique
+  # Scope support is identified independently from architecture because some
+  # electron-builder configurations are per-user or per-machine only.
   $HasDualScopeUi = @($Strings).Where({
       $_ -like '*make this software available to all users*' -or
       $_ -like '*Fresh install for all users*' -or
@@ -2819,6 +2930,8 @@ function Get-ElectronBuilderNSISInfo {
     $Detection = Get-ElectronBuilderNSISDetection -State $State -Strings $Strings
     $Architectures = @($Detection.Architectures)
 
+    # Prefer explicit dual-scope UI evidence, otherwise retain the uninstall
+    # registry hive observed by the shared NSIS simulation.
     $SupportedScopes = if ($Detection.HasDualScopeUi) {
       @('user', 'machine')
     } elseif ($State.Metadata.Scope -eq 'machine') {
