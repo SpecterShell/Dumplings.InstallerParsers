@@ -60,7 +60,7 @@ The `ValidateSet` in `Cli.ps1` is authoritative. Add a CLI action whenever a new
 ## Architecture
 
 ```text
-PackageModule (MIT)
+PackageModule (Apache-2.0)
   InstallerBridge.psm1
       |
       | starts pwsh and exchanges JSON
@@ -80,7 +80,7 @@ The CLI loads shared infrastructure before the selected parser:
 5. `PE.psm1` resolves PE headers, sections, resources, overlays, and metadata.
 6. `RegistryAssociations.psm1` interprets explicit protocol and file-extension registry writes.
 
-The shared MIT files are kept byte-identical with their PackageModule counterparts so either submodule remains independently consumable. Format-specific code stays in its parser module.
+The shared MIT files remain file-level MIT exceptions in PackageModule and are kept byte-identical so either submodule remains independently consumable. Format-specific code stays in its parser module.
 
 ## Parser Contract
 
