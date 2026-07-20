@@ -2533,6 +2533,54 @@ function Invoke-NSISEntry {
   }
 }
 
+function ConvertTo-NSISManifestPath {
+  <#
+  .SYNOPSIS
+    Convert a host-resolved installer path to the WinGet environment-variable form
+  .DESCRIPTION
+    NSIS simulation resolves special folders to live host paths such as
+    C:\Program Files. WinGet manifests use stable environment-variable tokens
+    instead, mirroring the directory-constant mapping of the Inno parser.
+  .PARAMETER Path
+    The resolved path to convert
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(HelpMessage = 'The resolved path to convert')]
+    [AllowNull()]
+    [string]$Path
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+
+  $ProgramFiles64 = if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }
+  $ProgramFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $ProgramFiles64 }
+  $CommonProgramFiles64 = if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { $env:CommonProgramFiles }
+  $CommonProgramFilesX86 = if (${env:CommonProgramFiles(x86)}) { ${env:CommonProgramFiles(x86)} } else { $env:CommonProgramFiles }
+
+  # Longest prefixes first so Common Files and the x86 roots win over the
+  # shorter 64-bit Program Files prefix.
+  $Mappings = @(
+    @($CommonProgramFilesX86, '%ProgramFiles(x86)%\Common Files'),
+    @($CommonProgramFiles64, '%ProgramFiles%\Common Files'),
+    @($ProgramFilesX86, '%ProgramFiles(x86)%'),
+    @($ProgramFiles64, '%ProgramFiles%'),
+    @($env:LOCALAPPDATA, '%LocalAppData%'),
+    @($env:APPDATA, '%AppData%'),
+    @($env:ProgramData, '%ProgramData%'),
+    @($Script:NSIS_WINDOWS_DIRECTORY, '%SystemRoot%')
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_[0]) } | Sort-Object -Property { - $_[0].Length } -Stable
+
+  foreach ($Mapping in $Mappings) {
+    $Prefix = $Mapping[0]
+    if ($Path.Equals($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $Mapping[1] }
+    if ($Path.StartsWith("$Prefix\", [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $Mapping[1] + $Path.Substring($Prefix.Length)
+    }
+  }
+  return $Path
+}
+
 function Complete-NSISMetadata {
   <#
   .SYNOPSIS
@@ -2580,6 +2628,13 @@ function Complete-NSISMetadata {
 
   if ($State.Metadata.SystemComponent -eq '1' -or $State.Metadata.SystemComponent -eq '0x00000001') {
     $State.Metadata.WritesAppsAndFeaturesEntry = $false
+  }
+
+  # Manifests carry environment-variable install roots, not host-absolute paths.
+  # Scope detection above already consumed the resolved path, so normalize only
+  # the reported value.
+  if ($State.Metadata.DefaultInstallLocation) {
+    $State.Metadata.DefaultInstallLocation = ConvertTo-NSISManifestPath -Path $State.Metadata.DefaultInstallLocation
   }
 
   $ExtractedFiles = @($State.Files) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique

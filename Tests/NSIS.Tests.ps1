@@ -505,6 +505,27 @@ Describe 'NSIS parser' {
     $Result.Orphan | Should -BeNullOrEmpty
   }
 
+  It 'Should report install roots as WinGet environment-variable paths' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      [pscustomobject]@{
+        ProgramFiles   = ConvertTo-NSISManifestPath -Path "$env:ProgramFiles\Process Lasso"
+        ProgramFiles86 = ConvertTo-NSISManifestPath -Path "${env:ProgramFiles(x86)}\App"
+        LocalAppData   = ConvertTo-NSISManifestPath -Path "$env:LOCALAPPDATA\Programs\App"
+        RootOnly       = ConvertTo-NSISManifestPath -Path $env:ProgramFiles
+        NotAPrefix     = ConvertTo-NSISManifestPath -Path "$env:ProgramFiles.exe"
+        Unrelated      = ConvertTo-NSISManifestPath -Path 'D:\Custom\App'
+      }
+    }
+
+    $Result.ProgramFiles | Should -Be '%ProgramFiles%\Process Lasso'
+    $Result.ProgramFiles86 | Should -Be '%ProgramFiles(x86)%\App'
+    $Result.LocalAppData | Should -Be '%LocalAppData%\Programs\App'
+    $Result.RootOnly | Should -Be '%ProgramFiles%'
+    $Result.NotAPrefix | Should -Be "$env:ProgramFiles.exe"
+    $Result.Unrelated | Should -Be 'D:\Custom\App'
+  }
+
   It 'Should read static metadata from an NSIS payload embedded as a PE resource' {
     $Fixture = Get-InstallerFixture -Name 'FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe' -Url 'https://cdn.isealsuite.com/windows/FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe'
     $Info = Get-NSISInfo -Path $Fixture
