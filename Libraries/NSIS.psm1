@@ -3,7 +3,8 @@
 #
 # Binary structure consumed by this parser (archive-relative, LE integers):
 #
-#   PE stub -> 512-byte-aligned archive
+#   PE stub -> 512-byte-aligned archive (aligned to the file start, or to an
+#   embedded stub's start when the installer is nested inside another PE)
 #     +00 Flags:u32
 #     +04 EF BE AD DE + "NullsoftInst"[12]
 #     +14 DecompressedHeaderSize:u32
@@ -309,6 +310,36 @@ function Test-NSISPEHeaderBeforeArchiveStream {
   return $false
 }
 
+function Test-NSISRelativePEStubStream {
+  <#
+  .SYNOPSIS
+    Validate that a non-file-aligned NSIS archive is aligned relative to a nearby PE stub
+  .DESCRIPTION
+    An installer embedded inside another executable, for example an NSIS
+    installer stored as a resource of an outer launcher, keeps its archive
+    512-byte aligned relative to its own stub rather than to the file start.
+    The stub start therefore shares the candidate's alignment remainder and is
+    found by stepping backward from the candidate in whole alignment blocks.
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER FirstHeaderOffset
+    Absolute byte offset of the candidate NSIS first header.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][long]$FirstHeaderOffset
+  )
+
+  $MinimumOffset = [Math]::Max(0L, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
+  for ($Offset = $FirstHeaderOffset - $Script:NSIS_ARCHIVE_ALIGNMENT; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
+    if ($Offset + 64 -gt $Stream.Length) { continue }
+    $Candidate = New-BoundedReadStream -Stream $Stream -Offset $Offset -Length ($FirstHeaderOffset - $Offset) -LeaveOpen
+    try { if (Get-PELayout -Stream $Candidate) { return $true } } catch { } finally { $Candidate.Dispose() }
+  }
+  return $false
+}
+
 function Test-NSISPEHeaderAtOffset {
   <#
   .SYNOPSIS
@@ -375,6 +406,11 @@ function Get-NSISFirstHeaderCandidate {
   <#
   .SYNOPSIS
     Locate a source-compatible NSIS first header by scanning aligned archive starts
+  .DESCRIPTION
+    Archives are normally 512-byte aligned to the file start. An installer
+    embedded inside another executable, such as an NSIS payload stored as a PE
+    resource, is instead aligned relative to its own stub and is accepted only
+    when a bounded backward search finds that stub.
   .PARAMETER Bytes
     The installer bytes
   #>
@@ -394,7 +430,8 @@ function Get-NSISFirstHeaderCandidate {
       $SearchLength = [Math]::Min($SearchWindowSize, $Stream.Length - $SearchStart)
       foreach ($SignatureOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:NSIS_FIRST_HEADER_SIGNATURE -StartOffset $SearchStart -Length $SearchLength -Maximum 256)) {
         $Offset = $SignatureOffset - 4
-        if ($Offset -lt 0 -or ($Offset % $Script:NSIS_ARCHIVE_ALIGNMENT) -ne 0 -or $Offset + $Script:NSIS_FIRST_HEADER_SIZE -gt $Stream.Length) { continue }
+        if ($Offset -lt 0 -or $Offset + $Script:NSIS_FIRST_HEADER_SIZE -gt $Stream.Length) { continue }
+        $IsFileAligned = ($Offset % $Script:NSIS_ARCHIVE_ALIGNMENT) -eq 0
         $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Script:NSIS_FIRST_HEADER_SIZE
         $Flags = [BitConverter]::ToUInt32($Header, 0)
 
@@ -409,7 +446,15 @@ function Get-NSISFirstHeaderCandidate {
         $LengthOfFollowingData = [BitConverter]::ToUInt32($Header, 24)
         if ($LengthOfHeader -le 0 -or $LengthOfHeader -gt $Script:NSIS_MAX_HEADER_SIZE) { continue }
         if ($LengthOfFollowingData -le $FirstHeaderSize -or $LengthOfFollowingData -gt $Stream.Length - $Offset) { continue }
-        if (-not (Test-NSISPEHeaderBeforeArchiveStream -Stream $Stream -FirstHeaderOffset $Offset)) { continue }
+        # A file-aligned archive belongs to the outer PE stub. A non-aligned
+        # archive is accepted only when it is aligned relative to an embedded
+        # stub found by the bounded backward search, such as an NSIS payload
+        # stored as a resource of an outer launcher.
+        if ($IsFileAligned) {
+          if (-not (Test-NSISPEHeaderBeforeArchiveStream -Stream $Stream -FirstHeaderOffset $Offset)) { continue }
+        } else {
+          if (-not (Test-NSISRelativePEStubStream -Stream $Stream -FirstHeaderOffset $Offset)) { continue }
+        }
         $DataBlockLength = if ($FirstHeaderSize -eq $Script:NSISBI_FIRST_HEADER_SIZE) {
           [BitConverter]::ToUInt64((Read-BinaryBytes -Stream $Stream -Offset ($Offset + 28) -Count 8), 0)
         } else {

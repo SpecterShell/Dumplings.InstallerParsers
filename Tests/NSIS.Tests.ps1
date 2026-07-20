@@ -459,5 +459,61 @@ Describe 'NSIS parser' {
     $SwitchInfo.AdditionalSwitches | Should -BeNullOrEmpty
     $SwitchInfo.RejectedSwitchCandidates.Switch | Should -Contain '/IM'
   }
+
+  It 'Should locate an archive aligned relative to an embedded stub and reject orphan headers' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      param($Fixture)
+
+      $InnerBytes = [IO.File]::ReadAllBytes($Fixture)
+      $InnerStream = [IO.MemoryStream]::new($InnerBytes, $false)
+      try {
+        $InnerCandidate = Get-NSISFirstHeaderCandidate -Stream $InnerStream
+      } finally { $InnerStream.Dispose() }
+
+      # Embed the installer behind a non-alignment-sized prefix so its archive
+      # stays aligned relative to its own stub but not to the file start.
+      $PrefixLength = 280
+      $OuterBytes = [byte[]]::new($PrefixLength + $InnerBytes.Length)
+      [Array]::Copy($InnerBytes, 0, $OuterBytes, $PrefixLength, $InnerBytes.Length)
+      $OuterStream = [IO.MemoryStream]::new($OuterBytes, $false)
+      try {
+        $EmbeddedCandidate = Get-NSISFirstHeaderCandidate -Stream $OuterStream
+      } finally { $OuterStream.Dispose() }
+
+      # A well-formed but non-aligned header without a PE stub a whole number
+      # of alignment blocks earlier must still be rejected.
+      $OrphanBytes = [byte[]]::new(8192)
+      $OrphanOffset = 280
+      [Array]::Copy($Script:NSIS_FIRST_HEADER_SIGNATURE, 0, $OrphanBytes, $OrphanOffset + 4, $Script:NSIS_FIRST_HEADER_SIGNATURE.Length)
+      [Array]::Copy([BitConverter]::GetBytes([uint32]128), 0, $OrphanBytes, $OrphanOffset + 20, 4)
+      [Array]::Copy([BitConverter]::GetBytes([uint32]1024), 0, $OrphanBytes, $OrphanOffset + 24, 4)
+      $OrphanStream = [IO.MemoryStream]::new($OrphanBytes, $false)
+      try {
+        $OrphanCandidate = Get-NSISFirstHeaderCandidate -Stream $OrphanStream
+      } finally { $OrphanStream.Dispose() }
+
+      [pscustomobject]@{
+        InnerOffset    = $InnerCandidate.Offset
+        EmbeddedOffset = $EmbeddedCandidate.Offset
+        Orphan         = $OrphanCandidate
+      }
+    } $Fixture
+
+    $Result.EmbeddedOffset | Should -Be ($Result.InnerOffset + 280)
+    $Result.Orphan | Should -BeNullOrEmpty
+  }
+
+  It 'Should read static metadata from an NSIS payload embedded as a PE resource' {
+    $Fixture = Get-InstallerFixture -Name 'FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe' -Url 'https://cdn.isealsuite.com/windows/FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe'
+    $Info = Get-NSISInfo -Path $Fixture
+
+    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.DisplayName | Should -Be 'FeiLian'
+    $Info.DisplayVersion | Should -Be '3.2.16.4828'
+    $Info.ProductCode | Should -Be 'CorpLink'
+    $Info.Publisher | Should -Be '北京火山引擎科技有限公司'
+  }
 }
 
