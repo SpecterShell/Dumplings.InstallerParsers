@@ -2146,26 +2146,28 @@ function Initialize-NSISState {
     LastExecFlags    = @{}
     ShellVarContext  = $null
     Metadata         = [ordered]@{
-      Path                          = $HeaderData.Path
-      InstallerType                 = 'Nullsoft'
-      DisplayVersion                = $null
-      DisplayName                   = $null
-      Publisher                     = $null
-      ProductCode                   = $null
-      DefaultInstallLocation        = $null
-      UninstallString               = $null
-      QuietUninstallString          = $null
-      DisplayIcon                   = $null
-      SystemComponent               = $null
-      Scope                         = $null
-      WritesAppsAndFeaturesEntry    = $false
-      DelegatesAppsAndFeaturesEntry = $false
-      RegistryValues                = @{}
-      RegistryWrites                = @()
-      ExtractedFiles                = @()
-      ExecutedPayloads              = @()
-      Warnings                      = @()
-      ParserVersionInfo             = $null
+      Path                       = $HeaderData.Path
+      InstallerType              = 'Nullsoft'
+      DisplayVersion             = $null
+      DisplayName                = $null
+      Publisher                  = $null
+      ProductCode                = $null
+      UpgradeCode                = $null
+      DefaultInstallLocation     = $null
+      UninstallString            = $null
+      QuietUninstallString       = $null
+      DisplayIcon                = $null
+      SystemComponent            = $null
+      Scope                      = $null
+      WritesAppsAndFeaturesEntry = $false
+      AppsAndFeaturesProductCode = $null
+      RegistryValues             = @{}
+      RegistryWrites             = @()
+      ExtractedFiles             = @()
+      ExecutedPayloads           = @()
+      Warnings                   = @()
+      UnresolvedFields           = @()
+      ParserVersionInfo          = $null
     }
   }
 
@@ -2656,9 +2658,9 @@ function Complete-NSISMetadata {
     # A wrapper that extracts or executes another installer may delegate ARP
     # ownership; surface that ambiguity instead of inventing an NSIS ProductCode.
     $State.Warnings.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
-    $State.Metadata.DelegatesAppsAndFeaturesEntry = $true
   }
 
+  $State.Metadata.AppsAndFeaturesProductCode = $State.Metadata.ProductCode
   $State.Metadata.RegistryWrites = @($RegistryWrites)
   $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
   foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $State.Warnings.Add($Warning) }

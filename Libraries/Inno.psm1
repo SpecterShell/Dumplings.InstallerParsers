@@ -1908,6 +1908,7 @@ function Get-InnoInfo {
       DisplayName                              = $DisplayName
       Publisher                                = $AppPublisherInfo.Value
       ProductCode                              = $ProductCode
+      UpgradeCode                              = $null
       AppsAndFeaturesProductCode               = $ProductCode
       UninstallRegKeyBaseName                  = $UninstallRegKeyBaseName
       DefaultInstallLocation                   = $ResolvedDefaultDirName
