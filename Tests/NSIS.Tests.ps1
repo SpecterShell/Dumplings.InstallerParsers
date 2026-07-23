@@ -15,10 +15,19 @@ BeforeAll {
       [Parameter(Mandatory)]
       [string]$Url,
 
+      [string]$Sha256,
+
       [switch]$UseSourceForgeMetaRefresh
     )
 
-    Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -UseSourceForgeMetaRefresh:$UseSourceForgeMetaRefresh
+    $Arguments = @{
+      Directory                 = $Script:FixtureDirectory
+      Name                      = $Name
+      Uri                       = $Url
+      UseSourceForgeMetaRefresh = $UseSourceForgeMetaRefresh
+    }
+    if ($Sha256) { $Arguments.Sha256 = $Sha256 }
+    Get-DumplingsTestFixture @Arguments
   }
 }
 
@@ -77,6 +86,56 @@ Describe 'NSIS parser' {
     $Result.HasLongDataBlockOffsets | Should -BeTrue
     $Result.SupportsExternalFiles | Should -BeTrue
     $Result.InvalidCandidate | Should -BeNullOrEmpty
+  }
+
+  It 'Should decode independently compressed NSISBI multithread-wrapper records' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Expected = [System.Text.Encoding]::UTF8.GetBytes((('Unity-NSISBI-MTW-' * 5000) -join ''))
+      $Payload = [System.Collections.Generic.List[byte]]::new()
+
+      # The fixture uses two independently compressed zlib records. NSISBI uses
+      # this same MTW framing around its selected build-time codec; Unity uses LZMA.
+      $Ranges = @(
+        [pscustomobject]@{ Offset = 0; Length = 40000 }
+        [pscustomobject]@{ Offset = 40000; Length = $Expected.Length - 40000 }
+      )
+      foreach ($Range in $Ranges) {
+        $CompressedBuffer = [System.IO.MemoryStream]::new()
+        $Encoder = [System.IO.Compression.ZLibStream]::new(
+          $CompressedBuffer,
+          [System.IO.Compression.CompressionLevel]::Optimal,
+          $true)
+        try { $Encoder.Write($Expected, $Range.Offset, $Range.Length) } finally { $Encoder.Dispose() }
+        $Compressed = $CompressedBuffer.ToArray()
+        $CompressedBuffer.Dispose()
+
+        $Payload.Add([byte]($Compressed.Length -band 0xFF))
+        $Payload.Add([byte](($Compressed.Length -shr 8) -band 0xFF))
+        $Payload.Add([byte](($Compressed.Length -shr 16) -band 0xFF))
+        $Payload.AddRange($Compressed)
+      }
+      $Payload.AddRange([byte[]](0, 0, 0))
+
+      $Stream = [System.IO.MemoryStream]::new($Payload.ToArray(), $false)
+      try {
+        $Probe = Read-BinaryBytes -Stream $Stream -Offset 0 -Count ([Math]::Min(24, $Stream.Length))
+        $IsMtw = Test-NSISMtwHeader -Bytes $Probe -CompressedSize $Stream.Length
+        $Decoded = Read-NSISMtwHeaderData -Stream $Stream -ExpectedOutputBytes $Expected.Length
+      } finally { $Stream.Dispose() }
+
+      [pscustomobject]@{
+        IsMtw       = $IsMtw
+        Compression = $Decoded.Compression
+        BlockCount  = $Decoded.BlockCount
+        Matches     = [System.Linq.Enumerable]::SequenceEqual([byte[]]$Expected, [byte[]]$Decoded.Bytes)
+      }
+    }
+
+    $Result.IsMtw | Should -BeTrue
+    $Result.Compression | Should -Be 'Zlib'
+    $Result.BlockCount | Should -Be 2
+    $Result.Matches | Should -BeTrue
   }
 
   It 'Should recover uninstall metadata from source-accurate EW_WRITEREG entries' {
@@ -395,6 +454,27 @@ Describe 'NSIS parser' {
     $Result.NsisBiWriteReg | Should -Be 51
   }
 
+  It 'Should recognize bounded vendor LZMA2 header framing' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      # Property 0x18 selects a 16 MiB dictionary. Control 0xE3 declares a
+      # 241,198-byte output chunk containing 20,522 compressed bytes and a new
+      # LZMA property (0x5D), exactly filling a 20,530-byte NSIS block.
+      $Bytes = [byte[]](0x18, 0xE3, 0xAE, 0x2D, 0x50, 0x29, 0x5D)
+      [pscustomobject]@{
+        IsLzma2         = Test-NSISLzma2Header -Bytes $Bytes -CompressedSize 20530 -ExpectedUncompressedSize 241198
+        Truncated       = Test-NSISLzma2Header -Bytes $Bytes -CompressedSize 20528 -ExpectedUncompressedSize 241198
+        OversizedOutput = Test-NSISLzma2Header -Bytes $Bytes -CompressedSize 20530 -ExpectedUncompressedSize 241197
+        FirstCandidate  = (Get-NSISCompressionCandidates -Bytes $Bytes -CompressedSize 20530 -ExpectedUncompressedSize 241198)[0]
+      }
+    }
+
+    $Result.IsLzma2 | Should -BeTrue
+    $Result.Truncated | Should -BeFalse
+    $Result.OversizedOutput | Should -BeFalse
+    $Result.FirstCandidate | Should -Be 'Lzma2'
+  }
+
   It 'Should fail quickly on malformed NSIS headers' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Fixture = Join-Path $Script:FixtureDirectory 'malformed-nsis.exe'
@@ -458,6 +538,21 @@ Describe 'NSIS parser' {
     $Info.Scope | Should -Be 'machine'
     $SwitchInfo.AdditionalSwitches | Should -BeNullOrEmpty
     $SwitchInfo.RejectedSwitchCandidates.Switch | Should -Contain '/IM'
+  }
+
+  It 'Should read NetEase UU Remote metadata from a vendor LZMA2 NSIS header' {
+    $Fixture = Get-InstallerFixture -Name 'UURemote_Setup_4.34.0.8979.exe' `
+      -Url 'https://a56.gdl.netease.com/UURemote_Setup_4.34.0.8979_0723104500_gwqd.exe' `
+      -Sha256 '237EB74939A62935AE3E2B1FD43C484D634CCD96FB1094BA764C8CB64065DC9A'
+    $Info = Get-NSISInfo -Path $Fixture
+
+    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.DisplayName | Should -Be 'UU远程'
+    $Info.DisplayVersion | Should -Be '4.34.0.8979'
+    $Info.ProductCode | Should -Be 'GameViewer'
+    $Info.Publisher | Should -Be 'Netease'
+    $Info.Scope | Should -Be 'user'
+    $Info.Warnings | Should -BeNullOrEmpty
   }
 
   It 'Should locate an archive aligned relative to an embedded stub and reject orphan headers' {

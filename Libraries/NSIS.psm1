@@ -10,12 +10,24 @@
 #     +14 DecompressedHeaderSize:u32
 #     +18 ArchiveSize:u32
 #     +1C NSISBI DataBlockLength:u64 (variant)
-#     `-- packed-size word -> compressed logical header -> eight block tables
-#         -> 28-byte standard or 36-byte NSISBI command entries -> payloads
+#     +-- non-solid block
+#     |   +00 PackedSize:u32 (bit 31 = compressed, low 31 bits = byte count)
+#     |   `-- codec stream -> decompressed logical header
+#     +-- vendor LZMA2 codec stream
+#     |   +00 DictionaryProperty:u8 (0..40)
+#     |   +01 Control:u8 + chunk sizes + optional LZMA property + chunk data
+#     |   `-- repeated chunks terminated by Control=0
+#     +-- NSISBI multithread wrapper (MTW), solid stream
+#     |   +00 CompressedBlockSize:u24 LE (zero terminates the stream)
+#     |   +03 Independent codec stream -> at most 2 MiB decompressed
+#     |   `-- repeated records; Unity currently uses LZMA codec streams
+#     `-- logical header -> eight block tables -> 28-byte standard or
+#         36-byte NSISBI command entries -> payloads
 #
-# The packed-size high bit marks a solid archive. Opcode numbering is normalized
-# for NSIS 2/3, Unicode/Park, log-enabled, and NSISBI layouts before simulation.
-# Explicit EW_WRITEREG commands are authoritative; arbitrary strings are not.
+# A packed-size high bit marks a compressed non-solid block; solid archives start
+# directly with one codec stream. Opcode numbering is normalized for NSIS 2/3,
+# Unicode/Park, log-enabled, and NSISBI layouts before simulation. Explicit
+# EW_WRITEREG commands are authoritative; arbitrary strings are not.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -71,6 +83,10 @@ $NSIS_MAX_BACKWARD_PE_SCAN = 1048576
 $NSIS_MAX_FILE_SIZE = [uint64]4294967295
 $NSIS_MAX_HEADER_SIZE = 134217728
 $NSIS_MAX_ENTRY_COUNT = 33554432
+$NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT = 65536
+$NSISBI_MTW_BLOCK_HEADER_SIZE = 3
+$NSISBI_MTW_BLOCK_DATA_SIZE = 2097152
+$NSISBI_MTW_BLOCK_BUFFER_SIZE = 2307891
 $NSIS_HEADER_OFFSET_LANG_TABLE_SIZE = 32
 $NSIS_HEADER_OFFSET_CODE_ON_INIT = 40
 $NSIS_HEADER_OFFSET_CODE_ON_INST_SUCCESS = 44
@@ -560,6 +576,57 @@ function Get-NSISLzmaFilterLength {
   return -1
 }
 
+function Test-NSISLzma2Header {
+  <#
+  .SYNOPSIS
+    Test whether a compressed NSIS block begins with an LZMA2 property and chunk
+  .PARAMETER Bytes
+    The candidate bytes beginning with the one-byte LZMA2 dictionary property
+  .PARAMETER CompressedSize
+    The complete compressed NSIS block size, including the property byte
+  .PARAMETER ExpectedUncompressedSize
+    The expected decompressed NSIS header size
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The candidate bytes beginning with the one-byte LZMA2 dictionary property')]
+    [byte[]]$Bytes,
+
+    [Parameter(HelpMessage = 'The complete compressed NSIS block size, including the property byte')]
+    [long]$CompressedSize = -1,
+
+    [Parameter(HelpMessage = 'The expected decompressed NSIS header size')]
+    [long]$ExpectedUncompressedSize = -1
+  )
+
+  # The LZMA2 SDK accepts dictionary-property values 0 through 40. A property
+  # byte is followed by a control byte; 0 ends the stream, 1/2 introduce an
+  # uncompressed chunk, and 0x80..0xFF introduce a compressed chunk.
+  if ($Bytes.Length -lt 4 -or $Bytes[0] -gt 40) { return $false }
+  $Control = $Bytes[1]
+  if ($Control -eq 0 -or ($Control -gt 2 -and $Control -lt 0x80)) { return $false }
+
+  if ($Control -le 2) {
+    $UnpackedSize = (([int]$Bytes[2] -shl 8) -bor [int]$Bytes[3]) + 1
+    $RecordSize = 3L + $UnpackedSize
+  } else {
+    if ($Bytes.Length -lt 6) { return $false }
+    $UnpackedSize = (([int]$Control -band 0x1F) -shl 16) -bor ([int]$Bytes[2] -shl 8) -bor [int]$Bytes[3]
+    $UnpackedSize += 1
+    $PackedSize = (([int]$Bytes[4] -shl 8) -bor [int]$Bytes[5]) + 1
+    $PropertySize = if ($Control -ge 0xC0) { 1 } else { 0 }
+    if ($PropertySize -and ($Bytes.Length -lt 7 -or $Bytes[6] -ge (9 * 5 * 5))) { return $false }
+    $RecordSize = 5L + $PropertySize + $PackedSize
+  }
+
+  # Reject impossible first chunks before constructing a decoder. Multi-chunk
+  # streams are allowed, so the first unpacked chunk may be smaller than the
+  # complete NSIS header and the first record may leave bytes for later chunks.
+  if ($CompressedSize -ge 0 -and (1L + $RecordSize) -gt $CompressedSize) { return $false }
+  if ($ExpectedUncompressedSize -ge 0 -and $UnpackedSize -gt $ExpectedUncompressedSize) { return $false }
+  return $true
+}
+
 function Test-NSISBZip2Header {
   <#
   .SYNOPSIS
@@ -593,8 +660,144 @@ function Test-NSISZlibHeader {
   if (($Bytes[0] -band 0x0F) -ne 8) { return $false }
   if (($Bytes[0] -band 0xF0) -gt 0x70) { return $false }
 
-  $Header = ($Bytes[0] -shl 8) -bor $Bytes[1]
+  $Header = ([int]$Bytes[0] -shl 8) -bor [int]$Bytes[1]
   return ($Header % 31) -eq 0
+}
+
+function Get-NSISMtwCompressionCandidate {
+  <#
+  .SYNOPSIS
+    Identify the codec inside an NSISBI multithread-wrapper record
+  .PARAMETER Bytes
+    Candidate bytes beginning with the three-byte MTW record length
+  .PARAMETER CompressedSize
+    Available bytes in the enclosing NSIS payload
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [long]$CompressedSize = -1
+  )
+
+  if ($Bytes.Length -lt ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + 2)) { return @() }
+  $BlockLength = [int]$Bytes[0] -bor ([int]$Bytes[1] -shl 8) -bor ([int]$Bytes[2] -shl 16)
+  if ($BlockLength -le 0 -or $BlockLength -gt $Script:NSISBI_MTW_BLOCK_BUFFER_SIZE) { return @() }
+  if ($CompressedSize -ge 0 -and ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + [long]$BlockLength) -gt $CompressedSize) { return @() }
+
+  # A three-byte integer alone is weak evidence. Require the first wrapped
+  # block to expose a source-backed codec signature before classifying MTW.
+  $InnerBytes = $Bytes[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Bytes.Length - 1)]
+  # NSISBI initializes every MTW LZMA worker with MTW_BLOCK_BUF_SIZE as its
+  # dictionary. Unlike ordinary NSIS LZMA, that size is not a power of two.
+  if ($InnerBytes.Length -ge 5 -and $InnerBytes[0] -lt (9 * 5 * 5) -and
+    [BitConverter]::ToUInt32($InnerBytes, 1) -eq $Script:NSISBI_MTW_BLOCK_BUFFER_SIZE) { return @('Lzma') }
+  if (Test-NSISBZip2Header -Bytes $InnerBytes) { return @('BZip2') }
+  if (Test-NSISZlibHeader -Bytes $InnerBytes) { return @('Zlib', 'Deflate') }
+  return @()
+}
+
+function Test-NSISMtwHeader {
+  <#
+  .SYNOPSIS
+    Test whether bytes begin with a structurally supported NSISBI MTW record
+  .PARAMETER Bytes
+    Candidate bytes beginning with a three-byte MTW record length
+  .PARAMETER CompressedSize
+    Available bytes in the enclosing NSIS payload
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [long]$CompressedSize = -1
+  )
+
+  return (Get-NSISMtwCompressionCandidate -Bytes $Bytes -CompressedSize $CompressedSize).Count -gt 0
+}
+
+function Read-NSISMtwHeaderData {
+  <#
+  .SYNOPSIS
+    Decode the bounded logical-header prefix from an NSISBI MTW stream
+  .PARAMETER Stream
+    Seekable bounded stream positioned over the MTW payload. The caller owns it;
+    this function uses relative random-access reads and leaves it open.
+  .PARAMETER ExpectedOutputBytes
+    Exact number of decompressed bytes needed for the embedded size and header
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateRange(1, 134217728)][int]$ExpectedOutputBytes
+  )
+
+  if (-not $Stream.CanSeek) { throw 'NSISBI MTW decoding requires a seekable bounded stream' }
+  $Output = [System.IO.MemoryStream]::new($ExpectedOutputBytes)
+  $RecordOffset = 0L
+  $SelectedCompression = $null
+  $BlockCount = 0
+  try {
+    while ($Output.Length -lt $ExpectedOutputBytes) {
+      if ($RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE -gt $Stream.Length) {
+        throw 'The NSISBI MTW block header is truncated'
+      }
+      $RecordHeader = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
+      $CompressedBlockSize = [int]$RecordHeader[0] -bor ([int]$RecordHeader[1] -shl 8) -bor ([int]$RecordHeader[2] -shl 16)
+      if ($CompressedBlockSize -eq 0) { throw 'The NSISBI MTW stream ended before the logical header was complete' }
+      if ($CompressedBlockSize -gt $Script:NSISBI_MTW_BLOCK_BUFFER_SIZE) { throw 'The NSISBI MTW block exceeds the format limit' }
+
+      $BlockOffset = $RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
+      if ($BlockOffset + $CompressedBlockSize -gt $Stream.Length) { throw 'The NSISBI MTW block data is truncated' }
+      $ProbeLength = [int][Math]::Min(24L, [long]$CompressedBlockSize)
+      $Probe = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + $ProbeLength)
+      $Candidates = if ($SelectedCompression) {
+        @($SelectedCompression)
+      } else {
+        @(Get-NSISMtwCompressionCandidate -Bytes $Probe -CompressedSize ($Stream.Length - $RecordOffset))
+      }
+      if ($Candidates.Count -eq 0) { throw 'The NSISBI MTW block uses an unsupported or unrecognized compression method' }
+
+      $DecodedBlock = $null
+      $LastError = $null
+      foreach ($Compression in $Candidates) {
+        $CompressedBlock = New-BoundedReadStream -Stream $Stream -Offset $BlockOffset -Length $CompressedBlockSize -LeaveOpen
+        $Decoder = $null
+        $BlockOutput = [System.IO.MemoryStream]::new($Script:NSISBI_MTW_BLOCK_DATA_SIZE)
+        try {
+          $InnerProbe = $Probe[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Probe.Length - 1)]
+          $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $InnerProbe } else { -1 }
+          $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $CompressedBlock -IsSolid $true `
+            -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+          $null = Copy-BoundedStream -Source $Decoder -Destination $BlockOutput -MaximumBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+          if ($BlockOutput.Length -eq 0) { throw 'The NSISBI MTW block did not produce output' }
+          $DecodedBlock = $BlockOutput.ToArray()
+          $SelectedCompression = $Compression
+          break
+        } catch {
+          $LastError = $_
+        } finally {
+          if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
+          $BlockOutput.Dispose()
+          $CompressedBlock.Dispose()
+        }
+      }
+      if (-not $DecodedBlock) { throw "Failed to decode the NSISBI MTW block: $($LastError.Exception.Message)" }
+
+      # The final block can contain archive data beyond the logical header. Copy
+      # only the requested prefix so the parser never buffers the full payload.
+      $Remaining = $ExpectedOutputBytes - [int]$Output.Length
+      $Output.Write($DecodedBlock, 0, [Math]::Min($Remaining, $DecodedBlock.Length))
+      $RecordOffset = $BlockOffset + $CompressedBlockSize
+      $BlockCount++
+    }
+
+    return [pscustomobject]@{
+      Bytes       = $Output.ToArray()
+      Compression = $SelectedCompression
+      BlockCount  = $BlockCount
+    }
+  } finally {
+    $Output.Dispose()
+  }
 }
 
 function Get-NSISCompressionCandidates {
@@ -603,23 +806,42 @@ function Get-NSISCompressionCandidates {
     Get the ordered list of decoder candidates for a compressed NSIS header
   .PARAMETER Bytes
     The candidate compressed header bytes
+  .PARAMETER CompressedSize
+    The complete compressed NSIS block size
+  .PARAMETER ExpectedUncompressedSize
+    The expected decompressed NSIS header size
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The candidate compressed header bytes')]
-    [byte[]]$Bytes
+    [byte[]]$Bytes,
+
+    [Parameter(HelpMessage = 'The complete compressed NSIS block size')]
+    [long]$CompressedSize = -1,
+
+    [Parameter(HelpMessage = 'The expected decompressed NSIS header size')]
+    [long]$ExpectedUncompressedSize = -1
   )
 
   $LzmaFilterLength = Get-NSISLzmaFilterLength -Bytes $Bytes
   if ($LzmaFilterLength -ge 0) { return @('Lzma') }
   if (Test-NSISBZip2Header -Bytes $Bytes) { return @('BZip2') }
 
+  # Some vendor NSIS stubs use an LZMA2 SDK decoder. Their non-solid block is:
+  # packed-size prefix, one dictionary-property byte, then raw LZMA2 records.
+  # Keep DEFLATE fallbacks because a short raw stream can coincidentally satisfy
+  # the first-record checks; exact decompressed header validation selects it.
+  if (Test-NSISLzma2Header -Bytes $Bytes -CompressedSize $CompressedSize -ExpectedUncompressedSize $ExpectedUncompressedSize) {
+    return @('Lzma2', 'Deflate', 'Zlib')
+  }
+
   # Recent KDE/Prowise NSIS stubs store the payload as raw DEFLATE without the RFC1950 zlib wrapper.
   if (Test-NSISZlibHeader -Bytes $Bytes) {
-    return @('Zlib', 'Deflate')
+    $Candidates = @('Zlib', 'Deflate')
   } else {
-    return @('Deflate', 'Zlib')
+    $Candidates = @('Deflate', 'Zlib')
   }
+  return $Candidates
 }
 
 function New-NSISDecoder {
@@ -634,11 +856,13 @@ function New-NSISDecoder {
     Whether the NSIS header uses the solid layout
   .PARAMETER LzmaFilterLength
     The optional NSIS LZMA filter marker length
+  .PARAMETER ExpectedOutputBytes
+    The exact decompressed header bytes required by the caller
   #>
   [OutputType([System.IDisposable])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The NSIS compression format')]
-    [ValidateSet('None', 'Lzma', 'BZip2', 'Zlib', 'Deflate')]
+    [ValidateSet('None', 'Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate')]
     [string]$Compression,
 
     [Parameter(Mandatory, HelpMessage = 'The compressed header payload stream')]
@@ -648,7 +872,11 @@ function New-NSISDecoder {
     [bool]$IsSolid,
 
     [Parameter(HelpMessage = 'The optional NSIS LZMA filter marker length')]
-    [int]$LzmaFilterLength = -1
+    [int]$LzmaFilterLength = -1,
+
+    [Parameter(HelpMessage = 'The exact decompressed header bytes required by the caller')]
+    [ValidateRange(1, 134217728)]
+    [int]$ExpectedOutputBytes = 134217728
   )
 
   switch ($Compression) {
@@ -657,6 +885,13 @@ function New-NSISDecoder {
       $Properties = New-Object 'byte[]' 5
       if ($PayloadStream.Read($Properties, 0, $Properties.Length) -ne $Properties.Length) { throw 'The NSIS LZMA properties are truncated' }
       return New-InstallerDecompressionStream -Algorithm Lzma -Stream $PayloadStream -Properties $Properties -LeaveOpen
+    }
+    'Lzma2' {
+      $Property = $PayloadStream.ReadByte()
+      if ($Property -lt 0 -or $Property -gt 40) { throw 'The NSIS LZMA2 dictionary property is invalid' }
+      $RemainingBytes = if ($PayloadStream.CanSeek) { $PayloadStream.Length - $PayloadStream.Position } else { -1 }
+      return New-InstallerDecompressionStream -Algorithm Lzma2 -Stream $PayloadStream -Properties ([byte[]]@($Property)) `
+        -CompressedSize $RemainingBytes -UncompressedSize $ExpectedOutputBytes -LeaveOpen
     }
     'BZip2' { return New-InstallerDecompressionStream -Algorithm BZip2 -Stream $PayloadStream -LeaveOpen }
     'Zlib' { return New-InstallerDecompressionStream -Algorithm Zlib -Stream $PayloadStream -LeaveOpen }
@@ -694,7 +929,9 @@ function Get-NSISHeaderData {
     $PayloadOffset = $FirstHeaderOffset + $FirstHeader.FirstHeaderSize
     $PayloadLength = [long]$LengthOfFollowingData - $FirstHeader.FirstHeaderSize
     $PackedSizeWidth = if ($FirstHeader.HasLongDataBlockOffsets) { 8 } else { 4 }
-    $ProbeLength = [int][Math]::Min(24, $PayloadLength)
+    # Keep the comparison in Int64: large NSIS archives can legitimately carry
+    # a payload whose declared length is greater than Int32.MaxValue.
+    $ProbeLength = [int][Math]::Min(24L, [long]$PayloadLength)
     if ($ProbeLength -lt ($PackedSizeWidth + 8) -or $PayloadOffset + $PayloadLength -gt $InstallerStream.Length) { throw 'The NSIS compressed header is truncated' }
     $Signature = Read-BinaryBytes -Stream $InstallerStream -Offset $PayloadOffset -Count $ProbeLength
 
@@ -709,10 +946,13 @@ function Get-NSISHeaderData {
     $CompressionCandidates = @()
     $CandidateHeader = $Signature
     $LzmaFilterLength = Get-NSISLzmaFilterLength -Bytes $Signature
+    $IsMtw = Test-NSISMtwHeader -Bytes $Signature -CompressedSize $PayloadLength
 
     # Distinguish stored non-solid, solid codec streams, and packed-size-prefixed
     # non-solid headers using the exact first bytes consumed by the NSIS stub.
-    if ($PackedHeaderSize -eq $LengthOfHeader) {
+    if ($IsMtw) {
+      $CompressionCandidates = @('Mtw')
+    } elseif ($PackedHeaderSize -eq $LengthOfHeader) {
       $IsSolid = $false
       $CompressionCandidates = @('None')
     } elseif ($LzmaFilterLength -ge 0) {
@@ -725,9 +965,9 @@ function Get-NSISHeaderData {
       $IsSolid = $false
       if ($CompressedHeaderSize -eq 0 -or $CompressedHeaderSize -gt $PayloadLength - $PackedSizeWidth) { throw 'The NSIS packed header size is outside the archive data range' }
       $CandidateHeader = $Signature[$PackedSizeWidth..($Signature.Length - 1)]
-      $CompressionCandidates = Get-NSISCompressionCandidates -Bytes $CandidateHeader
+      $CompressionCandidates = Get-NSISCompressionCandidates -Bytes $CandidateHeader -CompressedSize $CompressedHeaderSize -ExpectedUncompressedSize $LengthOfHeader
     } else {
-      $CompressionCandidates = Get-NSISCompressionCandidates -Bytes $CandidateHeader
+      $CompressionCandidates = Get-NSISCompressionCandidates -Bytes $CandidateHeader -CompressedSize $PayloadLength -ExpectedUncompressedSize ($LengthOfHeader + 4)
     }
 
     # The solid form starts directly with the codec stream. Non-solid installers prefix it with a 32- or 64-bit packed size.
@@ -745,12 +985,27 @@ function Get-NSISHeaderData {
       $Decoder = $null
 
       try {
-        $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -IsSolid $IsSolid -LzmaFilterLength $LzmaFilterLength
+        $EmbeddedSizeWidth = if ($IsSolid -and $Compression -ne 'None') { $PackedSizeWidth } else { 0 }
+        $RequiredOutputBytes = [int]$LengthOfHeader + $EmbeddedSizeWidth
+        $EffectiveCompression = $Compression
+        $MtwBlockCount = 0
+        if ($Compression -eq 'Mtw') {
+          $MtwResult = Read-NSISMtwHeaderData -Stream $PayloadStream -ExpectedOutputBytes $RequiredOutputBytes
+          $Decoder = [System.IO.MemoryStream]::new($MtwResult.Bytes, $false)
+          $EffectiveCompression = "Mtw-$($MtwResult.Compression)"
+          $MtwBlockCount = $MtwResult.BlockCount
+        } else {
+          $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -IsSolid $IsSolid -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $RequiredOutputBytes
+        }
 
         if ($IsSolid -and $Compression -ne 'None') {
-          $HeaderSizeBytes = New-Object 'byte[]' 4
+          $HeaderSizeBytes = New-Object 'byte[]' $PackedSizeWidth
           if ($Decoder.Read($HeaderSizeBytes, 0, $HeaderSizeBytes.Length) -ne $HeaderSizeBytes.Length) { throw 'The NSIS solid header length is truncated' }
-          $EmbeddedHeaderLength = [System.BitConverter]::ToUInt32($HeaderSizeBytes, 0)
+          $EmbeddedHeaderLength = if ($PackedSizeWidth -eq 8) {
+            [System.BitConverter]::ToUInt64($HeaderSizeBytes, 0)
+          } else {
+            [uint64][System.BitConverter]::ToUInt32($HeaderSizeBytes, 0)
+          }
           if ($EmbeddedHeaderLength -ne $LengthOfHeader) { throw 'The NSIS solid header length does not match the first header' }
         }
 
@@ -776,7 +1031,8 @@ function Get-NSISHeaderData {
           IsStubInstaller         = $FirstHeader.IsStubInstaller
           DataBlockLength         = $FirstHeader.DataBlockLength
           ArchiveSize             = $LengthOfFollowingData
-          Compression             = $Compression
+          Compression             = $EffectiveCompression
+          MtwBlockCount           = $MtwBlockCount
           IsSolid                 = $IsSolid
           HeaderBytes             = $HeaderBytes
           PEInfo                  = Get-PEInfo -Path $InstallerPath
@@ -2725,6 +2981,32 @@ function Invoke-NSISStaticSimulation {
         $null = Invoke-NSISCodeSegment -State $State -Position $Layout.CodeOnInit
       } catch {
         # Continue parsing when non-metadata callbacks loop or rely on unsupported runtime state.
+      }
+    }
+
+    # Initialization commonly establishes SHCTX before install sections begin.
+    # Replay explicit writes so their scope reflects that context instead of the
+    # conservative pre-simulation fallback used by the first literal scan.
+    if ($State.ShellVarContext) { Add-NSISDirectUninstallWrites -State $State }
+
+    # Very large NSISBI installers can contain one extraction command per
+    # payload file. Walking all of those commands adds no identity evidence once
+    # initialization and explicit uninstall writes are complete, and can take
+    # minutes for Unity-sized archives. Keep Full as the normal behavior while
+    # bounding this payload-only path after deterministic ARP metadata is known.
+    $InitializedMetadata = Complete-NSISMetadata -State $State
+    if ($HeaderData.IsNsisBi -and $State.Entries.Count -gt $Script:NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT -and
+      -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayName) -and
+      -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayVersion) -and
+      -not [string]::IsNullOrWhiteSpace($InitializedMetadata.ProductCode)) {
+      $State.Warnings.Add("Full section simulation was skipped after deterministic uninstall metadata was recovered because the NSISBI command table contains $($State.Entries.Count) entries.")
+      return [pscustomobject]@{
+        State           = $State
+        Layout          = $Layout
+        HeaderData      = $HeaderData
+        Metadata        = Complete-NSISMetadata -State $State
+        IsEarlyExit     = $true
+        EarlyExitReason = 'LargeNsisBiCommandTable'
       }
     }
 
