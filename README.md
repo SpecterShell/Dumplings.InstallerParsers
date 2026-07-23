@@ -79,6 +79,7 @@ The CLI loads shared infrastructure before the selected parser:
 4. `Archive.psm1` provides safe archive entry access and extraction.
 5. `PE.psm1` resolves PE headers, sections, resources, overlays, and metadata.
 6. `RegistryAssociations.psm1` interprets explicit protocol and file-extension registry writes.
+7. The selected format module constructs its canonical identity, ARP, and diagnostic result properties directly.
 
 The shared MIT files remain file-level MIT exceptions in PackageModule and are kept byte-identical so either submodule remains independently consumable. Format-specific code stays in its parser module.
 
@@ -93,6 +94,8 @@ Every parser should:
 - Return structured warnings for unresolved or conditional evidence.
 - Keep existing result properties compatible when adding evidence.
 - Never invoke an installer, extracted executable, external extractor, or network endpoint.
+
+Aggregate `Get-*Info` results begin with `Path`, `InstallerType`, `ProductCode`, `UpgradeCode`, `DisplayName`, `DisplayVersion`, `Publisher`, `Scope`, `DefaultInstallLocation`, `WritesAppsAndFeaturesEntry`, `AppsAndFeaturesProductCode`, `AppsAndFeaturesInstallerType`, `Warnings`, and `UnresolvedFields`. Duplicate aliases such as `ProductName` and `ProductVersion` are not returned. Parser modules return warnings as data; only their caller decides how and when to log them.
 
 Detailed binary layouts and parser workflows live in the Dumplings [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md).
 
@@ -139,6 +142,6 @@ Licensing is file-specific:
 | --- | --- |
 | `Cli.ps1`, `NSIS.psm1`, `Inno.psm1`, `QtInstallerFramework.psm1`, and `SetupFactory.psm1` | [GPL-3.0-or-later](LICENSE) |
 | `AdvancedInstaller.psm1` | [GPL-2.0](LICENSE.GPL2) |
-| `Runtime.psm1`, `Binary.psm1`, `Compression.psm1`, `Archive.psm1`, `PE.psm1`, and shared infrastructure sources | MIT, as marked in each file |
+| `Runtime.psm1`, `Binary.psm1`, `Compression.psm1`, `Archive.psm1`, `PE.psm1`, `RegistryAssociations.psm1`, and shared infrastructure sources | MIT, as marked in each file |
 
 Third-party format references, included assemblies, and source-derived components are documented in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Preserve file headers and license boundaries when moving or reusing code.

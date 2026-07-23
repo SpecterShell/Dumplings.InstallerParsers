@@ -799,17 +799,31 @@ function Get-AdvancedInstallerInfo {
       $GeneralOptions = $null -eq $GeneralOptionsProperty ? $null : $GeneralOptionsProperty.Value
       $MsiPayloadSelection = Get-AdvancedInstallerMsiPayloadSelection -File $Files.ToArray() -GeneralOptions $GeneralOptions
 
-      return [pscustomobject]@{
-        InstallerType       = 'AdvancedInstaller'
-        Path                = $InstallerPath
-        FooterOffset        = [long]$FooterOffset
-        FileOffset          = [long]$FileOffset
-        FileCount           = [int]$FileCount
-        Files               = $Files
-        ConfigurationEntry  = $null -eq $ConfigurationEntry ? $null : $ConfigurationEntry.Name
-        Configuration       = $Configuration
-        GeneralOptions      = $GeneralOptions
-        MsiPayloadSelection = $MsiPayloadSelection
+      # The outer SFX catalog selects payloads but does not itself prove the
+      # nested package's identity or visible ARP registration.
+      return [pscustomobject][ordered]@{
+        Path                         = $InstallerPath
+        InstallerType                = 'AdvancedInstaller'
+        ProductCode                  = $null
+        UpgradeCode                  = $null
+        DisplayName                  = $null
+        DisplayVersion               = $null
+        Publisher                    = $null
+        Scope                        = $null
+        DefaultInstallLocation       = $null
+        WritesAppsAndFeaturesEntry   = $null
+        AppsAndFeaturesProductCode   = $null
+        AppsAndFeaturesInstallerType = $null
+        Warnings                     = [string[]]@()
+        UnresolvedFields             = [string[]]@()
+        FooterOffset                 = [long]$FooterOffset
+        FileOffset                   = [long]$FileOffset
+        FileCount                    = [int]$FileCount
+        Files                        = $Files
+        ConfigurationEntry           = $null -eq $ConfigurationEntry ? $null : $ConfigurationEntry.Name
+        Configuration                = $Configuration
+        GeneralOptions               = $GeneralOptions
+        MsiPayloadSelection          = $MsiPayloadSelection
       }
     } finally {
       $Reader.Close()
@@ -1008,21 +1022,27 @@ function Get-AdvancedInstallerMsiInfo {
       $SelectionMethod = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.SelectionMethod
       $ArchitectureSelectionMode = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.ArchitectureSelectionMode
 
-      return [pscustomobject]@{
-        Name                         = $MsiFile.Name
+      return [pscustomobject][ordered]@{
         Path                         = $MsiFile.FullName
-        PackageArchitecture          = $MsiInfo.PackageArchitecture
-        Template                     = $MsiInfo.Template
-        ProductName                  = $MsiInfo.DisplayName
-        ProductVersion               = $MsiInfo.DisplayVersion
-        Publisher                    = $MsiInfo.Publisher
+        InstallerType                = $MsiInfo.InstallerType
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode
+        DisplayName                  = $MsiInfo.DisplayName
+        DisplayVersion               = $MsiInfo.DisplayVersion
+        Publisher                    = $MsiInfo.Publisher
+        Scope                        = $MsiInfo.Scope
+        DefaultInstallLocation       = $MsiInfo.DefaultInstallLocation
+        WritesAppsAndFeaturesEntry   = $MsiInfo.WritesAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
+        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+        Warnings                     = [string[]]@($MsiInfo.Warnings)
+        UnresolvedFields             = [string[]]@($MsiInfo.UnresolvedFields)
+        Name                         = $MsiFile.Name
+        PackageArchitecture          = $MsiInfo.PackageArchitecture
+        Template                     = $MsiInfo.Template
         InstallerBuilder             = $MsiInfo.InstallerBuilder
         InstallLocationProperty      = $MsiInfo.InstallLocationProperty
         InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
-        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
-        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
         Protocols                    = $MsiInfo.Protocols
         FileExtensions               = $MsiInfo.FileExtensions
         RegistryAssociationInfo      = $MsiInfo.RegistryAssociationInfo
@@ -1066,7 +1086,7 @@ function Read-ProductVersionFromAdvancedInstaller {
   )
 
   process {
-    (Get-AdvancedInstallerMsiInfo @PSBoundParameters).ProductVersion
+    (Get-AdvancedInstallerMsiInfo @PSBoundParameters).DisplayVersion
   }
 }
 

@@ -291,7 +291,7 @@ Describe 'Qt Installer Framework parser' {
     $Info.PESubsystem.Name | Should -Be 'WindowsCui'
     $Info.InterfaceVariant | Should -Be 'CLI'
     $Info.SupportsSilentInstallation | Should -BeTrue
-    $Info.TargetDir | Should -Be '@ApplicationsDirX64@/reMarkable'
+    $Info.DefaultInstallLocation | Should -Be '@ApplicationsDirX64@/reMarkable'
     $Info.HasDefaultTargetDir | Should -BeTrue
     $Info.RequiresExplicitInstallLocation | Should -BeFalse
     Test-QtInstallerFrameworkRequiresInstallLocation -Path $Fixture | Should -BeFalse

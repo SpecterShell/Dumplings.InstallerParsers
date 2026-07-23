@@ -74,7 +74,7 @@ Describe 'Advanced Installer parser' {
 
     $Info.InstallerType | Should -Be 'AdvancedInstaller'
     $Info.Files.Name | Should -Contain 'ComputerLink.msi'
-    $MsiInfo.ProductVersion | Should -Be '3.9.0.455'
+    $MsiInfo.DisplayVersion | Should -Be '3.9.0.455'
     $MsiInfo.ProductCode | Should -Be '{6C5AC088-3136-4043-8985-8B0772A9580E}'
   }
 
@@ -85,7 +85,7 @@ Describe 'Advanced Installer parser' {
 
     $Info.InstallerType | Should -Be 'AdvancedInstaller'
     $Info.Files.Name | Should -Contain 'DFLM.msi'
-    $MsiInfo.ProductVersion | Should -Be '3.0.3'
+    $MsiInfo.DisplayVersion | Should -Be '3.0.3'
     $MsiInfo.UpgradeCode | Should -Be '{8B866AEB-E879-4DA6-9CC8-AE81326B30E1}'
   }
 
@@ -109,13 +109,13 @@ Describe 'Advanced Installer parser' {
     $X86Info.SelectedMsiPath | Should -Be '5DE3EEA\TeraCopy.msi'
     $X86Info.SelectionMethod | Should -Be 'PayloadTable'
     $X86Info.PackageArchitecture | Should -Be 'x86'
-    $X86Info.ProductVersion | Should -Be '3.9.0'
+    $X86Info.DisplayVersion | Should -Be '3.9.0'
     $X86Info.ProductCode | Should -Be '{F8B0BB18-B1E6-4821-8C5B-883AA5DE3EEA}'
     $X64Info.Name | Should -Be 'TeraCopy.x64.msi'
     $X64Info.SelectedMsiPath | Should -Be '5DE3EEA\TeraCopy.x64.msi'
     $X64Info.SelectionMethod | Should -Be 'PayloadTable'
     $X64Info.PackageArchitecture | Should -Be 'x64'
-    $X64Info.ProductVersion | Should -Be '3.9.0'
+    $X64Info.DisplayVersion | Should -Be '3.9.0'
     $X64Info.ProductCode | Should -Be '{F8B0BB18-B1E6-4821-8C5B-883AA5DE3EEA}'
   }
 
@@ -237,7 +237,7 @@ Describe 'Advanced Installer parser' {
 
     $Info.InstallerType | Should -Be 'AdvancedInstaller'
     $Info.Files.Name | Should -Contain '72E5885\Setup.DVLS.Console.2026.1.15.0.7z'
-    $MsiInfo.ProductVersion | Should -Be '2026.1.15.0'
+    $MsiInfo.DisplayVersion | Should -Be '2026.1.15.0'
     $MsiInfo.ProductCode | Should -Be '{2EC8D12C-9845-473A-A6D9-DF75172E5885}'
     $MsiInfo.UpgradeCode | Should -Be '{F036F415-628F-4FE1-A550-13AE231667EF}'
   }
@@ -266,7 +266,7 @@ Describe 'Advanced Installer parser' {
     $Info.MsiPayloadSelection.SourceKind | Should -Be 'EmbeddedArchive'
     $Info.MsiPayloadSelection.ArchitectureSelectionMode | Should -Be 'FixedPath'
     $MsiInfo.SelectedMsiPath | Should -Be 'C3C022B\bm.msi'
-    $MsiInfo.ProductVersion | Should -Be '14.2.0.0'
+    $MsiInfo.DisplayVersion | Should -Be '14.2.0.0'
     $MsiInfo.ProductCode | Should -Be '{28D8C509-9AB2-4FFB-A832-85CE7C3C022B}'
     $MsiInfo.UpgradeCode | Should -Be '{B63C1D13-2833-4F4A-8605-93F87F8599F6}'
     $Stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 60

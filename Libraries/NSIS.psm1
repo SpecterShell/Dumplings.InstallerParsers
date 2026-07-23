@@ -2146,28 +2146,29 @@ function Initialize-NSISState {
     LastExecFlags    = @{}
     ShellVarContext  = $null
     Metadata         = [ordered]@{
-      Path                       = $HeaderData.Path
-      InstallerType              = 'Nullsoft'
-      DisplayVersion             = $null
-      DisplayName                = $null
-      Publisher                  = $null
-      ProductCode                = $null
-      UpgradeCode                = $null
-      DefaultInstallLocation     = $null
-      UninstallString            = $null
-      QuietUninstallString       = $null
-      DisplayIcon                = $null
-      SystemComponent            = $null
-      Scope                      = $null
-      WritesAppsAndFeaturesEntry = $false
-      AppsAndFeaturesProductCode = $null
-      RegistryValues             = @{}
-      RegistryWrites             = @()
-      ExtractedFiles             = @()
-      ExecutedPayloads           = @()
-      Warnings                   = @()
-      UnresolvedFields           = @()
-      ParserVersionInfo          = $null
+      Path                         = $HeaderData.Path
+      InstallerType                = 'Nullsoft'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $null
+      DisplayVersion               = $null
+      Publisher                    = $null
+      Scope                        = $null
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $false
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@()
+      UnresolvedFields             = [string[]]@()
+      UninstallString              = $null
+      QuietUninstallString         = $null
+      DisplayIcon                  = $null
+      SystemComponent              = $null
+      RegistryValues               = @{}
+      RegistryWrites               = @()
+      ExtractedFiles               = @()
+      ExecutedPayloads             = @()
+      ParserVersionInfo            = $null
     }
   }
 
@@ -2660,7 +2661,8 @@ function Complete-NSISMetadata {
     $State.Warnings.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
   }
 
-  $State.Metadata.AppsAndFeaturesProductCode = $State.Metadata.ProductCode
+  $State.Metadata.AppsAndFeaturesProductCode = if ($State.Metadata.WritesAppsAndFeaturesEntry) { $State.Metadata.ProductCode } else { $null }
+  $State.Metadata.AppsAndFeaturesInstallerType = if ($State.Metadata.WritesAppsAndFeaturesEntry) { 'nullsoft' } else { $null }
   $State.Metadata.RegistryWrites = @($RegistryWrites)
   $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
   foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $State.Warnings.Add($Warning) }
@@ -2669,7 +2671,8 @@ function Complete-NSISMetadata {
   $State.Metadata.FileExtensions = $RegistryAssociationInfo.FileExtensions
   $State.Metadata.ExtractedFiles = @($ExtractedFiles)
   $State.Metadata.ExecutedPayloads = @($ExecutedPayloads)
-  $State.Metadata.Warnings = @($State.Warnings | Select-Object -Unique)
+  $State.Metadata.Warnings = [string[]]@($State.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+  $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
   $State.Metadata.ParserVersionInfo = $State.VersionInfo
 
   return [pscustomobject]$State.Metadata
@@ -3086,7 +3089,9 @@ function Get-NSISInfo {
       throw 'The NSIS installer does not expose deterministic uninstall metadata'
     }
 
-    return $Metadata
+    # Invoke-NSISStaticSimulation constructs the canonical aggregate result;
+    # return it unchanged so bridge callers see exactly the parser's evidence.
+    return [pscustomobject]$Metadata
   }
 }
 

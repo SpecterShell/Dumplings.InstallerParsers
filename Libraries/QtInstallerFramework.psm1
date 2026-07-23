@@ -1663,9 +1663,23 @@ function Get-QtInstallerFrameworkInfo {
       $Warnings.Add('Static resources mention AllUsers assignments. Confirm conditional script control flow before relying on the default scope.')
     }
 
-    [pscustomobject]@{
+    # Qt IFW's installer configuration is the authoritative source for the
+    # maintenance-tool uninstall identity. Emit that evidence explicitly.
+    [pscustomobject][ordered]@{
       Path                                 = $File.FullName
       InstallerType                        = 'Qt Installer Framework'
+      ProductCode                          = $InstallerConfig.ProductCode
+      UpgradeCode                          = $null
+      DisplayName                          = $InstallerConfig.DisplayName
+      DisplayVersion                       = $InstallerConfig.DisplayVersion
+      Publisher                            = $InstallerConfig.Publisher
+      Scope                                = $ScopeInfo.Scope
+      DefaultInstallLocation               = $InstallerConfig.TargetDir
+      WritesAppsAndFeaturesEntry           = $true
+      AppsAndFeaturesProductCode           = $InstallerConfig.ProductCode
+      AppsAndFeaturesInstallerType         = 'exe'
+      Warnings                             = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields                     = [string[]]@()
       BinaryMarker                         = $Layout.MagicMarkerName
       InterfaceVariant                     = $InterfaceInfo.InterfaceVariant
       CommandLineInterface                 = $InterfaceInfo.CommandLineInterface
@@ -1676,15 +1690,8 @@ function Get-QtInstallerFrameworkInfo {
       CommandLineInterfaceEvidence         = $InterfaceInfo.Evidence
       PESubsystem                          = $InterfaceInfo.Evidence.PESubsystem
       PackageName                          = $InstallerConfig.PackageName
-      DisplayName                          = $InstallerConfig.DisplayName
-      ProductName                          = $InstallerConfig.PackageName
-      DisplayVersion                       = $InstallerConfig.DisplayVersion
-      ProductVersion                       = $InstallerConfig.ProductVersion
-      Publisher                            = $InstallerConfig.Publisher
       ProductUrl                           = $InstallerConfig.ProductUrl
       Title                                = $InstallerConfig.Title
-      ProductCode                          = $InstallerConfig.ProductCode
-      TargetDir                            = $InstallerConfig.TargetDir
       AdminTargetDir                       = $InstallerConfig.AdminTargetDir
       HasDefaultTargetDir                  = $InstallLocationInfo.HasDefaultTargetDir
       RequiresExplicitInstallLocation      = $InstallLocationInfo.RequiresExplicitInstallLocation
@@ -1694,7 +1701,6 @@ function Get-QtInstallerFrameworkInfo {
       ExistingInstallationMarker           = $UpgradeInfo.ExistingInstallationMarker
       RecommendedUpgradeBehavior           = $UpgradeInfo.RecommendedUpgradeBehavior
       UpgradeEvidence                      = $UpgradeInfo.Evidence
-      Scope                                = $ScopeInfo.Scope
       DefaultScope                         = $ScopeInfo.DefaultScope
       SupportedScopes                      = $ScopeInfo.SupportedScopes
       SupportsUserScope                    = $ScopeInfo.SupportsUserScope
@@ -1708,13 +1714,11 @@ function Get-QtInstallerFrameworkInfo {
       MaintenanceToolName                  = $InstallerConfig.MaintenanceToolName
       MaintenanceToolIniFile               = $InstallerConfig.MaintenanceToolIniFile
       SupportsModify                       = $InstallerConfig.SupportsModify
-      WritesAppsAndFeaturesEntry           = $true
       InstallerConfigSource                = if ($InstallerXmlResource) { $InstallerXmlResource[0].Source } else { $null }
       MetadataResourceCount                = $Layout.MetaResourceCount
       ResourceCollectionCount              = @(Get-QtInstallerFrameworkResourceCollection -Path $File.FullName -Layout $Layout).Count
       MetadataRoots                        = @($MetadataResources | Select-Object -ExpandProperty Root -Unique)
       RawInstallerConfig                   = $InstallerConfig.RawValues
-      Warnings                             = $Warnings.ToArray()
       ParserVersionInfo                    = [pscustomobject]@{
         Parser          = 'Dumplings.QtInstallerFramework'
         BinaryLayout    = 'Qt Installer Framework BinaryContent'

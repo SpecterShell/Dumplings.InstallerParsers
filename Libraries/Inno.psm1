@@ -1901,25 +1901,30 @@ function Get-InnoInfo {
       if (-not $DisplayNameInfo.IsResolved) { 'DisplayName' }
     )
 
-    return [pscustomobject]@{
+    # Preserve unresolved Pascal constants as diagnostics while emitting only
+    # values proven by the decoded setup header in the canonical envelope.
+    return [pscustomobject][ordered]@{
       Path                                     = $InstallerPath
       InstallerType                            = 'Inno'
-      DisplayVersion                           = $AppVersionInfo.Value
-      DisplayName                              = $DisplayName
-      Publisher                                = $AppPublisherInfo.Value
       ProductCode                              = $ProductCode
       UpgradeCode                              = $null
-      AppsAndFeaturesProductCode               = $ProductCode
-      UninstallRegKeyBaseName                  = $UninstallRegKeyBaseName
-      DefaultInstallLocation                   = $ResolvedDefaultDirName
+      DisplayName                              = $DisplayName
+      DisplayVersion                           = $AppVersionInfo.Value
+      Publisher                                = $AppPublisherInfo.Value
       Scope                                    = $Scope
+      DefaultInstallLocation                   = $ResolvedDefaultDirName
+      WritesAppsAndFeaturesEntry               = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode               = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+      AppsAndFeaturesInstallerType             = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? 'inno' : $null
+      Warnings                                 = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields                         = [string[]]@($UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UninstallRegKeyBaseName                  = $UninstallRegKeyBaseName
       DefaultScope                             = $DefaultScope
       SupportedScopes                          = $SupportedScopes
       SupportsDualScope                        = $SupportedScopes.Count -gt 1
       PrivilegesRequired                       = $HeaderFixedData.PrivilegesRequired
       PrivilegesRequiredOverridesAllowed       = $HeaderFixedData.PrivilegesRequiredOverridesAllowed
       SupportsCommandLineScopeOverride         = $HeaderFixedData.SupportsCommandLineScopeOverride
-      WritesAppsAndFeaturesEntry               = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry
       CreateUninstallRegKey                    = $AppsAndFeaturesEntryInfo.CreateUninstallRegKey
       Uninstallable                            = $AppsAndFeaturesEntryInfo.Uninstallable
       CreatesUninstallRegistryKey              = $AppsAndFeaturesEntryInfo.CreatesUninstallRegistryKey
@@ -1944,7 +1949,6 @@ function Get-InnoInfo {
       RawAppId                                 = $RawAppId
       RawDefaultDirName                        = $DefaultDirName
       UninstallDisplayName                     = $UninstallDisplayNameInfo.DecodedValue
-      UnresolvedFields                         = $UnresolvedFields
       UnresolvedConstants                      = [pscustomobject]$UnresolvedConstants
       Signature                                = $Signature
       VersionNumber                            = $VersionNumber
@@ -1952,7 +1956,6 @@ function Get-InnoInfo {
       IsHeaderEncrypted                        = $HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Full'
       FilesEncrypted                           = $HeaderBlockInfo.EncryptionHeader.EncryptionUse -in @('Files', 'Full')
       CompressMethod                           = $HeaderFixedData.CompressMethod
-      Warnings                                 = $Warnings.ToArray()
       ParserVersionInfo                        = [pscustomobject]@{
         SignatureVersion              = $SignatureMatch.Groups[1].Value
         HeaderStringCount             = $Layout.HeaderStringCount

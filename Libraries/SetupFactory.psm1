@@ -429,21 +429,32 @@ function Get-SetupFactoryInfo {
       if (-not $HasBuiltInUninstall -and -not $RegistryWrites.Count) { $Warnings.Add('No explicit built-in uninstall configuration or literal registry writes were found') }
       foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
 
-      [pscustomobject]@{
-        DisplayName                = $DisplayName
-        DisplayVersion             = $DisplayVersion
-        Publisher                  = $Publisher
-        ProductCode                = $ProductCode
-        InstallLocation            = $InstallLocation
-        Scope                      = $Scope
-        RegistryWrites             = $RegistryWrites
-        RegistryAssociationInfo    = $RegistryAssociationInfo
-        Protocols                  = $RegistryAssociationInfo.Protocols
-        FileExtensions             = $RegistryAssociationInfo.FileExtensions
-        ExtractedFiles             = @($Extracted.FullName)
-        WritesAppsAndFeaturesEntry = [bool]($HasBuiltInUninstall -or $RegistryWrites.Count)
-        Warnings                   = $Warnings.ToArray()
-        ParserVersionInfo          = [pscustomobject]@{ Family = 'Setup Factory'; MajorVersion = $Overlay.Version; OverlayOffset = $Overlay.Offset }
+      $WritesAppsAndFeaturesEntry = [bool]($HasBuiltInUninstall -or $RegistryWrites.Count)
+
+      # Construct the shared result from Setup Factory evidence directly. In
+      # particular, only built-in uninstall configuration or literal registry
+      # writes prove that the outer installer owns an ARP entry.
+      [pscustomobject][ordered]@{
+        Path                         = $File.FullName
+        InstallerType                = 'setupfactory'
+        ProductCode                  = $ProductCode
+        UpgradeCode                  = $null
+        DisplayName                  = $DisplayName
+        DisplayVersion               = $DisplayVersion
+        Publisher                    = $Publisher
+        Scope                        = $Scope
+        DefaultInstallLocation       = $InstallLocation
+        WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
+        AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
+        Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        UnresolvedFields             = [string[]]@()
+        RegistryWrites               = $RegistryWrites
+        RegistryAssociationInfo      = $RegistryAssociationInfo
+        Protocols                    = $RegistryAssociationInfo.Protocols
+        FileExtensions               = $RegistryAssociationInfo.FileExtensions
+        ExtractedFiles               = @($Extracted.FullName)
+        ParserVersionInfo            = [pscustomobject]@{ Family = 'Setup Factory'; MajorVersion = $Overlay.Version; OverlayOffset = $Overlay.Offset }
       }
     } finally {
       if (Test-Path -LiteralPath $Temporary) { Remove-Item -LiteralPath $Temporary -Recurse -Force }
