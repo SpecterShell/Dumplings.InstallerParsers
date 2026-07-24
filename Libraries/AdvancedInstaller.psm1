@@ -357,6 +357,10 @@ function Expand-AdvancedInstallerArchive {
     The path to the extracted archive
   .PARAMETER DestinationPath
     The directory where the archive contents should be written
+  .PARAMETER Name
+    Optional wildcard selecting nested archive paths or file names.
+  .PARAMETER CollisionAction
+    Behavior when a nested output path already exists.
   #>
   [OutputType([string])]
   param (
@@ -364,15 +368,23 @@ function Expand-AdvancedInstallerArchive {
     [string]$Path,
 
     [Parameter(Mandatory, HelpMessage = 'The directory where the archive contents should be written')]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename'
   )
 
+  $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
   $null = New-Item -Path $DestinationPath -ItemType Directory -Force
   # Delegate path, link, duplicate, and output-limit enforcement to the shared archive exporter.
   $Archive = Get-InstallerArchive -Path $Path
 
   try {
-    $null = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath -MaximumExpandedBytes 17179869184 -MaximumEntries 200000
+    $null = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath -Name $Name `
+      -CollisionAction $CollisionAction -MaximumExpandedBytes 17179869184 -MaximumEntries 200000
     return (Get-Item -Path $DestinationPath -Force).FullName
   } finally {
     $Archive.Dispose()
@@ -842,6 +854,10 @@ function Expand-AdvancedInstaller {
     The parsed Advanced Installer metadata object
   .PARAMETER DestinationPath
     The destination directory for the extracted payloads
+  .PARAMETER Name
+    Optional wildcard selecting catalog payload paths or file names. All payloads are extracted when omitted.
+  .PARAMETER CollisionAction
+    Behavior when a destination path already exists or catalog names collide.
   #>
   [OutputType([string])]
   param (
@@ -852,14 +868,19 @@ function Expand-AdvancedInstaller {
     [psobject]$Installer,
 
     [Parameter(HelpMessage = 'The destination directory for the extracted payloads')]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
     Import-AdvancedInstallerMsiModule
 
     $Installer = switch ($PSCmdlet.ParameterSetName) {
-      'Path' { Get-AdvancedInstallerInfo -Path $Path }
+      'Path' { Get-AdvancedInstallerInfo -Path (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) }
       'Installer' { $Installer }
       default { throw 'Invalid parameter set.' }
     }
@@ -867,18 +888,24 @@ function Expand-AdvancedInstaller {
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Split-Path -Path $Installer.Path -Parent
     }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # Export catalog entries by their declared names. Only archives that actually contain MSI
     # databases are expanded; large application-file archives remain opaque.
     foreach ($Entry in $Installer.Files) {
-      $EntryPath = Resolve-AdvancedInstallerExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.Name
-      $EntryFile = Write-AdvancedInstallerEntry -Path $Installer.Path -Entry $Entry -DestinationPath $EntryPath
+      if (-not (Test-ExtractionPattern -Path $Entry.Name -Pattern $Name)) { continue }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Name `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) { continue }
+      $EntryFile = Write-AdvancedInstallerEntry -Path $Installer.Path -Entry $Entry -DestinationPath $Target.Path
 
       # Advanced Installer commonly nests the actual MSI payload inside a dedicated 7z archive.
       # Skip non-MSI archives such as FILES.7z to keep validation and task runs bounded.
       if ((Test-AdvancedInstallerNestedArchiveCandidate -Entry $Entry -Path $EntryFile.FullName) -and (Test-AdvancedInstallerArchiveHasMsi -Path $EntryFile.FullName)) {
-        Expand-AdvancedInstallerArchive -Path $EntryFile.FullName -DestinationPath $EntryFile.DirectoryName | Out-Null
+        Expand-AdvancedInstallerArchive -Path $EntryFile.FullName -DestinationPath $EntryFile.DirectoryName `
+          -CollisionAction $CollisionAction | Out-Null
       }
     }
 
@@ -1008,7 +1035,7 @@ function Get-AdvancedInstallerMsiInfo {
     try {
       # Expansion recovers all catalog paths, then selection metadata chooses the one runtime MSI.
       # The MSI parser is applied only after that choice to avoid reversing the bootstrapper logic.
-      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
+      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath -CollisionAction Rename | Out-Null
       $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File | Sort-Object -Property FullName)
       $MsiFile = Resolve-AdvancedInstallerMsiFile -Installer $Installer -Item $MsiFiles -ExtractionPath $ExpandedPath -Pattern $Name -Architecture $Architecture -NameWasSpecified $NameWasSpecified
       $MsiInfo = Get-MsiInstallerInfo -Path $MsiFile.FullName

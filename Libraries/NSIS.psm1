@@ -24,6 +24,21 @@
 #     `-- logical header -> eight block tables -> 28-byte standard or
 #         36-byte NSISBI command entries -> payloads
 #
+# Payload records referenced by EW_EXTRACTFILE:
+#
+#   non-solid archive (physical file offsets)
+#     DataBlockBase = FirstHeaderEnd + PackedHeaderSizeField + PackedHeaderSize
+#     DataBlockBase + Entry.DataOffset
+#       +00 PackedSize:u32/u64 (top bit = compressed)
+#       +04/+08 StoredData[PackedSize without top bit]
+#
+#   solid archive (offsets in the decompressed codec stream)
+#     +00 HeaderSize:u32/u64
+#     +04/+08 LogicalHeader[HeaderSize]
+#     +-- DataBlock + Entry.DataOffset
+#         +00 UnpackedSize:u32/u64
+#         +04/+08 FileData[UnpackedSize]
+#
 # A packed-size high bit marks a compressed non-solid block; solid archives start
 # directly with one codec stream. Opcode numbering is normalized for NSIS 2/3,
 # Unicode/Park, log-enabled, and NSISBI layouts before simulation. Explicit
@@ -84,6 +99,8 @@ $NSIS_MAX_FILE_SIZE = [uint64]4294967295
 $NSIS_MAX_HEADER_SIZE = 134217728
 $NSIS_MAX_ENTRY_COUNT = 33554432
 $NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT = 65536
+$NSIS_MAX_EXTRACTION_FILE_COUNT = 262144
+$NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES = 1073741824
 $NSISBI_MTW_BLOCK_HEADER_SIZE = 3
 $NSISBI_MTW_BLOCK_DATA_SIZE = 2097152
 $NSISBI_MTW_BLOCK_BUFFER_SIZE = 2307891
@@ -714,6 +731,87 @@ function Test-NSISMtwHeader {
   return (Get-NSISMtwCompressionCandidate -Bytes $Bytes -CompressedSize $CompressedSize).Count -gt 0
 }
 
+function Read-NSISMtwBlock {
+  <#
+  .SYNOPSIS
+    Decode one independently compressed NSISBI multithread-wrapper record
+  .PARAMETER Stream
+    Seekable stream containing only the MTW payload. The caller owns the stream.
+  .PARAMETER RecordOffset
+    Zero-based offset of the three-byte record header in the MTW stream.
+  .PARAMETER Compression
+    Codec selected by an earlier record, or null to probe the first record.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$RecordOffset,
+    [AllowNull()][string]$Compression
+  )
+
+  if (-not $Stream.CanSeek) { throw 'NSISBI MTW decoding requires a seekable bounded stream' }
+  if ($RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE -gt $Stream.Length) {
+    throw 'The NSISBI MTW block header is truncated'
+  }
+
+  $RecordHeader = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
+  $CompressedBlockSize = [int]$RecordHeader[0] -bor ([int]$RecordHeader[1] -shl 8) -bor ([int]$RecordHeader[2] -shl 16)
+  if ($CompressedBlockSize -eq 0) {
+    return [pscustomobject]@{
+      Bytes       = [byte[]]::new(0)
+      Compression = $Compression
+      NextOffset  = $RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
+      IsEnd       = $true
+    }
+  }
+  if ($CompressedBlockSize -gt $Script:NSISBI_MTW_BLOCK_BUFFER_SIZE) { throw 'The NSISBI MTW block exceeds the format limit' }
+
+  $BlockOffset = $RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
+  if ($BlockOffset + $CompressedBlockSize -gt $Stream.Length) { throw 'The NSISBI MTW block data is truncated' }
+  $ProbeLength = [int][Math]::Min(24L, [long]$CompressedBlockSize)
+  $Probe = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + $ProbeLength)
+  $Candidates = if ([string]::IsNullOrWhiteSpace($Compression)) {
+    @(Get-NSISMtwCompressionCandidate -Bytes $Probe -CompressedSize ($Stream.Length - $RecordOffset))
+  } else {
+    @($Compression)
+  }
+  if ($Candidates.Count -eq 0) { throw 'The NSISBI MTW block uses an unsupported or unrecognized compression method' }
+
+  $DecodedBlock = $null
+  $SelectedCompression = $null
+  $LastError = $null
+  foreach ($Candidate in $Candidates) {
+    $CompressedBlock = New-BoundedReadStream -Stream $Stream -Offset $BlockOffset -Length $CompressedBlockSize -LeaveOpen
+    $Decoder = $null
+    $BlockOutput = [System.IO.MemoryStream]::new($Script:NSISBI_MTW_BLOCK_DATA_SIZE)
+    try {
+      $InnerProbe = $Probe[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Probe.Length - 1)]
+      $LzmaFilterLength = if ($Candidate -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $InnerProbe } else { -1 }
+      $Decoder = New-NSISDecoder -Compression $Candidate -PayloadStream $CompressedBlock `
+        -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+      $null = Copy-BoundedStream -Source $Decoder -Destination $BlockOutput -MaximumBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+      if ($BlockOutput.Length -eq 0) { throw 'The NSISBI MTW block did not produce output' }
+      $DecodedBlock = $BlockOutput.ToArray()
+      $SelectedCompression = $Candidate
+      break
+    } catch {
+      $LastError = $_
+    } finally {
+      if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
+      $BlockOutput.Dispose()
+      $CompressedBlock.Dispose()
+    }
+  }
+  if (-not $DecodedBlock) { throw "Failed to decode the NSISBI MTW block: $($LastError.Exception.Message)" }
+
+  return [pscustomobject]@{
+    Bytes       = $DecodedBlock
+    Compression = $SelectedCompression
+    NextOffset  = $BlockOffset + $CompressedBlockSize
+    IsEnd       = $false
+  }
+}
+
 function Read-NSISMtwHeaderData {
   <#
   .SYNOPSIS
@@ -737,56 +835,15 @@ function Read-NSISMtwHeaderData {
   $BlockCount = 0
   try {
     while ($Output.Length -lt $ExpectedOutputBytes) {
-      if ($RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE -gt $Stream.Length) {
-        throw 'The NSISBI MTW block header is truncated'
-      }
-      $RecordHeader = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
-      $CompressedBlockSize = [int]$RecordHeader[0] -bor ([int]$RecordHeader[1] -shl 8) -bor ([int]$RecordHeader[2] -shl 16)
-      if ($CompressedBlockSize -eq 0) { throw 'The NSISBI MTW stream ended before the logical header was complete' }
-      if ($CompressedBlockSize -gt $Script:NSISBI_MTW_BLOCK_BUFFER_SIZE) { throw 'The NSISBI MTW block exceeds the format limit' }
-
-      $BlockOffset = $RecordOffset + $Script:NSISBI_MTW_BLOCK_HEADER_SIZE
-      if ($BlockOffset + $CompressedBlockSize -gt $Stream.Length) { throw 'The NSISBI MTW block data is truncated' }
-      $ProbeLength = [int][Math]::Min(24L, [long]$CompressedBlockSize)
-      $Probe = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + $ProbeLength)
-      $Candidates = if ($SelectedCompression) {
-        @($SelectedCompression)
-      } else {
-        @(Get-NSISMtwCompressionCandidate -Bytes $Probe -CompressedSize ($Stream.Length - $RecordOffset))
-      }
-      if ($Candidates.Count -eq 0) { throw 'The NSISBI MTW block uses an unsupported or unrecognized compression method' }
-
-      $DecodedBlock = $null
-      $LastError = $null
-      foreach ($Compression in $Candidates) {
-        $CompressedBlock = New-BoundedReadStream -Stream $Stream -Offset $BlockOffset -Length $CompressedBlockSize -LeaveOpen
-        $Decoder = $null
-        $BlockOutput = [System.IO.MemoryStream]::new($Script:NSISBI_MTW_BLOCK_DATA_SIZE)
-        try {
-          $InnerProbe = $Probe[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Probe.Length - 1)]
-          $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $InnerProbe } else { -1 }
-          $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $CompressedBlock -IsSolid $true `
-            -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
-          $null = Copy-BoundedStream -Source $Decoder -Destination $BlockOutput -MaximumBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
-          if ($BlockOutput.Length -eq 0) { throw 'The NSISBI MTW block did not produce output' }
-          $DecodedBlock = $BlockOutput.ToArray()
-          $SelectedCompression = $Compression
-          break
-        } catch {
-          $LastError = $_
-        } finally {
-          if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
-          $BlockOutput.Dispose()
-          $CompressedBlock.Dispose()
-        }
-      }
-      if (-not $DecodedBlock) { throw "Failed to decode the NSISBI MTW block: $($LastError.Exception.Message)" }
+      $Block = Read-NSISMtwBlock -Stream $Stream -RecordOffset $RecordOffset -Compression $SelectedCompression
+      if ($Block.IsEnd) { throw 'The NSISBI MTW stream ended before the logical header was complete' }
+      $SelectedCompression = $Block.Compression
 
       # The final block can contain archive data beyond the logical header. Copy
       # only the requested prefix so the parser never buffers the full payload.
       $Remaining = $ExpectedOutputBytes - [int]$Output.Length
-      $Output.Write($DecodedBlock, 0, [Math]::Min($Remaining, $DecodedBlock.Length))
-      $RecordOffset = $BlockOffset + $CompressedBlockSize
+      $Output.Write($Block.Bytes, 0, [Math]::Min($Remaining, $Block.Bytes.Length))
+      $RecordOffset = $Block.NextOffset
       $BlockCount++
     }
 
@@ -798,6 +855,34 @@ function Read-NSISMtwHeaderData {
   } finally {
     $Output.Dispose()
   }
+}
+
+function New-NSISBcjDecoderStream {
+  <#
+  .SYNOPSIS
+    Wrap an LZMA decoder with the NSIS x86 BCJ post-filter
+  .PARAMETER Stream
+    The decoded LZMA stream. Ownership transfers to the returned filter stream.
+  #>
+  [OutputType([System.IO.Stream])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The decoded LZMA stream to post-process')]
+    [System.IO.Stream]$Stream
+  )
+
+  # SharpCompress exposes the filter internally for its XZ implementation. Use
+  # the same pinned assembly already required by InstallerParsers rather than
+  # copying another branch-conversion implementation into this GPL module.
+  $Assembly = [SharpCompress.Archives.IArchive].Assembly
+  $FilterType = $Assembly.GetType('SharpCompress.Compressors.Filters.BCJFilter', $true)
+  $Constructor = $FilterType.GetConstructor(
+    [Reflection.BindingFlags]'Instance,Public,NonPublic',
+    $null,
+    [type[]]@([bool], [System.IO.Stream]),
+    $null
+  )
+  if (-not $Constructor) { throw 'The bundled SharpCompress assembly does not expose the expected BCJ decoder constructor' }
+  return [System.IO.Stream]$Constructor.Invoke([object[]]@($false, $Stream))
 }
 
 function Get-NSISCompressionCandidates {
@@ -852,8 +937,6 @@ function New-NSISDecoder {
     The NSIS compression format
   .PARAMETER PayloadStream
     The compressed header payload stream
-  .PARAMETER IsSolid
-    Whether the NSIS header uses the solid layout
   .PARAMETER LzmaFilterLength
     The optional NSIS LZMA filter marker length
   .PARAMETER ExpectedOutputBytes
@@ -868,23 +951,27 @@ function New-NSISDecoder {
     [Parameter(Mandatory, HelpMessage = 'The compressed header payload stream')]
     [System.IO.Stream]$PayloadStream,
 
-    [Parameter(Mandatory, HelpMessage = 'Whether the NSIS header uses the solid layout')]
-    [bool]$IsSolid,
-
     [Parameter(HelpMessage = 'The optional NSIS LZMA filter marker length')]
     [int]$LzmaFilterLength = -1,
 
-    [Parameter(HelpMessage = 'The exact decompressed header bytes required by the caller')]
-    [ValidateRange(1, 134217728)]
-    [int]$ExpectedOutputBytes = 134217728
+    [Parameter(HelpMessage = 'The expected decompressed bytes, or -1 when a payload record carries no unpacked-size metadata')]
+    [ValidateRange(-1, [long]::MaxValue)]
+    [long]$ExpectedOutputBytes = -1
   )
 
   switch ($Compression) {
     'Lzma' {
-      if (-not $IsSolid -and $LzmaFilterLength -gt 0) { $null = $PayloadStream.ReadByte() }
+      $UseBcjFilter = $false
+      if ($LzmaFilterLength -gt 0) {
+        $FilterFlag = $PayloadStream.ReadByte()
+        if ($FilterFlag -lt 0 -or $FilterFlag -gt 1) { throw 'The NSIS LZMA filter flag is invalid' }
+        $UseBcjFilter = $FilterFlag -eq 1
+      }
       $Properties = New-Object 'byte[]' 5
       if ($PayloadStream.Read($Properties, 0, $Properties.Length) -ne $Properties.Length) { throw 'The NSIS LZMA properties are truncated' }
-      return New-InstallerDecompressionStream -Algorithm Lzma -Stream $PayloadStream -Properties $Properties -LeaveOpen
+      $Decoder = New-InstallerDecompressionStream -Algorithm Lzma -Stream $PayloadStream -Properties $Properties -LeaveOpen
+      if ($UseBcjFilter) { return New-NSISBcjDecoderStream -Stream $Decoder }
+      return $Decoder
     }
     'Lzma2' {
       $Property = $PayloadStream.ReadByte()
@@ -995,7 +1082,7 @@ function Get-NSISHeaderData {
           $EffectiveCompression = "Mtw-$($MtwResult.Compression)"
           $MtwBlockCount = $MtwResult.BlockCount
         } else {
-          $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -IsSolid $IsSolid -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $RequiredOutputBytes
+          $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $RequiredOutputBytes
         }
 
         if ($IsSolid -and $Compression -ne 'None') {
@@ -1031,6 +1118,13 @@ function Get-NSISHeaderData {
           IsStubInstaller         = $FirstHeader.IsStubInstaller
           DataBlockLength         = $FirstHeader.DataBlockLength
           ArchiveSize             = $LengthOfFollowingData
+          HeaderSize              = $LengthOfHeader
+          PayloadOffset           = $PayloadOffset
+          PayloadLength           = $PayloadLength
+          PayloadDataOffset       = $PayloadDataOffset
+          PayloadDataLength       = $PayloadDataLength
+          PackedSizeWidth         = $PackedSizeWidth
+          CompressedHeaderSize    = $CompressedHeaderSize
           Compression             = $EffectiveCompression
           MtwBlockCount           = $MtwBlockCount
           IsSolid                 = $IsSolid
@@ -3352,6 +3446,575 @@ function Get-ElectronBuilderNSISInfo {
   }
 }
 
+function ConvertTo-NSISExtractionRelativePath {
+  <#
+  .SYNOPSIS
+    Project a compiled NSIS output name into a safe extraction-relative path
+  .PARAMETER Path
+    The filename resolved from the EW_EXTRACTFILE string operand.
+  .PARAMETER DataOffset
+    Data-block offset used to create a deterministic fallback name.
+  #>
+  [OutputType([string])]
+  param (
+    [AllowEmptyString()]
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][uint64]$DataOffset
+  )
+
+  $Candidate = $Path.Trim().Trim('"').Replace('/', '\')
+  if ([string]::IsNullOrWhiteSpace($Candidate)) { return ('payload-{0:X}.bin' -f $DataOffset) }
+
+  # Absolute install paths and expanded shell variables must never recreate host
+  # directory trees under the extraction root. Their leaf still identifies the
+  # payload deterministically for static analysis.
+  if ([IO.Path]::IsPathRooted($Candidate) -or $Candidate -match '^[A-Za-z]:') {
+    $Candidate = [IO.Path]::GetFileName($Candidate.TrimEnd('\'))
+  }
+
+  $InvalidCharacters = [System.Collections.Generic.HashSet[char]]::new([IO.Path]::GetInvalidFileNameChars())
+  $Segments = [System.Collections.Generic.List[string]]::new()
+  foreach ($RawSegment in $Candidate.Split('\', [StringSplitOptions]::RemoveEmptyEntries)) {
+    if ($RawSegment -eq '.') { continue }
+    if ($RawSegment -eq '..') { $RawSegment = '_' }
+    $Builder = [Text.StringBuilder]::new($RawSegment.Length)
+    foreach ($Character in $RawSegment.ToCharArray()) {
+      $null = $Builder.Append($(if ($InvalidCharacters.Contains($Character)) { '_' } else { $Character }))
+    }
+    $Segment = $Builder.ToString().TrimEnd(' ', '.')
+    if ([string]::IsNullOrWhiteSpace($Segment)) { $Segment = '_' }
+    if ($Segment -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$') { $Segment = "_$Segment" }
+    $Segments.Add($Segment)
+  }
+
+  if ($Segments.Count -eq 0) { return ('payload-{0:X}.bin' -f $DataOffset) }
+  return [string]::Join([IO.Path]::DirectorySeparatorChar, $Segments)
+}
+
+function Get-NSISPayloadEntries {
+  <#
+  .SYNOPSIS
+    Read source filenames and data offsets from normalized EW_EXTRACTFILE entries
+  .PARAMETER State
+    Initialized NSIS parser state containing normalized command and string tables.
+  .PARAMETER HeaderData
+    Validated first-header and archive layout evidence.
+  .PARAMETER Name
+    Wildcard matched against the compiled path, safe relative path, and base name.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [Parameter(Mandatory)][pscustomobject]$HeaderData,
+    [Parameter(Mandatory)][string]$Name
+  )
+
+  $Payloads = [System.Collections.Generic.List[object]]::new()
+  foreach ($Entry in $State.Entries) {
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_EXTRACT_FILE) { continue }
+
+    # Standard NSIS stores a uint32 data offset in operand 2. NSISBI widens that
+    # value over operands 2 and 3, moving FILETIME and CRC fields to the right.
+    $DataOffset = if ($HeaderData.IsNsisBi) {
+      [uint64]$Entry.Raw[3] -bor ([uint64]$Entry.Raw[4] -shl 32)
+    } else {
+      [uint64]$Entry.Raw[3]
+    }
+    $SourcePath = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
+    $RelativePath = ConvertTo-NSISExtractionRelativePath -Path $SourcePath -DataOffset $DataOffset
+    if (-not (Test-ExtractionPattern -Path $SourcePath -Pattern $Name) -and
+      -not (Test-ExtractionPattern -Path $RelativePath -Pattern $Name)) { continue }
+
+    $TimeLowIndex = if ($HeaderData.IsNsisBi) { 5 } else { 4 }
+    $TimeHighIndex = if ($HeaderData.IsNsisBi) { 6 } else { 5 }
+    $Payloads.Add([pscustomobject]@{
+        SourcePath   = $SourcePath
+        RelativePath = $RelativePath
+        DataOffset   = $DataOffset
+        TimeLow      = $Entry.Raw[$TimeLowIndex]
+        TimeHigh     = $Entry.Raw[$TimeHighIndex]
+        Crc32        = if ($HeaderData.IsNsisBi) { $Entry.Raw[8] } else { $null }
+      })
+    if ($Payloads.Count -gt $Script:NSIS_MAX_EXTRACTION_FILE_COUNT) {
+      throw "The NSIS extraction selection exceeds the supported $($Script:NSIS_MAX_EXTRACTION_FILE_COUNT)-file limit"
+    }
+  }
+
+  return $Payloads.ToArray()
+}
+
+function Read-NSISSequentialInteger {
+  <#
+  .SYNOPSIS
+    Read one little-endian unsigned integer from the current stream position
+  .PARAMETER Stream
+    Sequential decoded stream. The caller owns it and its position advances.
+  .PARAMETER Size
+    Integer width in bytes: four for standard NSIS or eight for NSISBI.
+  #>
+  [OutputType([uint64])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$Size
+  )
+
+  $Bytes = [byte[]]::new($Size)
+  $Read = 0
+  while ($Read -lt $Size) {
+    $Count = $Stream.Read($Bytes, $Read, $Size - $Read)
+    if ($Count -le 0) { throw 'The NSIS payload length field is truncated' }
+    $Read += $Count
+  }
+  return $(if ($Size -eq 8) { [BitConverter]::ToUInt64($Bytes, 0) } else { [uint64][BitConverter]::ToUInt32($Bytes, 0) })
+}
+
+function Skip-NSISSequentialBytes {
+  <#
+  .SYNOPSIS
+    Consume an exact number of bytes from a decoded NSIS stream
+  .PARAMETER Stream
+    Sequential decoded stream. The caller owns it and its position advances.
+  .PARAMETER Count
+    Exact number of bytes to discard.
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Count
+  )
+
+  if ($Count -eq 0) { return }
+  $null = Copy-BoundedStream -Source $Stream -Destination ([System.IO.Stream]::Null) -MaximumBytes $Count -ExpectedBytes $Count
+}
+
+function New-NSISExtractionOutputMap {
+  <#
+  .SYNOPSIS
+    Assign collision-safe output paths to selected NSIS payload records
+  .PARAMETER Payload
+    Selected EW_EXTRACTFILE payload records.
+  .PARAMETER DestinationPath
+    Validated extraction root.
+  .PARAMETER CollisionAction
+    Behavior when payload destinations collide with existing or selected paths.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][pscustomobject[]]$Payload,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename'
+  )
+
+  $ReservedPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Mapped = [System.Collections.Generic.List[object]]::new()
+  foreach ($Item in $Payload) {
+    # Repeated command entries frequently reference the same plugin data and
+    # destination. Emit that physical file once while preserving aliases that
+    # use distinct compiled paths.
+    $OriginalPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Item.RelativePath
+    $Identity = "$OriginalPath`0$($Item.DataOffset)"
+    if (-not $Seen.Add($Identity)) { continue }
+    $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Item.RelativePath `
+      -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+    if (-not $Target.ShouldWrite) { continue }
+    $Item | Add-Member -NotePropertyName OutputPath -NotePropertyValue $Target.Path
+    $Mapped.Add($Item)
+  }
+  return $Mapped.ToArray()
+}
+
+function Set-NSISExtractedFileTime {
+  <#
+  .SYNOPSIS
+    Apply a compiled EW_EXTRACTFILE modification time when it is defined
+  .PARAMETER Path
+    Extracted file path.
+  .PARAMETER TimeLow
+    Low uint32 of the Windows FILETIME.
+  .PARAMETER TimeHigh
+    High uint32 of the Windows FILETIME.
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][uint32]$TimeLow,
+    [Parameter(Mandatory)][uint32]$TimeHigh
+  )
+
+  if (($TimeLow -eq [uint32]::MaxValue -and $TimeHigh -eq [uint32]::MaxValue) -or ($TimeLow -eq 0 -and $TimeHigh -eq 0)) { return }
+  $RawTime = [uint64]$TimeLow -bor ([uint64]$TimeHigh -shl 32)
+  if ($RawTime -gt [long]::MaxValue) { return }
+  try { [IO.File]::SetLastWriteTimeUtc($Path, [DateTime]::FromFileTimeUtc([long]$RawTime)) } catch { }
+}
+
+function Write-NSISPayloadStream {
+  <#
+  .SYNOPSIS
+    Atomically write one bounded decoded payload stream to disk
+  .PARAMETER Stream
+    Sequential source stream positioned at the payload body.
+  .PARAMETER OutputPath
+    Safe absolute output path.
+  .PARAMETER MaximumBytes
+    Hard maximum bytes accepted for this payload.
+  .PARAMETER ExpectedBytes
+    Exact payload size when the record provides one, or -1 for compressed non-solid data.
+  #>
+  [OutputType([System.IO.FileInfo])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][string]$OutputPath,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes,
+    [Parameter(Mandatory)][ValidateRange(-1, [long]::MaxValue)][long]$ExpectedBytes
+  )
+
+  $Directory = Split-Path -Path $OutputPath -Parent
+  $null = New-Item -Path $Directory -ItemType Directory -Force
+  $PartialPath = Join-Path $Directory ('.' + [IO.Path]::GetFileName($OutputPath) + '.partial-' + [Guid]::NewGuid().ToString('N'))
+  $Output = [IO.File]::Open($PartialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    $CopyArguments = @{ Source = $Stream; Destination = $Output; MaximumBytes = $MaximumBytes }
+    if ($ExpectedBytes -ge 0) { $CopyArguments.ExpectedBytes = $ExpectedBytes }
+    $null = Copy-BoundedStream @CopyArguments
+  } catch {
+    $Output.Dispose()
+    Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue
+    throw
+  } finally {
+    if ($Output) { $Output.Dispose() }
+  }
+  [IO.File]::Move($PartialPath, $OutputPath, $true)
+  return Get-Item -LiteralPath $OutputPath -Force
+}
+
+function Copy-NSISPayloadAliases {
+  <#
+  .SYNOPSIS
+    Copy one decoded payload to additional compiled output names
+  .PARAMETER SourcePath
+    Already extracted source path.
+  .PARAMETER Payload
+    Payload records sharing the same NSIS data offset.
+  .PARAMETER MaximumExpandedBytes
+    Remaining total output budget including alias copies.
+  #>
+  [OutputType([System.IO.FileInfo[]])]
+  param (
+    [Parameter(Mandatory)][string]$SourcePath,
+    [Parameter(Mandatory)][pscustomobject[]]$Payload,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$MaximumExpandedBytes
+  )
+
+  $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+  $Length = (Get-Item -LiteralPath $SourcePath -Force).Length
+  $AliasCount = [Math]::Max(0, $Payload.Count - 1)
+  if ($Length -gt 0 -and $AliasCount -gt [Math]::Floor($MaximumExpandedBytes / $Length)) {
+    throw 'The selected NSIS payload aliases exceed the maximum expanded-byte limit'
+  }
+  foreach ($Alias in $Payload) {
+    if ($Alias.OutputPath -ceq $SourcePath) { continue }
+    $InputStream = [IO.File]::Open($SourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+      $File = Write-NSISPayloadStream -Stream $InputStream -OutputPath $Alias.OutputPath -MaximumBytes $Length -ExpectedBytes $Length
+    } finally {
+      $InputStream.Dispose()
+    }
+    Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Alias.TimeLow -TimeHigh $Alias.TimeHigh
+    $Result.Add($File)
+  }
+  return $Result.ToArray()
+}
+
+function Expand-NSISNonSolidPayloads {
+  <#
+  .SYNOPSIS
+    Extract selected independently framed payload records from a non-solid NSIS archive
+  .PARAMETER Stream
+    Installer stream opened once by the public extractor. The caller owns it.
+  .PARAMETER HeaderData
+    Validated archive and codec layout.
+  .PARAMETER Payload
+    Selected payload records with safe output paths.
+  .PARAMETER MaximumExpandedBytes
+    Hard total output limit across payloads and aliases.
+  #>
+  [OutputType([System.IO.FileInfo[]])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][pscustomobject]$HeaderData,
+    [Parameter(Mandatory)][pscustomobject[]]$Payload,
+    [Parameter(Mandatory)][long]$MaximumExpandedBytes
+  )
+
+  $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+  $ExpandedBytes = 0L
+  $ArchiveEnd = $HeaderData.FirstHeaderOffset + $HeaderData.ArchiveSize
+  $DataBlockOffset = $HeaderData.PayloadOffset + $HeaderData.PackedSizeWidth + $HeaderData.CompressedHeaderSize
+  $Groups = $Payload | Group-Object -Property DataOffset | Sort-Object { [uint64]$_.Name }
+  foreach ($Group in $Groups) {
+    $Items = [pscustomobject[]]@($Group.Group)
+    $RecordOffset = $DataBlockOffset + [uint64]$Items[0].DataOffset
+    if ($RecordOffset -gt [long]::MaxValue -or $RecordOffset + $HeaderData.PackedSizeWidth -gt $ArchiveEnd) {
+      throw "The NSIS payload record offset is outside the archive: $($Items[0].DataOffset)"
+    }
+
+    $PackedValue = [uint64](Read-BinaryInteger -Stream $Stream -Offset ([long]$RecordOffset) -Size $HeaderData.PackedSizeWidth)
+    $CompressedMask = if ($HeaderData.PackedSizeWidth -eq 8) { [uint64]::Parse('9223372036854775808') } else { [uint64]2147483648 }
+    $LengthMask = if ($HeaderData.PackedSizeWidth -eq 8) { [uint64]9223372036854775807 } else { [uint64]2147483647 }
+    $PackedLength = $PackedValue -band $LengthMask
+    $IsCompressed = ($PackedValue -band $CompressedMask) -ne 0
+    $BodyOffset = $RecordOffset + $HeaderData.PackedSizeWidth
+    if ($PackedLength -gt [long]::MaxValue -or $BodyOffset + $PackedLength -gt $ArchiveEnd) {
+      throw "The NSIS payload body is outside the archive: $($Items[0].SourcePath)"
+    }
+
+    $Remaining = $MaximumExpandedBytes - $ExpandedBytes
+    $PerOutputLimit = [long][Math]::Floor($Remaining / $Items.Count)
+    $Body = New-BoundedReadStream -Stream $Stream -Offset ([long]$BodyOffset) -Length ([long]$PackedLength) -LeaveOpen
+    $Decoder = $null
+    try {
+      $Source = $Body
+      $ExpectedBytes = [long]$PackedLength
+      if ($IsCompressed) {
+        $Probe = Read-BinaryBytes -Stream $Body -Offset 0 -Count ([int][Math]::Min(24L, [long]$PackedLength))
+        $LzmaFilterLength = if ($HeaderData.Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $Probe } else { -1 }
+        $Decoder = New-NSISDecoder -Compression $HeaderData.Compression -PayloadStream $Body `
+          -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes -1
+        $Source = $Decoder
+        $ExpectedBytes = -1
+      }
+      $File = Write-NSISPayloadStream -Stream $Source -OutputPath $Items[0].OutputPath -MaximumBytes $PerOutputLimit -ExpectedBytes $ExpectedBytes
+    } finally {
+      if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
+      $Body.Dispose()
+    }
+
+    Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Items[0].TimeLow -TimeHigh $Items[0].TimeHigh
+    $Result.Add($File)
+    $ExpandedBytes += $File.Length
+    $Aliases = Copy-NSISPayloadAliases -SourcePath $File.FullName -Payload $Items -MaximumExpandedBytes ($MaximumExpandedBytes - $ExpandedBytes)
+    foreach ($Alias in $Aliases) { $Result.Add($Alias); $ExpandedBytes += $Alias.Length }
+  }
+  return $Result.ToArray()
+}
+
+function Expand-NSISSolidPayloads {
+  <#
+  .SYNOPSIS
+    Extract selected records while advancing once through a solid NSIS codec stream
+  .PARAMETER Stream
+    Installer stream opened once by the public extractor. The caller owns it.
+  .PARAMETER HeaderData
+    Validated archive and codec layout.
+  .PARAMETER Payload
+    Selected payload records with safe output paths.
+  .PARAMETER MaximumExpandedBytes
+    Hard total output limit across payloads and aliases.
+  #>
+  [OutputType([System.IO.FileInfo[]])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][pscustomobject]$HeaderData,
+    [Parameter(Mandatory)][pscustomobject[]]$Payload,
+    [Parameter(Mandatory)][long]$MaximumExpandedBytes
+  )
+
+  $PayloadRange = New-BoundedReadStream -Stream $Stream -Offset $HeaderData.PayloadDataOffset -Length $HeaderData.PayloadDataLength -LeaveOpen
+  $Decoder = $null
+  $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+  $ExpandedBytes = 0L
+  $LogicalPosition = 0L
+  try {
+    $Probe = Read-BinaryBytes -Stream $PayloadRange -Offset 0 -Count ([int][Math]::Min(24L, $PayloadRange.Length))
+    $LzmaFilterLength = if ($HeaderData.Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $Probe } else { -1 }
+    $Decoder = New-NSISDecoder -Compression $HeaderData.Compression -PayloadStream $PayloadRange `
+      -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes -1
+
+    $Groups = $Payload | Group-Object -Property DataOffset | Sort-Object { [uint64]$_.Name }
+    foreach ($Group in $Groups) {
+      $Items = [pscustomobject[]]@($Group.Group)
+      $RecordPosition = [uint64]$HeaderData.PackedSizeWidth + [uint64]$HeaderData.HeaderSize + [uint64]$Items[0].DataOffset
+      if ($RecordPosition -gt [long]::MaxValue -or [long]$RecordPosition -lt $LogicalPosition) {
+        throw "The NSIS solid payload offsets overlap or exceed the supported range: $($Items[0].DataOffset)"
+      }
+      Skip-NSISSequentialBytes -Stream $Decoder -Count ([long]$RecordPosition - $LogicalPosition)
+      $LogicalPosition = [long]$RecordPosition
+
+      $UnpackedLength = Read-NSISSequentialInteger -Stream $Decoder -Size $HeaderData.PackedSizeWidth
+      $LogicalPosition += $HeaderData.PackedSizeWidth
+      $CompressedMask = if ($HeaderData.PackedSizeWidth -eq 8) { [uint64]::Parse('9223372036854775808') } else { [uint64]2147483648 }
+      if (($UnpackedLength -band $CompressedMask) -ne 0 -or $UnpackedLength -gt [long]::MaxValue) {
+        throw "The NSIS solid payload length is invalid: $($Items[0].SourcePath)"
+      }
+
+      $Remaining = $MaximumExpandedBytes - $ExpandedBytes
+      if ($UnpackedLength -gt [Math]::Floor($Remaining / $Items.Count)) {
+        throw 'The selected NSIS payloads exceed the maximum expanded-byte limit'
+      }
+      $File = Write-NSISPayloadStream -Stream $Decoder -OutputPath $Items[0].OutputPath `
+        -MaximumBytes ([long]$UnpackedLength) -ExpectedBytes ([long]$UnpackedLength)
+      $LogicalPosition += [long]$UnpackedLength
+      Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Items[0].TimeLow -TimeHigh $Items[0].TimeHigh
+      $Result.Add($File)
+      $ExpandedBytes += $File.Length
+      $Aliases = Copy-NSISPayloadAliases -SourcePath $File.FullName -Payload $Items -MaximumExpandedBytes ($MaximumExpandedBytes - $ExpandedBytes)
+      foreach ($Alias in $Aliases) { $Result.Add($Alias); $ExpandedBytes += $Alias.Length }
+    }
+  } finally {
+    if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
+    $PayloadRange.Dispose()
+  }
+  return $Result.ToArray()
+}
+
+function Expand-NSISMtwPayloads {
+  <#
+  .SYNOPSIS
+    Extract selected NSISBI MTW records through a bounded spill file
+  .PARAMETER Stream
+    Installer stream opened once by the public extractor. The caller owns it.
+  .PARAMETER HeaderData
+    Validated NSISBI archive and MTW layout.
+  .PARAMETER Payload
+    Selected payload records with safe output paths.
+  .PARAMETER MaximumExpandedBytes
+    Hard total output limit across payloads and aliases.
+  #>
+  [OutputType([System.IO.FileInfo[]])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][pscustomobject]$HeaderData,
+    [Parameter(Mandatory)][pscustomobject[]]$Payload,
+    [Parameter(Mandatory)][long]$MaximumExpandedBytes
+  )
+
+  $PayloadRange = New-BoundedReadStream -Stream $Stream -Offset $HeaderData.PayloadDataOffset -Length $HeaderData.PayloadDataLength -LeaveOpen
+  $SpillPath = [IO.Path]::GetTempFileName()
+  $Spill = [IO.File]::Open($SpillPath, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+  $RecordOffset = 0L
+  $Compression = ($HeaderData.Compression -replace '^Mtw-', '')
+  $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+  $ExpandedBytes = 0L
+  try {
+    $Groups = $Payload | Group-Object -Property DataOffset | Sort-Object { [uint64]$_.Name }
+    foreach ($Group in $Groups) {
+      $Items = [pscustomobject[]]@($Group.Group)
+      $LogicalRecordOffset = [uint64]$HeaderData.PackedSizeWidth + [uint64]$HeaderData.HeaderSize + [uint64]$Items[0].DataOffset
+      if ($LogicalRecordOffset -gt [long]::MaxValue) { throw 'The NSISBI solid payload offset exceeds the supported stream range' }
+
+      # MTW blocks are independently compressed and can be decoded only in block
+      # order. Spill the minimum prefix needed for each selected record so large
+      # Unity-style archives do not become one in-memory byte array.
+      while ($Spill.Length -lt [long]$LogicalRecordOffset + $HeaderData.PackedSizeWidth) {
+        $Block = Read-NSISMtwBlock -Stream $PayloadRange -RecordOffset $RecordOffset -Compression $Compression
+        if ($Block.IsEnd) { throw 'The NSISBI MTW stream ended before the selected payload record' }
+        $Compression = $Block.Compression
+        $Spill.Position = $Spill.Length
+        $Spill.Write($Block.Bytes, 0, $Block.Bytes.Length)
+        $RecordOffset = $Block.NextOffset
+      }
+
+      $UnpackedLength = [uint64](Read-BinaryInteger -Stream $Spill -Offset ([long]$LogicalRecordOffset) -Size $HeaderData.PackedSizeWidth)
+      $CompressedMask = if ($HeaderData.PackedSizeWidth -eq 8) { [uint64]::Parse('9223372036854775808') } else { [uint64]2147483648 }
+      if (($UnpackedLength -band $CompressedMask) -ne 0 -or $UnpackedLength -gt [long]::MaxValue) {
+        throw "The NSISBI solid payload length is invalid: $($Items[0].SourcePath)"
+      }
+      $BodyEnd = [uint64]$LogicalRecordOffset + [uint64]$HeaderData.PackedSizeWidth + $UnpackedLength
+      if ($BodyEnd -gt [long]::MaxValue) { throw 'The NSISBI solid payload range exceeds the supported stream range' }
+      while ($Spill.Length -lt [long]$BodyEnd) {
+        $Block = Read-NSISMtwBlock -Stream $PayloadRange -RecordOffset $RecordOffset -Compression $Compression
+        if ($Block.IsEnd) { throw 'The NSISBI MTW stream ended inside the selected payload body' }
+        $Spill.Position = $Spill.Length
+        $Spill.Write($Block.Bytes, 0, $Block.Bytes.Length)
+        $RecordOffset = $Block.NextOffset
+      }
+
+      $Remaining = $MaximumExpandedBytes - $ExpandedBytes
+      if ($UnpackedLength -gt [Math]::Floor($Remaining / $Items.Count)) { throw 'The selected NSIS payloads exceed the maximum expanded-byte limit' }
+      $Body = New-BoundedReadStream -Stream $Spill -Offset ([long]$LogicalRecordOffset + $HeaderData.PackedSizeWidth) -Length ([long]$UnpackedLength) -LeaveOpen
+      try {
+        $File = Write-NSISPayloadStream -Stream $Body -OutputPath $Items[0].OutputPath `
+          -MaximumBytes ([long]$UnpackedLength) -ExpectedBytes ([long]$UnpackedLength)
+      } finally {
+        $Body.Dispose()
+      }
+      Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Items[0].TimeLow -TimeHigh $Items[0].TimeHigh
+      $Result.Add($File)
+      $ExpandedBytes += $File.Length
+      $Aliases = Copy-NSISPayloadAliases -SourcePath $File.FullName -Payload $Items -MaximumExpandedBytes ($MaximumExpandedBytes - $ExpandedBytes)
+      foreach ($Alias in $Aliases) { $Result.Add($Alias); $ExpandedBytes += $Alias.Length }
+    }
+  } finally {
+    $Spill.Dispose()
+    $PayloadRange.Dispose()
+    Remove-Item -LiteralPath $SpillPath -Force -ErrorAction SilentlyContinue
+  }
+  return $Result.ToArray()
+}
+
+function Expand-NSISInstaller {
+  <#
+  .SYNOPSIS
+    Extract selected embedded files from an NSIS installer without executing it
+  .PARAMETER Path
+    Path to the NSIS installer.
+  .PARAMETER DestinationPath
+    Extraction directory. A unique temporary directory is created when omitted.
+  .PARAMETER Name
+    Wildcard matched against compiled payload paths and base filenames. The default extracts all EW_EXTRACTFILE payloads.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total bytes written, including aliases that share one data record.
+  .PARAMETER CollisionAction
+    Behavior when a payload path already exists or multiple File commands resolve to the same path.
+  #>
+  [OutputType([System.IO.FileInfo[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path,
+    [Parameter(HelpMessage = 'The directory where selected payloads should be written')]
+    [string]$DestinationPath,
+    [Parameter(HelpMessage = 'The payload path or wildcard pattern to extract')]
+    [ValidateNotNullOrEmpty()][string]$Name = '*',
+    [Parameter(HelpMessage = 'The maximum total number of extracted bytes')]
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt'
+  )
+
+  process {
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $ResolvedDestinationPath = $DestinationPath
+    if ([string]::IsNullOrWhiteSpace($ResolvedDestinationPath)) {
+      $ResolvedDestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-NSIS-' + [Guid]::NewGuid().ToString('N'))
+    }
+    $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $ResolvedDestinationPath -AllowNonexistent
+    $ResolvedDestinationPath = (New-Item -Path $ResolvedDestinationPath -ItemType Directory -Force).FullName
+
+    $HeaderData = Get-NSISHeaderData -Path $InstallerPath
+    if ($HeaderData.HasExternalFile) {
+      throw 'The NSISBI installer references an external payload sidecar; embedded-only extraction would be incomplete'
+    }
+    $Initialized = Initialize-NSISState -HeaderData $HeaderData
+    $Selected = Get-NSISPayloadEntries -State $Initialized.State -HeaderData $HeaderData -Name $Name
+    if ($Selected.Count -eq 0) { throw "No NSIS payload matched '$Name'" }
+    $Mapped = New-NSISExtractionOutputMap -Payload $Selected -DestinationPath $ResolvedDestinationPath -CollisionAction $CollisionAction
+    if ($Mapped.Count -eq 0) { return }
+
+    $InstallerStream = [IO.File]::Open($InstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+      if (-not $HeaderData.IsSolid) {
+        return Expand-NSISNonSolidPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Mapped -MaximumExpandedBytes $MaximumExpandedBytes
+      }
+      if ($HeaderData.Compression -like 'Mtw-*') {
+        return Expand-NSISMtwPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Mapped -MaximumExpandedBytes $MaximumExpandedBytes
+      }
+      return Expand-NSISSolidPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Mapped -MaximumExpandedBytes $MaximumExpandedBytes
+    } finally {
+      $InstallerStream.Dispose()
+    }
+  }
+}
+
 function Get-NSISInfo {
   <#
   .SYNOPSIS
@@ -3457,4 +4120,4 @@ function Read-ProductCodeFromNSIS {
   }
 }
 
-Export-ModuleMember -Function Get-NSISInfo, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS
+Export-ModuleMember -Function Get-NSISInfo, Expand-NSISInstaller, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS

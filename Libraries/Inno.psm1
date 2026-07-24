@@ -341,6 +341,17 @@ function Get-InnoLayout {
     FileEntryStringCount                     = $VersionNumber -ge 6500 ? 15 : 10
     FileEntryAnsiStringCount                 = $VersionNumber -ge 6500 ? 1 : 0
     FileEntryHasVerification                 = $VersionNumber -ge 6500
+    # Inno 5.5 shortens the serialized version constraints to 16 bytes. The
+    # 5.3 family and Unicode 6.x+ layouts use a 20-byte pair instead.
+    FileEntryVersionDataSize                 = $VersionNumber -ge 6000 -or $VersionNumber -lt 5500 ? 20 : 16
+    FileEntryTrailingSize                    = $VersionNumber -ge 6000 ? 0 : 4
+    # Packed Pascal sets occupy enough bytes for their highest declared bit.
+    # Inno 6.5 adds four file options (five bytes total); 6.7 reserves through
+    # bit 56 so later additions retain an eight-byte serialized field.
+    # Inno's packed entry serializer writes four option bytes through 6.4,
+    # five in the 6.5/6.6 layouts, and eight after the 6.7 option expansion.
+    FileEntryOptionsSize                     = $VersionNumber -ge 6700 ? 8 : ($VersionNumber -ge 6500 ? 5 : 4)
+    FileEntryHasBitness                      = $VersionNumber -ge 7000
     FileLocationStartOffsetSize              = $FileLocationStartOffsetSize
     FileLocationDigestAlgorithm              = $VersionNumber -ge 6400 ? 'SHA256' : 'SHA1'
     FileLocationDigestSize                   = $FileLocationDigestSize
@@ -2116,6 +2127,7 @@ function Get-InnoVersion5Header {
     return [pscustomobject]@{
       HeaderValues = $HeaderValues
       Counts       = [pscustomobject]$Counts
+      SearchOffset = [int]$Reader.BaseStream.Position
       StreamOffset = $Reader.BaseStream.Position
     }
   } finally {
@@ -2397,6 +2409,7 @@ function Get-InnoExtractionHeader {
     return [pscustomobject]@{
       HeaderValues = $HeaderValues
       Counts       = [pscustomobject]$Counts
+      SearchOffset = [int]$Reader.BaseStream.Position
     }
   } finally {
     $Reader.Dispose()
@@ -2448,14 +2461,33 @@ function Read-InnoFileEntryAtOffset {
     }
 
     if ($Reader.BaseStream.Position + 24 -gt $Reader.BaseStream.Length) { throw 'The Inno Setup file entry is truncated' }
-    $Reader.BaseStream.Seek(20, 'Current') | Out-Null # MinVersion + OnlyBelowVersion
+    $Reader.BaseStream.Seek($Layout.FileEntryVersionDataSize, 'Current') | Out-Null # MinVersion + OnlyBelowVersion
     $LocationEntry = $Reader.ReadInt32()
     if ($LocationEntry -lt -1 -or $LocationEntry -ge $FileLocationCount) {
       throw "The Inno Setup file location index is invalid: $LocationEntry"
     }
 
+    # Consume and validate the complete fixed tail so RecordEnd points exactly
+    # at the next serialized file entry. This makes full table enumeration
+    # source-backed rather than a search for unrelated file-name strings.
+    $RemainingFixedBytes = 4 + 8 + 2 + ($Layout.FileEntryHasBitness ? 1 : 0) +
+    $Layout.FileEntryOptionsSize + 1 + $Layout.FileEntryTrailingSize
+    if ($Reader.BaseStream.Position + $RemainingFixedBytes -gt $Reader.BaseStream.Length) {
+      throw 'The Inno Setup file entry fixed fields are truncated'
+    }
+    $Attribs = $Reader.ReadInt32()
+    $ExternalSize = $Reader.ReadInt64()
+    $PermissionsEntry = $Reader.ReadInt16()
+    $Bitness = if ($Layout.FileEntryHasBitness) { $Reader.ReadByte() } else { $null }
+    $Options = $Reader.ReadBytes($Layout.FileEntryOptionsSize)
+    $FileType = $Reader.ReadByte()
+    if ($Layout.FileEntryTrailingSize -gt 0) {
+      $Reader.BaseStream.Seek($Layout.FileEntryTrailingSize, 'Current') | Out-Null
+    }
+
     return [pscustomobject]@{
       RecordOffset            = $Offset
+      RecordEnd               = [int]$Reader.BaseStream.Position
       SourceFilename          = $Strings[0]
       DestName                = $Strings[1]
       InstallFontName         = $Strings[2]
@@ -2465,7 +2497,7 @@ function Read-InnoFileEntryAtOffset {
       Languages               = $Strings[6]
       Check                   = $Strings[7]
       AfterInstall            = $Strings[8]
-      BeforeInstall           = $Strings[9]
+      BeforeInstall           = $Layout.FileEntryStringCount -gt 9 ? $Strings[9] : $null
       Excludes                = $Layout.FileEntryStringCount -gt 10 ? $Strings[10] : $null
       DownloadISSigSource     = $Layout.FileEntryStringCount -gt 11 ? $Strings[11] : $null
       DownloadUserName        = $Layout.FileEntryStringCount -gt 12 ? $Strings[12] : $null
@@ -2475,11 +2507,140 @@ function Read-InnoFileEntryAtOffset {
       VerificationHash        = $VerificationHash
       VerificationType        = $VerificationType
       LocationEntry           = $LocationEntry
+      Attribs                 = $Attribs
+      ExternalSize            = $ExternalSize
+      PermissionsEntry        = $PermissionsEntry
+      Bitness                 = $Bitness
+      Options                 = $Options
+      FileType                = $FileType
     }
   } finally {
     $Reader.Dispose()
     $Stream.Dispose()
   }
+}
+
+function Get-InnoFileEntries {
+  <#
+  .SYNOPSIS
+    Enumerate the complete versioned Inno Setup file-entry table.
+  .PARAMETER Bytes
+    Decompressed first metadata block containing the header and serialized entry tables.
+  .PARAMETER Layout
+    Source-backed version layout describing strings, verification data, and packed option width.
+  .PARAMETER Count
+    Trusted NumFileEntries value from the setup header.
+  .PARAMETER FileLocationCount
+    Trusted NumFileLocationEntries value used to validate every location index.
+  .PARAMETER SearchOffset
+    First possible table offset, immediately after the serialized setup header counts.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [Parameter(Mandatory)][ValidateRange(0, 500000)][int]$Count,
+    [Parameter(Mandatory)][ValidateRange(1, 500000)][int]$FileLocationCount,
+    [Parameter(Mandatory)][ValidateRange(0, [int]::MaxValue)][int]$SearchOffset
+  )
+
+  if ($Count -eq 0) { return @() }
+  if ($SearchOffset -ge $Bytes.Length - 4) { throw 'The Inno Setup file-entry table is outside the metadata block' }
+
+  $CandidateLayouts = [Collections.Generic.List[object]]::new()
+  $CandidateLayouts.Add($Layout)
+  if ($Layout.VersionNumber -lt 5500 -and $Layout.FileEntryStringCount -eq 10) {
+    # Some 5.3-era compilers use the pre-BeforeInstall nine-string entry while
+    # retaining the newer setup-data signature. Keep this compatibility layout
+    # local to table discovery and require a complete, coherent record chain.
+    $CompatibilityLayout = $Layout | Select-Object -Property *
+    $CompatibilityLayout.FileEntryStringCount = 9
+    $CompatibilityLayout.FileEntryTrailingSize += 4
+    $CandidateLayouts.Add($CompatibilityLayout)
+  }
+
+  $ConstantPrefix = $Layout.StringEncoding -eq 'Unicode' ? [byte[]](0x7B, 0x00) : [byte[]](0x7B)
+  $ConstantOffsets = @(Find-BinaryPattern -Bytes $Bytes -Pattern $ConstantPrefix -StartOffset $SearchOffset -Maximum 131072)
+
+  foreach ($CandidateLayout in $CandidateLayouts) {
+    # A generated uninstaller can begin with all strings empty. Other tables
+    # begin with SourceFilename, or an empty source followed by a {app} DestName.
+    $CandidateOffsets = [Collections.Generic.HashSet[int]]::new()
+    $EmptyStringCount = $CandidateLayout.FileEntryStringCount + $CandidateLayout.FileEntryAnsiStringCount
+    $EmptyPrefix = [byte[]]::new($EmptyStringCount * 4)
+    foreach ($Offset in Find-BinaryPattern -Bytes $Bytes -Pattern $EmptyPrefix -StartOffset $SearchOffset -Maximum 131072) {
+      $null = $CandidateOffsets.Add([int]$Offset)
+    }
+    foreach ($Offset in $ConstantOffsets) {
+      if ($Offset -ge 4) { $null = $CandidateOffsets.Add([int]$Offset - 4) }
+      if ($Offset -ge 8 -and [BitConverter]::ToInt32($Bytes, [int]$Offset - 8) -eq 0) {
+        $null = $CandidateOffsets.Add([int]$Offset - 8)
+      }
+    }
+
+    foreach ($CandidateStart in @($CandidateOffsets | Sort-Object)) {
+      if ($CandidateStart -lt $SearchOffset -or $CandidateStart -gt $Bytes.Length - 4) { continue }
+      $FirstLength = [BitConverter]::ToInt32($Bytes, $CandidateStart)
+      if ($FirstLength -lt 0 -or $FirstLength -gt $Script:INNO_MAX_ENTRY_STRING_SIZE -or
+        $FirstLength -gt $Bytes.Length - $CandidateStart - 4 -or
+        ($CandidateLayout.StringEncoding -eq 'Unicode' -and ($FirstLength % 2) -ne 0)) { continue }
+
+      $Entries = [System.Collections.Generic.List[object]]::new($Count)
+      $LocationIndexes = [System.Collections.Generic.HashSet[int]]::new()
+      $Cursor = $CandidateStart
+      $Valid = $true
+      $EmbeddedCount = 0
+      $NamedCount = 0
+      for ($Index = 0; $Index -lt $Count; $Index++) {
+        try {
+          $Entry = Read-InnoFileEntryAtOffset -Bytes $Bytes -Offset $Cursor -Layout $CandidateLayout -FileLocationCount $FileLocationCount
+        } catch {
+          $Valid = $false
+          break
+        }
+        if ($Entry.RecordEnd -le $Cursor) {
+          $Valid = $false
+          break
+        }
+        # Reject accidental chains through custom-message or language data. A
+        # decoded path may be empty for compiler-generated records, but populated
+        # source/destination fields must be printable text rather than replacement
+        # characters introduced by decoding arbitrary bytes.
+        foreach ($EntryPath in @($Entry.SourceFilename, $Entry.DestName)) {
+          if ([string]::IsNullOrWhiteSpace($EntryPath)) { continue }
+          $ContainsControl = $false
+          for ($CharacterIndex = 0; $CharacterIndex -lt $EntryPath.Length; $CharacterIndex++) {
+            if ([char]::IsControl($EntryPath[$CharacterIndex])) {
+              $ContainsControl = $true
+              break
+            }
+          }
+          if ($EntryPath.Contains([char]0xFFFD) -or $EntryPath.IndexOf([char]0) -ge 0 -or $ContainsControl) {
+            $Valid = $false
+            break
+          }
+        }
+        if (-not $Valid) { break }
+        $Entries.Add($Entry)
+        if (-not [string]::IsNullOrWhiteSpace($Entry.SourceFilename) -or
+          -not [string]::IsNullOrWhiteSpace($Entry.DestName)) { $NamedCount++ }
+        if ($Entry.LocationEntry -ge 0) {
+          $EmbeddedCount++
+          $null = $LocationIndexes.Add($Entry.LocationEntry)
+        }
+        $Cursor = $Entry.RecordEnd
+      }
+
+      $MinimumDistinctLocations = [Math]::Min(2, $FileLocationCount)
+      if ($Valid -and $Entries.Count -eq $Count -and $EmbeddedCount -gt 0 -and
+        $NamedCount -ge [Math]::Min(2, $Count) -and
+        $LocationIndexes.Count -ge $MinimumDistinctLocations) {
+        return $Entries.ToArray()
+      }
+    }
+  }
+
+  throw 'The complete Inno Setup file-entry table could not be located with the detected version layout'
 }
 
 function Find-InnoFileEntry {
@@ -3064,27 +3225,27 @@ function Write-InnoFilePayload {
     [System.Security.Cryptography.HashAlgorithmName]::SHA1
     $Hash = [System.Security.Cryptography.IncrementalHash]::CreateHash($HashAlgorithm)
 
-    $Remaining = [long]$Location.OriginalSize
-    $AddressOffset = [uint32]0
-
-    # Decode, reverse the optional CALL/JMP filter, hash, and write each block in
-    # one pass. The final path is replaced only after the stored digest matches.
-    while ($Remaining -gt 0) {
-      $BlockLength = [int][Math]::Min($Script:INNO_PAYLOAD_BUFFER_SIZE, $Remaining)
-      $TotalRead = 0
-      while ($TotalRead -lt $BlockLength) {
-        $Read = $PayloadStream.Read($Buffer, $TotalRead, $BlockLength - $TotalRead)
-        if ($Read -le 0) { throw 'The Inno Setup file payload is truncated' }
-        $TotalRead += $Read
+    # Inno applies the CALL/JMP transform to exact 64 KiB blocks. Delegate that
+    # source-defined framing to the bounded C# stream implementation; ordinary
+    # files keep the pooled copy loop and never materialize the full payload.
+    if ($Location.Flags.CallInstructionOptimized) {
+      Import-InnoCallTransform
+      [Dumplings.InstallerParsers.InnoCallTransform]::Decode(
+        $PayloadStream, $OutputStream, [long]$Location.OriginalSize, $Hash)
+    } else {
+      $Remaining = [long]$Location.OriginalSize
+      while ($Remaining -gt 0) {
+        $BlockLength = [int][Math]::Min($Script:INNO_PAYLOAD_BUFFER_SIZE, $Remaining)
+        $TotalRead = 0
+        while ($TotalRead -lt $BlockLength) {
+          $Read = $PayloadStream.Read($Buffer, $TotalRead, $BlockLength - $TotalRead)
+          if ($Read -le 0) { throw 'The Inno Setup file payload is truncated' }
+          $TotalRead += $Read
+        }
+        $Hash.AppendData($Buffer, 0, $BlockLength)
+        $OutputStream.Write($Buffer, 0, $BlockLength)
+        $Remaining -= $BlockLength
       }
-
-      if ($Location.Flags.CallInstructionOptimized) {
-        Convert-InnoCallInstructions5309 -Bytes $Buffer -AddressOffset $AddressOffset -Count $BlockLength
-        $AddressOffset = [uint32](([uint64]$AddressOffset + [uint64]$BlockLength) -band 0xFFFFFFFFL)
-      }
-      $Hash.AppendData($Buffer, 0, $BlockLength)
-      $OutputStream.Write($Buffer, 0, $BlockLength)
-      $Remaining -= $BlockLength
     }
 
     $ActualDigest = $Hash.GetHashAndReset()
@@ -3280,15 +3441,19 @@ function Test-InnoAppsAndFeaturesEntry {
 function Expand-InnoInstaller {
   <#
   .SYNOPSIS
-    Extract an exact named file from an unencrypted Inno Setup installer without executing it
+    Extract selected files from an unencrypted Inno Setup installer without executing it
   .PARAMETER Path
     The path to the Inno Setup installer
   .PARAMETER DestinationPath
     The directory where matching files should be written
   .PARAMETER Name
-    The exact source, destination, or base file name to extract; wildcard extraction is not supported
+    Optional wildcard matched against source, destination, and base file names. All embedded files are selected when omitted.
   .PARAMETER Language
     An optional Inno Setup language name used to disambiguate language-specific payloads
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple file entries resolve to the same path.
+  .PARAMETER MaximumExpandedBytes
+    Maximum aggregate bytes written, including aliases that share one payload location.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -3298,18 +3463,25 @@ function Expand-InnoInstaller {
     [Parameter(HelpMessage = 'The directory where matching files should be written')]
     [string]$DestinationPath,
 
-    [Parameter(Mandatory, HelpMessage = 'The exact source, destination, or base file name to extract')]
-    [string]$Name,
+    [Parameter(HelpMessage = 'The source, destination, or base file wildcard to extract')]
+    [string]$Name = '*',
 
     [Parameter(HelpMessage = 'An optional Inno Setup language name used to disambiguate language-specific payloads')]
-    [string]$Language
+    [string]$Language,
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt',
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = 17179869184
   )
 
   process {
-    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Split-Path -Path $InstallerPath -Parent
     }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
 
     $OffsetTable = Get-InnoOffsetTable -Path $InstallerPath
@@ -3340,17 +3512,38 @@ function Expand-InnoInstaller {
     $Header = Get-InnoExtractionHeader -Bytes $HeaderBlockInfo.Bytes -Layout $Layout
     $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBlockInfo.Bytes -Layout $Layout
     if ($Header.Counts.NumFileLocationEntries -le 0) { throw 'The Inno Setup installer does not contain embedded file locations' }
-    $FindArguments = @{
-      Bytes             = $HeaderBlockInfo.Bytes
-      Layout            = $Layout
-      Name              = $Name
-      FileLocationCount = $Header.Counts.NumFileLocationEntries
+    try {
+      $FileEntries = @(Get-InnoFileEntries -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Count $Header.Counts.NumFileEntries `
+          -FileLocationCount $Header.Counts.NumFileLocationEntries -SearchOffset $Header.SearchOffset)
+    } catch {
+      # A few legacy/custom 5.x compilers mix entry layouts that cannot prove a
+      # complete table. Preserve the established exact-name path for those
+      # installers, but never use it to satisfy wildcard or all-file extraction.
+      if ($Name.IndexOfAny([char[]]'*?[') -ge 0) { throw }
+      $FileEntries = @(
+        Find-InnoFileEntry -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Name $Name `
+          -FileLocationCount $Header.Counts.NumFileLocationEntries -Language $Language
+      )
     }
-    if ($PSBoundParameters.ContainsKey('Language')) { $FindArguments.Language = $Language }
-
-    # Resolve one deterministic file entry before opening the separate indexed
-    # location block that points to compressed payload bytes.
-    $Entry = Find-InnoFileEntry @FindArguments
+    $SelectedEntries = [System.Collections.Generic.List[object]]::new()
+    foreach ($Entry in $FileEntries) {
+      if ($Entry.LocationEntry -lt 0) { continue }
+      # Compiler-generated entries, including the uninstaller payload, can
+      # omit SourceFilename. Only match populated fields so the shared pattern
+      # helper never receives an invalid empty path.
+      $MatchesName = -not [string]::IsNullOrWhiteSpace($Entry.SourceFilename) -and
+      (Test-ExtractionPattern -Path $Entry.SourceFilename -Pattern $Name)
+      if (-not $MatchesName -and -not [string]::IsNullOrWhiteSpace($Entry.DestName)) {
+        $MatchesName = Test-ExtractionPattern -Path $Entry.DestName -Pattern $Name
+      }
+      if (-not $MatchesName) { continue }
+      if (-not [string]::IsNullOrWhiteSpace($Language) -and -not [string]::IsNullOrWhiteSpace($Entry.Languages)) {
+        $LanguageMatch = @($Entry.Languages -split '[,\s]+' | Where-Object { $_ -ieq $Language }).Count -gt 0
+        if (-not $LanguageMatch) { continue }
+      }
+      $SelectedEntries.Add($Entry)
+    }
+    if ($SelectedEntries.Count -eq 0) { throw "No Inno Setup file entry matched: $Name" }
 
     $FileStream = [System.IO.File]::OpenRead($InstallerPath)
     $Reader = [System.IO.BinaryReader]::new($FileStream)
@@ -3363,23 +3556,65 @@ function Expand-InnoInstaller {
       $FileStream.Close()
     }
 
-    if ($Entry.LocationEntry -lt 0) {
-      throw "The Inno Setup file entry '$($Entry.SourceFilename)' does not reference an embedded payload"
-    }
-    $Location = Read-InnoFileLocation -Bytes $LocationBlockInfo.Bytes -Count $Header.Counts.NumFileLocationEntries `
-      -Index $Entry.LocationEntry -Layout $Layout
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $LocationOutput = [Collections.Generic.Dictionary[int, string]]::new()
+    $LocationCache = [Collections.Generic.Dictionary[int, object]]::new()
+    $Files = [Collections.Generic.List[IO.FileInfo]]::new()
+    $ExpandedBytes = 0L
+    foreach ($Entry in $SelectedEntries) {
+      # DestName is an explicit installed path override. Otherwise the compiled
+      # SourceFilename contains the destination beneath an Inno constant such
+      # as {app}; remove that virtual root but preserve its subdirectories.
+      $RelativePath = if ([string]::IsNullOrWhiteSpace($Entry.DestName)) {
+        $Entry.SourceFilename
+      } else {
+        $Entry.DestName
+      }
+      if ($RelativePath -match '^\{[^}]+\}[\\/](.+)$') {
+        $RelativePath = $Matches[1]
+      }
+      if ([string]::IsNullOrWhiteSpace($RelativePath)) {
+        throw "The Inno Setup file entry at offset $($Entry.RecordOffset) has no extractable path"
+      }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) { continue }
 
-    # DestName controls the installed relative path; fall back to the source base
-    # name only when the compiled destination field is empty.
-    $RelativePath = if ([string]::IsNullOrWhiteSpace($Entry.DestName)) {
-      [System.IO.Path]::GetFileName($Entry.SourceFilename)
-    } else {
-      $Entry.DestName
-    }
-    $OutputPath = Resolve-InnoExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
+      $Location = $null
+      if (-not $LocationCache.TryGetValue($Entry.LocationEntry, [ref]$Location)) {
+        $Location = Read-InnoFileLocation -Bytes $LocationBlockInfo.Bytes -Count $Header.Counts.NumFileLocationEntries `
+          -Index $Entry.LocationEntry -Layout $Layout
+        $LocationCache[$Entry.LocationEntry] = $Location
+      }
+      if ($Location.OriginalSize -gt $MaximumExpandedBytes - $ExpandedBytes) {
+        throw "The selected Inno Setup payloads exceed the $MaximumExpandedBytes-byte limit"
+      }
 
-    return Write-InnoFilePayload -Path $InstallerPath -Offset1 $OffsetTable.Offset1 -Location $Location `
-      -CompressionMethod $HeaderFixedData.CompressMethod -OutputPath $OutputPath
+      $ExistingPath = $null
+      if ($LocationOutput.TryGetValue($Entry.LocationEntry, [ref]$ExistingPath)) {
+        # Several [Files] entries may install the same physical location under
+        # aliases. Reuse the authenticated first output instead of decoding the
+        # same solid chunk from its beginning for every alias.
+        $Source = [IO.File]::Open($ExistingPath, 'Open', 'Read', 'Read')
+        $Parent = [IO.Path]::GetDirectoryName($Target.Path)
+        if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
+        $Destination = [IO.File]::Open($Target.Path, 'Create', 'Write', 'None')
+        try {
+          $null = Copy-BoundedStream -Source $Source -Destination $Destination -MaximumBytes $Location.OriginalSize -ExpectedBytes $Location.OriginalSize
+        } finally {
+          $Destination.Dispose()
+          $Source.Dispose()
+        }
+        $File = Get-Item -LiteralPath $Target.Path -Force
+      } else {
+        $File = Write-InnoFilePayload -Path $InstallerPath -Offset1 $OffsetTable.Offset1 -Location $Location `
+          -CompressionMethod $HeaderFixedData.CompressMethod -OutputPath $Target.Path
+        $LocationOutput[$Entry.LocationEntry] = $File.FullName
+      }
+      $ExpandedBytes += $File.Length
+      $Files.Add($File)
+    }
+    return $Files.ToArray()
   }
 }
 

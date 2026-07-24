@@ -273,6 +273,8 @@ function Expand-SetupFactoryInstaller {
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
   .PARAMETER Name
     Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple records resolve to the same path.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
@@ -281,14 +283,17 @@ function Expand-SetupFactoryInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:SetupFactoryMaximumExpandedBytes
   )
   process {
-    $File = Get-Item -LiteralPath $Path -Force
+    $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-SetupFactory-' + [guid]::NewGuid().ToString('N'))
     }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -ItemType Directory -Path $DestinationPath -Force
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $Overlay = Get-SetupFactoryOverlayInfo -Path $File.FullName
     if ($Overlay.Version -eq 0) { throw 'The file is not a recognized Setup Factory 7-9 installer' }
 
@@ -310,13 +315,21 @@ function Expand-SetupFactoryInstaller {
       if ($SpecialSize -lt 0 -or $SpecialSize -gt $Script:SetupFactoryMaximumFileBytes) { throw 'The embedded Setup Factory runtime size is invalid' }
       if ($SpecialSize -gt $Stream.Length - $Stream.Position) { throw 'The embedded Setup Factory runtime is truncated' }
       if (Test-ExtractionPattern -Path 'irsetup.exe' -Pattern $Name) {
-        # The builder XORs only the first 2000 runtime bytes with 7; the remainder is stored as-is.
-        $Runtime = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$SpecialSize)
-        for ($Index = 0; $Index -lt [Math]::Min(2000, $Runtime.Length); $Index++) { $Runtime[$Index] = $Runtime[$Index] -bxor 7 }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath 'irsetup.exe'
-        [IO.File]::WriteAllBytes($OutputPath, $Runtime)
-        $Written += $Runtime.Length
-        Get-Item -LiteralPath $OutputPath
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath 'irsetup.exe' `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if ($Target.ShouldWrite) {
+          # The builder XORs only the first 2000 runtime bytes with 7; the remainder is stored as-is.
+          if ($SpecialSize -gt $MaximumExpandedBytes - $Written) {
+            throw 'The Setup Factory expansion exceeds the configured limit'
+          }
+          $Runtime = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$SpecialSize)
+          for ($Index = 0; $Index -lt [Math]::Min(2000, $Runtime.Length); $Index++) { $Runtime[$Index] = $Runtime[$Index] -bxor 7 }
+          [IO.File]::WriteAllBytes($Target.Path, $Runtime)
+          $Written += $Runtime.Length
+          Get-Item -LiteralPath $Target.Path
+        } else {
+          $Stream.Position += $SpecialSize
+        }
       } else {
         $Stream.Position += $SpecialSize
       }
@@ -330,11 +343,19 @@ function Expand-SetupFactoryInstaller {
         if ($LuaSize -lt 0 -or $LuaSize -gt $Script:SetupFactoryMaximumFileBytes) { throw 'The embedded Lua runtime size is invalid' }
         if ($LuaSize -gt $Stream.Length - $Stream.Position) { throw 'The embedded Lua runtime is truncated' }
         if (Test-ExtractionPattern -Path 'lua5.1.dll' -Pattern $Name) {
-          $Lua = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$LuaSize)
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath 'lua5.1.dll'
-          [IO.File]::WriteAllBytes($OutputPath, $Lua)
-          $Written += $Lua.Length
-          Get-Item -LiteralPath $OutputPath
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath 'lua5.1.dll' `
+            -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if ($Target.ShouldWrite) {
+            if ($LuaSize -gt $MaximumExpandedBytes - $Written) {
+              throw 'The Setup Factory expansion exceeds the configured limit'
+            }
+            $Lua = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$LuaSize)
+            [IO.File]::WriteAllBytes($Target.Path, $Lua)
+            $Written += $Lua.Length
+            Get-Item -LiteralPath $Target.Path
+          } else {
+            $Stream.Position += $LuaSize
+          }
         } else {
           $Stream.Position += $LuaSize
         }
@@ -356,6 +377,13 @@ function Expand-SetupFactoryInstaller {
           $Stream.Position += $PackedSize
           continue
         }
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $EntryName `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if (-not $Target.ShouldWrite) {
+          # Skipped collisions consume neither decompression CPU nor the output budget.
+          $Stream.Position += $PackedSize
+          continue
+        }
         # Decode within both the per-file and operation-wide limits, then authenticate the expanded
         # bytes before exposing them at a traversal-safe destination.
         $Packed = Read-SetupFactoryExactBytes -Stream $Stream -Count ([int]$PackedSize)
@@ -363,11 +391,10 @@ function Expand-SetupFactoryInstaller {
         if ($ExpectedCrc -ne 0 -and (Get-SetupFactoryCrc32 -Bytes $Expanded) -ne $ExpectedCrc) { throw "The Setup Factory entry '$EntryName' failed its CRC check" }
         $Written += $Expanded.Length
         if ($Written -gt $MaximumExpandedBytes) { throw 'The Setup Factory expansion exceeds the configured limit' }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $EntryName
-        $Parent = [IO.Path]::GetDirectoryName($OutputPath)
+        $Parent = [IO.Path]::GetDirectoryName($Target.Path)
         if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-        [IO.File]::WriteAllBytes($OutputPath, $Expanded)
-        Get-Item -LiteralPath $OutputPath
+        [IO.File]::WriteAllBytes($Target.Path, $Expanded)
+        Get-Item -LiteralPath $Target.Path
       }
     } finally {
       $Stream.Dispose()
@@ -393,7 +420,7 @@ function Get-SetupFactoryInfo {
     try {
       # irsetup.dat owns session variables and scripted actions, so extract only that record rather
       # than expanding every application payload.
-      $Extracted = @(Expand-SetupFactoryInstaller -Path $File.FullName -DestinationPath $Temporary -Name 'irsetup.dat')
+      $Extracted = @(Expand-SetupFactoryInstaller -Path $File.FullName -DestinationPath $Temporary -Name 'irsetup.dat' -CollisionAction Rename)
       $ScriptPath = Join-Path $Temporary 'irsetup.dat'
       if (-not (Test-Path -LiteralPath $ScriptPath)) { throw 'The Setup Factory installer does not contain irsetup.dat' }
       $ScriptFile = Get-Item -LiteralPath $ScriptPath -Force

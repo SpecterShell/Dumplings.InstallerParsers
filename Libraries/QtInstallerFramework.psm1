@@ -939,12 +939,20 @@ function Expand-QtInstallerFrameworkPackageArchive {
     [Parameter(Mandatory, HelpMessage = 'The file name or wildcard pattern')]
     [string]$Name,
 
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename',
+
+    [System.Collections.Generic.ISet[string]]$ReservedPath,
+
     [Parameter(Mandatory, HelpMessage = 'The maximum number of expanded bytes')]
     [long]$MaximumExpandedBytes
   )
 
   Import-QtInstallerFrameworkSharpCompress
-  $Archive = [SharpCompress.Archives.ArchiveFactory]::Open((Get-Item -Path $Path -Force).FullName)
+  $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  if (-not $ReservedPath) { $ReservedPath = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
+  $Archive = [SharpCompress.Archives.ArchiveFactory]::Open($Path)
   try {
     $Entries = @($Archive.Entries)
     if ($Entries.Count -gt $QTIFW_MAX_EXPANDED_FILES) {
@@ -952,7 +960,6 @@ function Expand-QtInstallerFrameworkPackageArchive {
     }
 
     $Files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    $WrittenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $ExpandedBytes = [long]0
     # Export only selected regular entries. Links, duplicate paths, and inaccurate expanded sizes
     # are rejected before they can alter the destination tree.
@@ -968,18 +975,15 @@ function Expand-QtInstallerFrameworkPackageArchive {
 
       $EntrySize = [long]$ArchiveEntry.Size
       if ($EntrySize -lt 0) { throw "The Qt Installer Framework package entry has an unknown size: $($ArchiveEntry.Key)" }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPath
+      if (-not $Target.ShouldWrite) { continue }
       $ExpandedBytes += $EntrySize
       if ($ExpandedBytes -gt $MaximumExpandedBytes) {
         throw "The selected Qt Installer Framework package files exceed the $MaximumExpandedBytes-byte limit"
       }
 
-      $OutputPath = Resolve-QtInstallerFrameworkExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-      if (-not $WrittenPaths.Add($OutputPath)) {
-        throw "The Qt Installer Framework package archive contains a duplicate output path: $($ArchiveEntry.Key)"
-      }
-      if (Test-Path -LiteralPath $OutputPath) {
-        throw "The Qt Installer Framework package archive would overwrite an existing output path: $($ArchiveEntry.Key)"
-      }
+      $OutputPath = $Target.Path
       $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
 
       try {
@@ -1037,6 +1041,8 @@ function Expand-QtInstallerFramework {
     The file name or wildcard pattern to extract
   .PARAMETER MaximumExpandedBytes
     The maximum total number of bytes written to the destination
+  .PARAMETER CollisionAction
+    Behavior when a resource path already exists or multiple resources resolve to the same path.
   #>
   [OutputType([string])]
   param (
@@ -1051,19 +1057,23 @@ function Expand-QtInstallerFramework {
 
     [Parameter(HelpMessage = 'The maximum total number of expanded bytes')]
     [ValidateRange(1, [long]::MaxValue)]
-    [long]$MaximumExpandedBytes = $QTIFW_MAX_EXPANDED_BYTES
+    [long]$MaximumExpandedBytes = $QTIFW_MAX_EXPANDED_BYTES,
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
     # Parse and validate the trailer once, then keep one installer stream open for all segment
     # copies. Nested 7z readers receive isolated temporary files because they require seeking.
-    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
     $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
     if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
 
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "Dumplings-QtIFW-$([System.Guid]::NewGuid())"
     }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $DestinationPath = (New-Item -Path $DestinationPath -ItemType Directory -Force).FullName
 
     $WrittenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1086,16 +1096,16 @@ function Expand-QtInstallerFramework {
           foreach ($Resource in $RccResources) {
             $RelativePath = ([string]$Resource.Path).TrimStart(':', '/', '\')
             if (-not (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name)) { continue }
-            $OutputPath = Resolve-QtInstallerFrameworkExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-            if (-not $WrittenPaths.Add($OutputPath)) {
-              throw "The Qt Installer Framework metadata contains a duplicate output path: $RelativePath"
-            }
+            $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+              -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
+            if (-not $Target.ShouldWrite) { continue }
 
             $WrittenBytes += $Resource.Data.Length
             if ($WrittenBytes -gt $MaximumExpandedBytes) {
               throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
             }
-            $null = Write-QtInstallerFrameworkBuffer -Bytes $Resource.Data -DestinationPath $DestinationPath -RelativePath $RelativePath
+            $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+            [IO.File]::WriteAllBytes($Target.Path, $Resource.Data)
             $WrittenFileCount++
             if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
               throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
@@ -1104,18 +1114,19 @@ function Expand-QtInstallerFramework {
         } else {
           $RelativePath = "metadata/QResources/$MetaIndex.rcc"
           if (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name) {
-            $OutputPath = Resolve-QtInstallerFrameworkExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-            if (-not $WrittenPaths.Add($OutputPath)) {
-              throw "The Qt Installer Framework metadata contains a duplicate output path: $RelativePath"
-            }
-            $WrittenBytes += $Bytes.Length
-            if ($WrittenBytes -gt $MaximumExpandedBytes) {
-              throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
-            }
-            $null = Write-QtInstallerFrameworkBuffer -Bytes $Bytes -DestinationPath $DestinationPath -RelativePath $RelativePath
-            $WrittenFileCount++
-            if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
-              throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
+            $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+              -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
+            if ($Target.ShouldWrite) {
+              $WrittenBytes += $Bytes.Length
+              if ($WrittenBytes -gt $MaximumExpandedBytes) {
+                throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
+              }
+              $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+              [IO.File]::WriteAllBytes($Target.Path, $Bytes)
+              $WrittenFileCount++
+              if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
+                throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
+              }
             }
           }
         }
@@ -1142,19 +1153,19 @@ function Expand-QtInstallerFramework {
 
             $RawRelativePath = "metadata/$($Collection.Name)/$($Resource.Name)"
             if (Test-QtInstallerFrameworkExtractionMatch -Path $RawRelativePath -Name $Name) {
-              $RawOutputPath = Resolve-QtInstallerFrameworkExtractionPath -DestinationPath $DestinationPath -RelativePath $RawRelativePath
-              if (-not $WrittenPaths.Add($RawOutputPath)) {
-                throw "The Qt Installer Framework resources contain a duplicate output path: $RawRelativePath"
-              }
-              $WrittenBytes += $Resource.Segment.Length
-              if ($WrittenBytes -gt $MaximumExpandedBytes) {
-                throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
-              }
-              $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($RawOutputPath)) -ItemType Directory -Force
-              [System.IO.File]::Copy($TemporaryArchivePath, $RawOutputPath, $true)
-              $WrittenFileCount++
-              if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
-                throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
+              $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RawRelativePath `
+                -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
+              if ($Target.ShouldWrite) {
+                $WrittenBytes += $Resource.Segment.Length
+                if ($WrittenBytes -gt $MaximumExpandedBytes) {
+                  throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
+                }
+                $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+                [System.IO.File]::Copy($TemporaryArchivePath, $Target.Path, $true)
+                $WrittenFileCount++
+                if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
+                  throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
+                }
               }
             }
 
@@ -1165,12 +1176,11 @@ function Expand-QtInstallerFramework {
               if ($RemainingExpandedBytes -le 0) {
                 throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
               }
-              $ArchiveResult = Expand-QtInstallerFrameworkPackageArchive -Path $TemporaryArchivePath -DestinationPath $DestinationPath -RelativeRoot $ArchiveRoot -Name $Name -MaximumExpandedBytes $RemainingExpandedBytes
+              $ArchiveResult = Expand-QtInstallerFrameworkPackageArchive -Path $TemporaryArchivePath -DestinationPath $DestinationPath `
+                -RelativeRoot $ArchiveRoot -Name $Name -CollisionAction $CollisionAction -ReservedPath $WrittenPaths `
+                -MaximumExpandedBytes $RemainingExpandedBytes
               $WrittenBytes += $ArchiveResult.Bytes
               foreach ($ExtractedFile in @($ArchiveResult.Files)) {
-                if (-not $WrittenPaths.Add($ExtractedFile.FullName)) {
-                  throw "The Qt Installer Framework resources contain a duplicate output path: $($ExtractedFile.FullName)"
-                }
                 $WrittenFileCount++
                 if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
                   throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"

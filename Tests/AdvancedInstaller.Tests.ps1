@@ -185,7 +185,7 @@ Describe 'Advanced Installer parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      Expand-AdvancedInstaller -Path $Fixture -DestinationPath $ExpandedPath | Out-Null
+      Expand-AdvancedInstaller -Path $Fixture -DestinationPath $ExpandedPath -CollisionAction Rename | Out-Null
       Test-Path -Path (Join-Path $ExpandedPath '5DE3EEA\TeraCopy.msi') | Should -BeTrue
       Test-Path -Path (Join-Path $ExpandedPath '5DE3EEA\TeraCopy.x64.msi') | Should -BeTrue
     } finally {
@@ -213,7 +213,7 @@ Describe 'Advanced Installer parser' {
     }
 
     try {
-      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
+      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath -CollisionAction Rename | Out-Null
       Test-Path -Path (Join-Path $ExpandedPath 'ABCDEF0\FILES.7z') | Should -BeTrue
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue

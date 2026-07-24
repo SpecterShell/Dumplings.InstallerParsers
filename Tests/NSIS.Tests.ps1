@@ -138,6 +138,121 @@ Describe 'NSIS parser' {
     $Result.Matches | Should -BeTrue
   }
 
+  It 'Should extract a selected NSISBI payload across MTW record boundaries' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-mtw'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Result = & $Module {
+        param($ExpandedPath)
+
+        $FileBytes = [Text.Encoding]::UTF8.GetBytes((('MTW payload data ' * 6000) -join ''))
+        $HeaderSize = 32
+        $DataOffset = 7
+        $Logical = [IO.MemoryStream]::new()
+        $Logical.Write([BitConverter]::GetBytes([uint64]$HeaderSize))
+        $Logical.Write([byte[]]::new($HeaderSize + $DataOffset))
+        $Logical.Write([BitConverter]::GetBytes([uint64]$FileBytes.Length))
+        $Logical.Write($FileBytes)
+        $LogicalBytes = $Logical.ToArray()
+        $Logical.Dispose()
+
+        $MtwBytes = [Collections.Generic.List[byte]]::new()
+        for ($Offset = 0; $Offset -lt $LogicalBytes.Length; $Offset += 30000) {
+          $Length = [Math]::Min(30000, $LogicalBytes.Length - $Offset)
+          $CompressedBuffer = [IO.MemoryStream]::new()
+          $Encoder = [IO.Compression.ZLibStream]::new($CompressedBuffer, [IO.Compression.CompressionLevel]::Optimal, $true)
+          try { $Encoder.Write($LogicalBytes, $Offset, $Length) } finally { $Encoder.Dispose() }
+          $Compressed = $CompressedBuffer.ToArray()
+          $CompressedBuffer.Dispose()
+          $MtwBytes.Add([byte]($Compressed.Length -band 0xFF))
+          $MtwBytes.Add([byte](($Compressed.Length -shr 8) -band 0xFF))
+          $MtwBytes.Add([byte](($Compressed.Length -shr 16) -band 0xFF))
+          $MtwBytes.AddRange($Compressed)
+        }
+        $MtwBytes.AddRange([byte[]](0, 0, 0))
+
+        $Stream = [IO.MemoryStream]::new($MtwBytes.ToArray(), $false)
+        $OutputPath = Join-Path $ExpandedPath 'payload.bin'
+        $HeaderData = [pscustomobject]@{
+          PayloadDataOffset = 0L
+          PayloadDataLength = $Stream.Length
+          PackedSizeWidth   = 8
+          HeaderSize        = $HeaderSize
+          Compression       = 'Mtw-Zlib'
+        }
+        $Payload = [pscustomobject]@{
+          SourcePath = 'payload.bin'; RelativePath = 'payload.bin'; OutputPath = $OutputPath
+          DataOffset = [uint64]$DataOffset; TimeLow = [uint32]0; TimeHigh = [uint32]0; Crc32 = $null
+        }
+        try {
+          $File = @(Expand-NSISMtwPayloads -Stream $Stream -HeaderData $HeaderData -Payload @($Payload) -MaximumExpandedBytes 1048576)[0]
+        } finally { $Stream.Dispose() }
+        $OutputStream = [IO.File]::OpenRead($File.FullName)
+        try { $ActualBytes = Read-BinaryBytes -Stream $OutputStream -Offset 0 -Count ([int]$OutputStream.Length) } finally { $OutputStream.Dispose() }
+
+        [pscustomobject]@{
+          Length  = $File.Length
+          Matches = [Linq.Enumerable]::SequenceEqual([byte[]]$FileBytes, [byte[]]$ActualBytes)
+        }
+      } $ExpandedPath
+
+      $Result.Length | Should -BeGreaterThan 30000
+      $Result.Matches | Should -BeTrue
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should extract stored non-solid aliases within the exact output budget' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-stored-alias'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Result = & $Module {
+        param($ExpandedPath)
+
+        $FileBytes = [Text.Encoding]::UTF8.GetBytes('one physical record with two compiled names')
+        $Archive = [IO.MemoryStream]::new()
+        $Archive.Write([byte[]]::new(4))
+        $Archive.Write([BitConverter]::GetBytes([uint32]$FileBytes.Length))
+        $Archive.Write($FileBytes)
+        $Archive.Position = 0
+        $HeaderData = [pscustomobject]@{
+          FirstHeaderOffset    = 0L
+          ArchiveSize          = $Archive.Length
+          PayloadOffset        = 0L
+          PackedSizeWidth      = 4
+          CompressedHeaderSize = 0L
+          Compression          = 'None'
+        }
+        $Payload = @(
+          [pscustomobject]@{ SourcePath = 'first.bin'; RelativePath = 'first.bin'; OutputPath = (Join-Path $ExpandedPath 'first.bin'); DataOffset = [uint64]0; TimeLow = [uint32]0; TimeHigh = [uint32]0; Crc32 = $null }
+          [pscustomobject]@{ SourcePath = 'second.bin'; RelativePath = 'second.bin'; OutputPath = (Join-Path $ExpandedPath 'second.bin'); DataOffset = [uint64]0; TimeLow = [uint32]0; TimeHigh = [uint32]0; Crc32 = $null }
+        )
+        try {
+          $Files = @(Expand-NSISNonSolidPayloads -Stream $Archive -HeaderData $HeaderData -Payload $Payload -MaximumExpandedBytes ($FileBytes.Length * 2))
+        } finally { $Archive.Dispose() }
+
+        [pscustomobject]@{
+          Count   = $Files.Count
+          Lengths = @($Files | ForEach-Object Length)
+          First   = Get-Content -LiteralPath $Files[0].FullName -Raw
+          Second  = Get-Content -LiteralPath $Files[1].FullName -Raw
+        }
+      } $ExpandedPath
+
+      $Result.Count | Should -Be 2
+      $Result.Lengths | Should -Be @(43, 43)
+      $Result.First | Should -Be 'one physical record with two compiled names'
+      $Result.Second | Should -Be $Result.First
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should recover uninstall metadata from source-accurate EW_WRITEREG entries' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -500,6 +615,40 @@ Describe 'NSIS parser' {
     $Info.ProductCode | Should -Be 'alist-desktop'
   }
 
+  It 'Should extract a selected executable from a solid LZMA AList installer' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-alist'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'alist-desktop.exe' -MaximumExpandedBytes 33554432 -CollisionAction Rename)
+
+      $Extracted | Should -HaveCount 1
+      $Extracted[0].VersionInfo.FileVersion | Should -Be '3.60.0'
+      $Signature = [byte[]]::new(2)
+      $ExtractedStream = [IO.File]::OpenRead($Extracted[0].FullName)
+      try { $null = $ExtractedStream.Read($Signature, 0, $Signature.Length) } finally { $ExtractedStream.Dispose() }
+      $Signature | Should -Be @(0x4D, 0x5A)
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should extract every catalogued AList payload when Name is omitted' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-alist-all'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -MaximumExpandedBytes 1073741824 -CollisionAction Rename)
+
+      $Extracted.Count | Should -BeGreaterThan 1
+      $Extracted.Name | Should -Contain 'alist-desktop.exe'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should read static metadata from a dual-scope BongoCat NSIS installer' {
     $Fixture = Get-InstallerFixture -Name 'BongoCat_1.1.0_x64-setup.exe' -Url 'https://github.com/ayangweb/BongoCat/releases/download/v1.1.0/BongoCat_1.1.0_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture
@@ -511,6 +660,21 @@ Describe 'NSIS parser' {
     $Info.ProductCode | Should -Be 'BongoCat'
     $Info.Publisher | Should -Be 'ayangweb'
     $IsElectronBuilder | Should -BeFalse
+  }
+
+  It 'Should extract a selected executable after skipping earlier solid BongoCat records' {
+    $Fixture = Get-InstallerFixture -Name 'BongoCat_1.1.0_x64-setup.exe' -Url 'https://github.com/ayangweb/BongoCat/releases/download/v1.1.0/BongoCat_1.1.0_x64-setup.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-bongocat'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'bongo-cat.exe' -MaximumExpandedBytes 33554432 -CollisionAction Rename)
+
+      $Extracted | Should -HaveCount 1
+      $Extracted[0].VersionInfo.FileVersion | Should -Be '1.1.0'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 
   It 'Should read static metadata from a dual-scope RedPanda C++ NSIS installer' {
@@ -553,6 +717,37 @@ Describe 'NSIS parser' {
     $Info.Publisher | Should -Be 'Netease'
     $Info.Scope | Should -Be 'user'
     $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should extract a selected non-solid vendor LZMA2 payload from UU Remote' {
+    $Fixture = Get-InstallerFixture -Name 'UURemote_Setup_4.34.0.8979.exe' `
+      -Url 'https://a56.gdl.netease.com/UURemote_Setup_4.34.0.8979_0723104500_gwqd.exe' `
+      -Sha256 '237EB74939A62935AE3E2B1FD43C484D634CCD96FB1094BA764C8CB64065DC9A'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-uuremote'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'QtLGPL3License.txt' -MaximumExpandedBytes 1048576 -CollisionAction Rename)
+
+      $Extracted | Should -HaveCount 1
+      $Extracted[0].Length | Should -Be 7793
+      Get-Content -LiteralPath $Extracted[0].FullName -TotalCount 1 | Should -Be 'GNU LESSER GENERAL PUBLIC LICENSE'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should reject payload output beyond the extraction limit without retaining a partial file' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-limit'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      { Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'alist-desktop.exe' -MaximumExpandedBytes 1024 -CollisionAction Rename } | Should -Throw
+      @(Get-ChildItem -LiteralPath $ExpandedPath -File -Recurse -ErrorAction SilentlyContinue) | Should -HaveCount 0
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 
   It 'Should locate an archive aligned relative to an embedded stub and reject orphan headers' {

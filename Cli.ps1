@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param (
   [Parameter(Mandatory, HelpMessage = 'The installer parser action to invoke')]
-  [ValidateSet('NSIS.GetInfo', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
+  [ValidateSet('NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
   [string]$Action,
 
   [Parameter(HelpMessage = 'The path to the installer')]
@@ -15,6 +15,10 @@ param (
 
   [Parameter(HelpMessage = 'The file name or wildcard pattern to extract')]
   [string]$Name,
+
+  [Parameter(HelpMessage = 'The behavior when an extracted path already exists')]
+  [ValidateSet('Error', 'Skip', 'Overwrite', 'Rename')]
+  [string]$CollisionAction = 'Rename',
 
   [Parameter(HelpMessage = 'The Inno Setup language selector')]
   [string]$Language,
@@ -41,6 +45,17 @@ try {
       Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
       Get-NSISInfo -Path $Path
     }
+    'NSIS.Expand' {
+      Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
+      $ExpandArguments = @{
+        Path            = $Path
+        CollisionAction = $CollisionAction
+      }
+      if (-not [string]::IsNullOrWhiteSpace($Name)) { $ExpandArguments.Name = $Name }
+      if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
+      if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
+      @(Expand-NSISInstaller @ExpandArguments).ForEach({ $_.FullName })
+    }
     'NSIS.GetElectronBuilderInfo' {
       Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
       Get-ElectronBuilderNSISInfo -Path $Path
@@ -60,11 +75,13 @@ try {
     'Inno.Expand' {
       Import-Module (Join-Path $LibraryPath 'Inno.psm1') -Force
       $ExpandArguments = @{
-        Path = $Path
-        Name = $Name
+        Path            = $Path
+        Name            = [string]::IsNullOrWhiteSpace($Name) ? '*' : $Name
+        CollisionAction = $CollisionAction
       }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if (-not [string]::IsNullOrWhiteSpace($Language)) { $ExpandArguments.Language = $Language }
+      if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
 
       @(Expand-InnoInstaller @ExpandArguments).ForEach({ $_.FullName })
     }
@@ -75,8 +92,10 @@ try {
     'AdvancedInstaller.Expand' {
       Import-Module (Join-Path $LibraryPath 'AdvancedInstaller.psm1') -Force
       $ExpandArguments = @{
-        Path = $Path
+        Path            = $Path
+        CollisionAction = $CollisionAction
       }
+      if (-not [string]::IsNullOrWhiteSpace($Name)) { $ExpandArguments.Name = $Name }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
 
       Expand-AdvancedInstaller @ExpandArguments
@@ -92,8 +111,9 @@ try {
     'SetupFactory.Expand' {
       Import-Module (Join-Path $LibraryPath 'SetupFactory.psm1') -Force
       $ExpandArguments = @{
-        Path = $Path
-        Name = $Name
+        Path            = $Path
+        Name            = [string]::IsNullOrWhiteSpace($Name) ? '*' : $Name
+        CollisionAction = $CollisionAction
       }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
@@ -102,7 +122,8 @@ try {
     'QtInstallerFramework.Expand' {
       Import-Module (Join-Path $LibraryPath 'QtInstallerFramework.psm1') -Force
       $ExpandArguments = @{
-        Path = $Path
+        Path            = $Path
+        CollisionAction = $CollisionAction
       }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if (-not [string]::IsNullOrWhiteSpace($Name)) { $ExpandArguments.Name = $Name }

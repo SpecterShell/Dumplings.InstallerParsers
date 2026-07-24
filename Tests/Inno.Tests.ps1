@@ -61,20 +61,20 @@ Describe 'Inno parser' {
   It 'Should use source-backed header layouts at every supported format transition' {
     InModuleScope Inno {
       $Cases = @(
-        @{ Version = 5310; Strings = 26; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
-        @{ Version = 5500; Strings = 27; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
-        @{ Version = 5506; Strings = 28; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
-        @{ Version = 5507; Strings = 28; Privilege = 135; Override = $null; Architecture = 139; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
-        @{ Version = 6000; Strings = 30; Privilege = 144; Override = 145; Architecture = 149; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
-        @{ Version = 6300; Strings = 32; Privilege = 144; Override = 145; Architecture = $null; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 75; Digest = 'SHA1'; StartSize = 4 }
-        @{ Version = 6402; Strings = 33; Privilege = 156; Override = 157; Architecture = $null; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 87; Digest = 'SHA256'; StartSize = 4 }
-        @{ Version = 6403; Strings = 33; Privilege = 156; Override = 157; Architecture = $null; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; LocationSize = 85; Digest = 'SHA256'; StartSize = 4 }
-        @{ Version = 6500; Strings = 34; Privilege = 112; Override = 113; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; LocationSize = 85; Digest = 'SHA256'; StartSize = 4 }
-        @{ Version = 6502; Strings = 34; Privilege = 120; Override = 121; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
-        @{ Version = 6600; Strings = 34; Privilege = 128; Override = 129; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
-        @{ Version = 6601; Strings = 34; Privilege = 129; Override = 130; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
-        @{ Version = 6700; Strings = 39; Privilege = 139; Override = 140; Architecture = $null; Int64 = $true; FileStrings = 15; FileAnsiStrings = 1; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
-        @{ Version = 7000; Strings = 39; Privilege = 143; Override = 144; Architecture = $null; Int64 = $true; FileStrings = 15; FileAnsiStrings = 1; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
+        @{ Version = 5310; Strings = 26; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 5500; Strings = 27; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 16; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 5506; Strings = 28; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 16; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 5507; Strings = 28; Privilege = 135; Override = $null; Architecture = 139; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 16; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 6000; Strings = 30; Privilege = 144; Override = 145; Architecture = 149; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 0; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 6300; Strings = 32; Privilege = 144; Override = 145; Architecture = $null; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 0; FileOptions = 4; FileBitness = $false; LocationSize = 75; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 6402; Strings = 33; Privilege = 156; Override = 157; Architecture = $null; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 0; FileOptions = 4; FileBitness = $false; LocationSize = 87; Digest = 'SHA256'; StartSize = 4 }
+        @{ Version = 6403; Strings = 33; Privilege = 156; Override = 157; Architecture = $null; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 0; FileOptions = 4; FileBitness = $false; LocationSize = 85; Digest = 'SHA256'; StartSize = 4 }
+        @{ Version = 6500; Strings = 34; Privilege = 112; Override = 113; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; FileVersionData = 20; FileTrailing = 0; FileOptions = 5; FileBitness = $false; LocationSize = 85; Digest = 'SHA256'; StartSize = 4 }
+        @{ Version = 6502; Strings = 34; Privilege = 120; Override = 121; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; FileVersionData = 20; FileTrailing = 0; FileOptions = 5; FileBitness = $false; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
+        @{ Version = 6600; Strings = 34; Privilege = 128; Override = 129; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; FileVersionData = 20; FileTrailing = 0; FileOptions = 5; FileBitness = $false; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
+        @{ Version = 6601; Strings = 34; Privilege = 129; Override = 130; Architecture = $null; Int64 = $false; FileStrings = 15; FileAnsiStrings = 1; FileVersionData = 20; FileTrailing = 0; FileOptions = 5; FileBitness = $false; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
+        @{ Version = 6700; Strings = 39; Privilege = 139; Override = 140; Architecture = $null; Int64 = $true; FileStrings = 15; FileAnsiStrings = 1; FileVersionData = 20; FileTrailing = 0; FileOptions = 8; FileBitness = $false; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
+        @{ Version = 7000; Strings = 39; Privilege = 143; Override = 144; Architecture = $null; Int64 = $true; FileStrings = 15; FileAnsiStrings = 1; FileVersionData = 20; FileTrailing = 0; FileOptions = 8; FileBitness = $true; LocationSize = 89; Digest = 'SHA256'; StartSize = 8 }
       )
 
       foreach ($Case in $Cases) {
@@ -86,6 +86,10 @@ Describe 'Inno parser' {
         $Layout.UsesInt64BlockHeader | Should -Be $Case.Int64
         $Layout.FileEntryStringCount | Should -Be $Case.FileStrings
         $Layout.FileEntryAnsiStringCount | Should -Be $Case.FileAnsiStrings
+        $Layout.FileEntryVersionDataSize | Should -Be $Case.FileVersionData
+        $Layout.FileEntryTrailingSize | Should -Be $Case.FileTrailing
+        $Layout.FileEntryOptionsSize | Should -Be $Case.FileOptions
+        $Layout.FileEntryHasBitness | Should -Be $Case.FileBitness
         $Layout.FileLocationEntrySize | Should -Be $Case.LocationSize
         $Layout.FileLocationDigestAlgorithm | Should -Be $Case.Digest
         $Layout.FileLocationStartOffsetSize | Should -Be $Case.StartSize
@@ -467,7 +471,7 @@ Describe 'Inno parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'BK5WIN.EXE'
+      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'BK5WIN.EXE' -CollisionAction Rename
       $Extracted | Should -HaveCount 1
       (Get-Item $Extracted[0].FullName).VersionInfo.FileVersion | Should -Be '5.55.3.7499'
     } finally {
@@ -481,10 +485,10 @@ Describe 'Inno parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'WinSCP.exe'
+      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'WinSCP.exe' -CollisionAction Rename
       $Extracted | Should -HaveCount 1
       (Get-FileHash -Path $Extracted[0].FullName -Algorithm SHA256).Hash |
-        Should -Be '7493AFBA8559470CF39FEAC96B9A05D70530AA14F1A0172E44E878AF61BC7BFD'
+        Should -Be 'CF948EAF8429C582636953E8B6B82097C8BB0A55111EC57E5F890E27DBAB70D9'
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -496,10 +500,10 @@ Describe 'Inno parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'ISCC.exe'
+      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'ISCC.exe' -CollisionAction Rename
       $Extracted | Should -HaveCount 1
       (Get-FileHash -Path $Extracted[0].FullName -Algorithm SHA256).Hash |
-        Should -Be 'C925160C8686390A4420FF9C35DED0654E2B7D4B432B0BF18290B843FC2E5B12'
+        Should -Be '0FF6140D641F84B64204A2C4D52207C6FC437C9F4DB8779C83083D84F7E3D70D'
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -511,16 +515,16 @@ Describe 'Inno parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'Kiro.exe'
+      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'Kiro.exe' -CollisionAction Rename
       $Extracted | Should -HaveCount 1
       (Get-FileHash -Path $Extracted[0].FullName -Algorithm SHA256).Hash |
-        Should -Be '488A91B53D17CA8B52E25F143197875AEF7DD50E1BD51BAD749F559C17F52AEC'
+        Should -Be '70C5E19765BF5E8031EF0A7C82BABBC4E4A87FB052D990A392592A7D5E941908'
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 
-  It 'Should extract the English VUSC launch file statically from the VUSC installer' {
+  It 'Should extract every catalogued file when Name is omitted from the VUSC installer' {
     $Fixture = Get-InstallerFixture -Name 'VUSC_setup_709.zip' -Url 'https://www.ok2kkw.com/vusc/vusc4win/VUSC_setup_709.zip'
     $ArchivePath = Join-Path $Script:FixtureDirectory 'vusc-archive'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'vusc-expanded'
@@ -534,10 +538,14 @@ Describe 'Inno parser' {
       $Info.Signature | Should -Be 'Inno Setup Setup Data (5.5.7)'
       $Info.PrivilegesRequired | Should -Be 'admin'
       $Info.CompressMethod | Should -Be 'Lzma2'
-      $Extracted = Expand-InnoInstaller -Path $NestedInstaller.FullName -DestinationPath $ExpandedPath -Name 'VUSC.exe' -Language 'en'
+      $Extracted = @(Expand-InnoInstaller -Path $NestedInstaller.FullName -DestinationPath $ExpandedPath -CollisionAction Rename)
 
-      $Extracted | Should -HaveCount 1
-      (Get-FileHash -Path $Extracted[0].FullName -Algorithm SHA256).Hash | Should -Be '021A05A497BBCE1EE604CC223E7BB813171F198B3B27AE3C90A50EBD0F6DFEAE'
+      $Extracted | Should -HaveCount 114
+      Test-Path -LiteralPath (Join-Path $ExpandedPath 'data\CONLIST.TXT') | Should -BeTrue
+      $LaunchFile = $Extracted | Where-Object Name -Like 'VUSC*.exe' | Where-Object {
+        (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash -eq '021A05A497BBCE1EE604CC223E7BB813171F198B3B27AE3C90A50EBD0F6DFEAE'
+      } | Select-Object -First 1
+      $LaunchFile | Should -Not -BeNullOrEmpty
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -Path $ArchivePath -Recurse -Force -ErrorAction SilentlyContinue

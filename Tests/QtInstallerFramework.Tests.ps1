@@ -309,7 +309,7 @@ Describe 'Qt Installer Framework parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name 'config.xml'
+      $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name 'config.xml' -CollisionAction Rename
       $ConfigPath = Join-Path $Result 'installer-config\config.xml'
 
       $ConfigPath | Should -Exist
@@ -334,7 +334,7 @@ Describe 'Qt Installer Framework parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name 'msys-2.0.dll'
+      $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name 'msys-2.0.dll' -CollisionAction Rename
       $ExtractedFiles = @(Get-ChildItem -Path $Result -Recurse -File)
 
       $ExtractedFiles | Should -HaveCount 1
@@ -351,7 +351,7 @@ Describe 'Qt Installer Framework parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      { Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name 'msys-2.0.dll' -MaximumExpandedBytes 1048576 } | Should -Throw '*exceeds the 1048576-byte limit*'
+      { Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name 'msys-2.0.dll' -MaximumExpandedBytes 1048576 -CollisionAction Rename } | Should -Throw '*exceeds the 1048576-byte limit*'
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
