@@ -38,7 +38,7 @@ Expansion actions return extracted paths or expansion evidence as JSON and alway
   -MaximumExpandedBytes 1GB
 ```
 
-`Name` is optional for every expansion action; omitting it selects all catalogued files. The non-interactive CLI accepts `CollisionAction Error|Skip|Overwrite|Rename` and defaults to `Rename` (`file (1).ext`). Direct calls to exported `Expand-*` functions additionally accept `Prompt` and use it by default; bridge callers resolve that choice in the parent host and pass a concrete action to the CLI. Paths are resolved against PowerShell's current filesystem location before crossing the JSON/.NET boundary.
+`Name` is optional for every expansion action; omitting it selects all catalogued files. The CLI defaults to non-interactive `CollisionAction Rename` (`file (1).ext`). Direct calls and interactive PackageModule bridge calls additionally accept `Prompt`; no question is shown until the parser encounters an existing or already-reserved output path. Interactive bridge calls inherit the parent console while returning JSON through a separate temporary result file. Paths are resolved against PowerShell's current filesystem location before crossing the JSON/.NET boundary.
 
 Do not write informational output to standard output in parser modules because it would corrupt the CLI JSON contract. Return warnings as structured result properties or use the CLI error path for fatal failures.
 

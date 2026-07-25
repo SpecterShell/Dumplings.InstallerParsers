@@ -13,6 +13,11 @@
 #     +-- non-solid block
 #     |   +00 PackedSize:u32 (bit 31 = compressed, low 31 bits = byte count)
 #     |   `-- codec stream -> decompressed logical header
+#     +-- raw NSIS BZip2 codec stream (MSB-first bit fields)
+#     |   +00 BlockMarker:u8 = 31
+#     |   +01 OriginalPointer:u24 BE
+#     |   +04 Mapping/Huffman/MTF bit stream
+#     |   `-- repeated blocks, terminated by byte 17
 #     +-- vendor LZMA2 codec stream
 #     |   +00 DictionaryProperty:u8 (0..40)
 #     |   +01 Control:u8 + chunk sizes + optional LZMA property + chunk data
@@ -81,6 +86,28 @@ function Import-Assembly {
 }
 
 Import-Assembly
+
+function Import-NSISBZip2Decoder {
+  <#
+  .SYNOPSIS
+    Load the format-specific raw NSIS BZip2 decoder once per process
+  .NOTES
+    NSIS omits the standard BZh header, block signatures, and CRC fields, so
+    SharpCompress's public standard-BZip2 stream cannot decode this framing.
+  #>
+  if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.NSIS.NsisBZip2Stream').Type) { return }
+
+  Use-InstallerRuntimeLoadLock {
+    # Recheck after acquiring the process-wide loader lock because another
+    # parser runspace may have compiled the type while this runspace waited.
+    if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.NSIS.NsisBZip2Stream').Type) { return }
+    $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..\Assets\NsisBZip2Stream.cs'
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+      throw "The NSIS raw BZip2 decoder source is missing: $SourcePath"
+    }
+    $null = Add-Type -Path $SourcePath -ErrorAction Stop
+  }
+}
 
 # Constants
 $NSIS_FIRST_HEADER_SIZE = 28
@@ -980,7 +1007,12 @@ function New-NSISDecoder {
       return New-InstallerDecompressionStream -Algorithm Lzma2 -Stream $PayloadStream -Properties ([byte[]]@($Property)) `
         -CompressedSize $RemainingBytes -UncompressedSize $ExpectedOutputBytes -LeaveOpen
     }
-    'BZip2' { return New-InstallerDecompressionStream -Algorithm BZip2 -Stream $PayloadStream -LeaveOpen }
+    'BZip2' {
+      # NSIS uses a reduced BZip2 framing that is incompatible with ordinary
+      # BZh streams. Keep the caller-owned bounded payload stream open.
+      Import-NSISBZip2Decoder
+      return [Dumplings.InstallerParsers.NSIS.NsisBZip2Stream]::Create($PayloadStream, $true)
+    }
     'Zlib' { return New-InstallerDecompressionStream -Algorithm Zlib -Stream $PayloadStream -LeaveOpen }
     'Deflate' { return New-InstallerDecompressionStream -Algorithm Deflate -Stream $PayloadStream -LeaveOpen }
     'None' { return $PayloadStream }

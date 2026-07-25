@@ -17,8 +17,11 @@ param (
   [string]$Name,
 
   [Parameter(HelpMessage = 'The behavior when an extracted path already exists')]
-  [ValidateSet('Error', 'Skip', 'Overwrite', 'Rename')]
+  [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
   [string]$CollisionAction = 'Rename',
+
+  [Parameter(HelpMessage = 'Optional file used for JSON output when host prompts must remain visible')]
+  [string]$ResultPath,
 
   [Parameter(HelpMessage = 'The Inno Setup language selector')]
   [string]$Language,
@@ -134,7 +137,19 @@ try {
     default { throw "Unsupported installer parser action: $Action" }
   }
 
-  [Console]::Out.Write(($Result | ConvertTo-Json -Depth 100 -Compress))
+  $ResultJson = $Result | ConvertTo-Json -Depth 100 -Compress
+  if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    [Console]::Out.Write($ResultJson)
+  } else {
+    # Interactive bridge calls inherit the console for PromptForChoice. Keep
+    # JSON off stdout so the parent receives an unambiguous result document.
+    $ResolvedResultPath = [IO.Path]::GetFullPath($ResultPath)
+    $ResultDirectory = [IO.Path]::GetDirectoryName($ResolvedResultPath)
+    if (-not $ResultDirectory -or -not [IO.Directory]::Exists($ResultDirectory)) {
+      throw "The installer parser result directory does not exist: $ResultDirectory"
+    }
+    [IO.File]::WriteAllText($ResolvedResultPath, $ResultJson, [Text.UTF8Encoding]::new($false))
+  }
   exit 0
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)

@@ -737,6 +737,86 @@ Describe 'NSIS parser' {
     }
   }
 
+  It 'Should decode and extract a solid raw-BZip2 Exr-IO installer' {
+    $Fixture = Get-InstallerFixture -Name 'Exr-IO_2.06.00.exe' `
+      -Url 'https://www.exr-io.com/wp-content/uploads/Exr-IO_2.06.00.exe' `
+      -Sha256 '4BAE349608064A28806C81554C1D8867AFCCF2883BCE4112568A3F3715AC1E87'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-exr-io'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Header = & $Module { param($Path) Get-NSISHeaderData -Path $Path } $Fixture
+      $Info = Get-NSISInfo -Path $Fixture
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'Exr-IO.8bi' -MaximumExpandedBytes 16777216 -CollisionAction Rename)
+
+      $Header.Compression | Should -Be 'BZip2'
+      $Header.IsSolid | Should -BeTrue
+      $Info.DisplayName | Should -Be '3d-io Exr-IO 2.06.00'
+      $Info.DisplayVersion | Should -Be '2.06.00'
+      # The installer contains x86 and x64 plug-ins with the same logical
+      # filename. Rename collision handling must preserve both payloads.
+      $Extracted | Should -HaveCount 2
+      $Extracted.Name | Should -Contain 'Exr-IO.8bi'
+      $Extracted.Name | Should -Contain 'Exr-IO (1).8bi'
+      $Hashes = @($Extracted | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash })
+      $Hashes | Should -Contain 'D773AFBCC6061FD75D2B15B54F6294FC85A219C57E11E454B6B97B27CA5C7F27'
+      $Hashes | Should -Contain 'D6BACFCE8458406844683CFCCA32D8446B0995A0FBF21052CDE89ED61A935F9D'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should decode and extract a non-solid raw-BZip2 Visual C++ libjpeg-turbo installer' {
+    $Fixture = Get-InstallerFixture -Name 'libjpeg-turbo-3.2.0-vc-x64.exe' `
+      -Url 'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0-vc-x64.exe' `
+      -Sha256 '662761D8BA8DAE04AEC74023EBAECEB856C2B56B9B59CFD180759D26300DDA42'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-libjpeg-vc'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Header = & $Module { param($Path) Get-NSISHeaderData -Path $Path } $Fixture
+      $Info = Get-NSISInfo -Path $Fixture
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'cjpeg.exe' -MaximumExpandedBytes 1048576 -CollisionAction Rename)
+
+      $Header.Compression | Should -Be 'BZip2'
+      $Header.IsSolid | Should -BeFalse
+      $Info.DisplayName | Should -Be 'libjpeg-turbo SDK v3.2.0 for Visual C++ 64-bit'
+      $Info.ProductCode | Should -Be 'libjpeg-turbo64 3.2.0'
+      $Extracted | Should -HaveCount 1
+      $Extracted[0].Length | Should -Be 185856
+      (Get-FileHash -LiteralPath $Extracted[0].FullName -Algorithm SHA256).Hash | Should -Be '97C382C511F6D597E97141F4064C8E67ED64617D1D51793C1DF183004E21BF0F'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should decode and extract a non-solid raw-BZip2 GCC libjpeg-turbo installer' {
+    $Fixture = Get-InstallerFixture -Name 'libjpeg-turbo-3.2.0-gcc-x64.exe' `
+      -Url 'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0-gcc-x64.exe' `
+      -Sha256 '5A71EA596C573EA3B44C8E7B5E78613D3A28DC9490DC714E7222C9F63F55E454'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-libjpeg-gcc'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Header = & $Module { param($Path) Get-NSISHeaderData -Path $Path } $Fixture
+      $Info = Get-NSISInfo -Path $Fixture
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'cjpeg.exe' -MaximumExpandedBytes 1048576 -CollisionAction Rename)
+
+      $Header.Compression | Should -Be 'BZip2'
+      $Header.IsSolid | Should -BeFalse
+      $Info.DisplayName | Should -Be 'libjpeg-turbo SDK v3.2.0 for GCC 64-bit'
+      $Info.ProductCode | Should -Be 'libjpeg-turbo-gcc64 3.2.0'
+      $Extracted | Should -HaveCount 1
+      $Extracted[0].Length | Should -Be 315480
+      (Get-FileHash -LiteralPath $Extracted[0].FullName -Algorithm SHA256).Hash | Should -Be '7C6A635A946449A55BAE4B193FFC5176EAE0ADFEC16C30692ED7D03817AE534A'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should reject payload output beyond the extraction limit without retaining a partial file' {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-limit'

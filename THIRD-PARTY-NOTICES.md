@@ -30,6 +30,11 @@ Source: <https://github.com/adamhathcock/sharpcompress>
 
 Version: 0.39.0. License: MIT.
 
+The raw NSIS BZip2 decoder adapts SharpCompress's Apache Ant-derived BZip2
+decoder under Apache-2.0. Its stream framing was changed to match the NSIS
+`Source/bzip2` implementation; standard BZip2 headers and CRC fields are not
+accepted or synthesized.
+
 ## ZstdSharp.Port
 
 Source: <https://github.com/oleg-st/ZstdSharp>
