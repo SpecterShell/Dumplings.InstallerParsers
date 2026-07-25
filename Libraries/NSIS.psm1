@@ -1,5 +1,5 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
-# Format sources: https://github.com/NSIS-Dev/nsis, https://sourceforge.net/projects/nsisbi/, https://github.com/ip7z/7zip, https://github.com/russellbanks/Komac, and https://github.com/electron-userland/electron-builder
+# Format sources: https://github.com/NSIS-Dev/nsis, https://sourceforge.net/projects/nsisbi/, https://github.com/ip7z/7zip, https://github.com/russellbanks/Komac, https://github.com/electron-userland/electron-builder, and https://github.com/Drizin/NsisMultiUser
 #
 # Binary structure consumed by this parser (archive-relative, LE integers):
 #
@@ -228,6 +228,10 @@ $NSIS_ABORT_RESULT = [pscustomobject]@{ Action = 'Abort'; Address = 0 }
 $NSIS_QUIT_RESULT = [pscustomobject]@{ Action = 'Quit'; Address = 0 }
 
 $NSIS_POP_OPERATION = 1
+
+$NSIS_IMAGE_FILE_MACHINE_I386 = 332
+$NSIS_IMAGE_FILE_MACHINE_AMD64 = 34404
+$NSIS_IMAGE_FILE_MACHINE_ARM64 = 43620
 
 $NSIS_WINDOWS_DIRECTORY = if ($env:windir) { $env:windir } else { 'C:\Windows' }
 $NSIS_SYSTEM_DIRECTORY = Join-Path $Script:NSIS_WINDOWS_DIRECTORY 'System32'
@@ -1296,10 +1300,10 @@ function Get-NSISBlockBytes {
   return , $BlockBytes
 }
 
-function Get-NSISPrimaryLanguageTable {
+function Get-NSISLanguageTable {
   <#
   .SYNOPSIS
-    Select the primary NSIS language table used for string resolution
+    Read every compiled NSIS language table used for localized string resolution
   .PARAMETER HeaderBytes
     The decompressed NSIS header bytes
   .PARAMETER BlockHeaders
@@ -1307,7 +1311,7 @@ function Get-NSISPrimaryLanguageTable {
   .PARAMETER Layout
     The parsed NSIS header layout
   #>
-  [OutputType([pscustomobject])]
+  [OutputType([pscustomobject[]])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The decompressed NSIS header bytes')]
     [byte[]]$HeaderBytes,
@@ -1341,14 +1345,7 @@ function Get-NSISPrimaryLanguageTable {
       })
   }
 
-  # Prefer the compiler's default English table for deterministic static string
-  # resolution; otherwise retain the first authored language rather than merging.
-  $PreferredTable = $CandidateTables.Where({ $_.LanguageId -eq $Script:NSIS_DEFAULT_LANGUAGE }, 'First')
-  if ($PreferredTable) {
-    return $PreferredTable[0]
-  } else {
-    return $CandidateTables | Select-Object -First 1
-  }
+  return $CandidateTables.ToArray()
 }
 
 function ConvertFrom-NSISBiOpcode {
@@ -1930,6 +1927,147 @@ function Get-NSISString {
   return $Builder.ToString()
 }
 
+function Get-NSISStringVariableIndex {
+  <#
+  .SYNOPSIS
+    Read the variable references encoded in one compiled NSIS string
+  .PARAMETER State
+    The mutable NSIS execution state containing the strings block
+  .PARAMETER RelativeOffset
+    The string-table offset, measured in characters for Unicode installers
+  #>
+  [OutputType([int[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The compiled relative string offset')]
+    [int]$RelativeOffset
+  )
+
+  if ($RelativeOffset -lt 0) { return [int[]]@() }
+  $Multiplier = if ($State.VersionInfo.Unicode) { 2 } else { 1 }
+  $Offset = $RelativeOffset * $Multiplier
+  if ($Offset -lt 0 -or $Offset -ge $State.StringsBlock.Length) { return [int[]]@() }
+
+  $Indexes = [System.Collections.Generic.HashSet[int]]::new()
+  while ($Offset -lt $State.StringsBlock.Length) {
+    if ($State.VersionInfo.Unicode) {
+      if ($Offset + 1 -ge $State.StringsBlock.Length) { break }
+      $Character = [System.BitConverter]::ToUInt16($State.StringsBlock, $Offset)
+      $Offset += 2
+    } else {
+      $Character = [uint16]$State.StringsBlock[$Offset]
+      $Offset++
+    }
+    if ($Character -eq 0) { break }
+
+    $CodeKind = Get-NSISStringCodeKind -Character $Character -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
+    if (-not $CodeKind) { continue }
+    if ($State.VersionInfo.Unicode) {
+      if ($Offset + 1 -ge $State.StringsBlock.Length) { break }
+      $Payload = [System.BitConverter]::ToUInt16($State.StringsBlock, $Offset)
+      $Offset += 2
+    } else {
+      if ($Offset + 1 -ge $State.StringsBlock.Length) { break }
+      $Payload = [uint16]($State.StringsBlock[$Offset] -bor ($State.StringsBlock[$Offset + 1] -shl 8))
+      $Offset += 2
+    }
+
+    if ($CodeKind -eq 'Var') {
+      $null = $Indexes.Add((ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type))
+    }
+  }
+
+  return [int[]]@($Indexes)
+}
+
+function Resolve-NSISDirectString {
+  <#
+  .SYNOPSIS
+    Resolve a direct registry string using nearby compiled StrCpy assignments
+  .DESCRIPTION
+    A direct uninstall-write scan does not follow control flow. Resolve only the
+    nearest lexical assignments needed by the registry operand so unrelated
+    plug-in stack values cannot leak into ARP paths.
+  .PARAMETER State
+    The mutable NSIS execution state
+  .PARAMETER RelativeOffset
+    The compiled string-table offset to resolve
+  .PARAMETER EntryIndex
+    The zero-based command index containing the string operand
+  .PARAMETER VisitedVariables
+    Variable indexes already being resolved, used to stop assignment cycles
+  .PARAMETER Depth
+    The current bounded recursive-resolution depth
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The compiled string-table offset')]
+    [int]$RelativeOffset,
+
+    [Parameter(Mandatory, HelpMessage = 'The command index containing the string operand')]
+    [int]$EntryIndex,
+
+    [Parameter(HelpMessage = 'Variable indexes already being resolved')]
+    [System.Collections.Generic.HashSet[int]]$VisitedVariables,
+
+    [Parameter(HelpMessage = 'The current recursive-resolution depth')]
+    [int]$Depth = 0
+  )
+
+  if ($Depth -ge 16) { return Get-NSISString -State $State -RelativeOffset $RelativeOffset }
+  if (-not $VisitedVariables) { $VisitedVariables = [System.Collections.Generic.HashSet[int]]::new() }
+
+  $SavedVariables = [System.Collections.Generic.List[object]]::new()
+  try {
+    foreach ($VariableIndex in @(Get-NSISStringVariableIndex -State $State -RelativeOffset $RelativeOffset)) {
+      # Predefined runtime paths are established by initialization and must not
+      # be replaced by unrelated lexical assignments from other code segments.
+      if ($VariableIndex -ge $Script:NSIS_PREDEFINED_VAR_CMDLINE -and $VariableIndex -le $Script:NSIS_PREDEFINED_VAR__OUTDIR) { continue }
+      if (-not $VisitedVariables.Add($VariableIndex)) { continue }
+
+      $Assignment = $null
+      for ($Index = [Math]::Min($EntryIndex - 1, $State.Entries.Count - 1); $Index -ge 0; $Index--) {
+        $Candidate = $State.Entries[$Index]
+        if ($Candidate.Opcode -eq $Script:NSIS_OPCODE_ASSIGN_VAR -and [Math]::Abs($Candidate.Values[1]) -eq $VariableIndex) {
+          $Assignment = [pscustomobject]@{ Entry = $Candidate; Index = $Index }
+          break
+        }
+      }
+      if (-not $Assignment) {
+        $null = $VisitedVariables.Remove($VariableIndex)
+        continue
+      }
+
+      $HadValue = $State.Variables.ContainsKey($VariableIndex)
+      $SavedVariables.Add([pscustomobject]@{
+          Index    = $VariableIndex
+          HadValue = $HadValue
+          Value    = if ($HadValue) { $State.Variables[$VariableIndex] } else { $null }
+        })
+      $ResolvedValue = Resolve-NSISDirectString -State $State -RelativeOffset $Assignment.Entry.Values[2] -EntryIndex $Assignment.Index -VisitedVariables $VisitedVariables -Depth ($Depth + 1)
+      $State.Variables[$VariableIndex] = $ResolvedValue
+      $null = $VisitedVariables.Remove($VariableIndex)
+    }
+
+    return Get-NSISString -State $State -RelativeOffset $RelativeOffset
+  } finally {
+    # Temporary data-flow values must not alter later control-flow simulation.
+    for ($Index = $SavedVariables.Count - 1; $Index -ge 0; $Index--) {
+      $Saved = $SavedVariables[$Index]
+      if ($Saved.HadValue) {
+        $State.Variables[$Saved.Index] = $Saved.Value
+      } else {
+        $null = $State.Variables.Remove($Saved.Index)
+      }
+    }
+  }
+}
+
 function Get-NSISInt {
   <#
   .SYNOPSIS
@@ -2179,6 +2317,8 @@ function Get-NSISRegistryWriteFromEntry {
     The mutable NSIS execution state
   .PARAMETER Entry
     The normalized NSIS command entry
+  .PARAMETER EntryIndex
+    Optional command index used to resolve nearby StrCpy assignments during a direct scan
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2186,7 +2326,10 @@ function Get-NSISRegistryWriteFromEntry {
     [pscustomobject]$State,
 
     [Parameter(Mandatory, HelpMessage = 'The normalized NSIS command entry')]
-    [pscustomobject]$Entry
+    [pscustomobject]$Entry,
+
+    [Parameter(HelpMessage = 'The command index used for direct lexical data-flow')]
+    [int]$EntryIndex = -1
   )
 
   if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { return $null }
@@ -2217,10 +2360,20 @@ function Get-NSISRegistryWriteFromEntry {
   # String operands pass through the NSIS string decoder so variable and language
   # references resolve using the same state as simulated execution.
   $Root = Resolve-NSISRegistryRoot -State $State -Root $Entry.Raw[1]
-  $Key = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
-  $Name = Get-NSISString -State $State -RelativeOffset $Entry.Values[3]
+  $Key = if ($EntryIndex -ge 0) {
+    Resolve-NSISDirectString -State $State -RelativeOffset $Entry.Values[2] -EntryIndex $EntryIndex
+  } else {
+    Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
+  }
+  $Name = if ($EntryIndex -ge 0) {
+    Resolve-NSISDirectString -State $State -RelativeOffset $Entry.Values[3] -EntryIndex $EntryIndex
+  } else {
+    Get-NSISString -State $State -RelativeOffset $Entry.Values[3]
+  }
   $Value = if ($RegistryKind -eq 'REG_DWORD') {
     [string](Get-NSISInt -State $State -RelativeOffset $Entry.Values[4])
+  } elseif ($EntryIndex -ge 0) {
+    Resolve-NSISDirectString -State $State -RelativeOffset $Entry.Values[4] -EntryIndex $EntryIndex
   } else {
     Get-NSISString -State $State -RelativeOffset $Entry.Values[4]
   }
@@ -2485,18 +2638,32 @@ function Initialize-NSISState {
     Build the mutable execution state used for deterministic NSIS metadata parsing
   .PARAMETER HeaderData
     The decompressed NSIS header data
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve source-backed runtime architecture checks
+  .PARAMETER Scope
+    The target installation scope used to resolve compiled MultiUser scope setters
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The decompressed NSIS header data')]
-    [pscustomobject]$HeaderData
+    [pscustomobject]$HeaderData,
+
+    [Parameter(HelpMessage = 'The target Windows architecture used to resolve runtime architecture checks')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [Parameter(HelpMessage = 'The target installation scope used to resolve runtime scope checks')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   $HeaderBytes = $HeaderData.HeaderBytes
   $BlockHeaders = Get-NSISBlockHeaders -HeaderBytes $HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
   $Layout = Get-NSISHeaderLayout -HeaderBytes $HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
   $StringsBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 3
-  $LanguageTable = Get-NSISPrimaryLanguageTable -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Layout $Layout
+  $LanguageTables = @(Get-NSISLanguageTable -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Layout $Layout)
+  $LanguageTable = @($LanguageTables.Where({ $_.LanguageId -eq $Script:NSIS_DEFAULT_LANGUAGE }, 'First'))[0]
+  if (-not $LanguageTable) { $LanguageTable = $LanguageTables | Select-Object -First 1 }
   $Entries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -IsNsisBi $HeaderData.IsNsisBi
   $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock -Entries $Entries -IsNsisBi $HeaderData.IsNsisBi
   $VersionInfo | Add-Member -NotePropertyName FirstHeaderFlags -NotePropertyValue $HeaderData.FirstHeaderFlags
@@ -2510,47 +2677,61 @@ function Initialize-NSISState {
   }
 
   $State = [pscustomobject]@{
-    Path             = $HeaderData.Path
-    Entries          = $Entries
-    Sections         = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
-    StringsBlock     = $StringsBlock
-    LanguageTable    = $LanguageTable
-    VersionInfo      = $VersionInfo
-    Variables        = @{}
-    Registry         = @{}
-    RegistryWrites   = [System.Collections.Generic.List[object]]::new()
-    ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
-    Warnings         = [System.Collections.Generic.List[string]]::new()
-    Stack            = [System.Collections.Generic.List[string]]::new()
-    Directories      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Files            = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    ExecFlags        = @{}
-    LastExecFlags    = @{}
-    ShellVarContext  = $null
-    Metadata         = [ordered]@{
-      Path                         = $HeaderData.Path
-      InstallerType                = 'Nullsoft'
-      ProductCode                  = $null
-      UpgradeCode                  = $null
-      DisplayName                  = $null
-      DisplayVersion               = $null
-      Publisher                    = $null
-      Scope                        = $null
-      DefaultInstallLocation       = $null
-      WritesAppsAndFeaturesEntry   = $false
-      AppsAndFeaturesProductCode   = $null
-      AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@()
-      UnresolvedFields             = [string[]]@()
-      UninstallString              = $null
-      QuietUninstallString         = $null
-      DisplayIcon                  = $null
-      SystemComponent              = $null
-      RegistryValues               = @{}
-      RegistryWrites               = @()
-      ExtractedFiles               = @()
-      ExecutedPayloads             = @()
-      ParserVersionInfo            = $null
+    Path               = $HeaderData.Path
+    Entries            = $Entries
+    Sections           = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+    StringsBlock       = $StringsBlock
+    LanguageTable      = $LanguageTable
+    LanguageTables     = $LanguageTables
+    VersionInfo        = $VersionInfo
+    Variables          = @{}
+    Registry           = @{}
+    RegistryWrites     = [System.Collections.Generic.List[object]]::new()
+    ExecutedPayloads   = [System.Collections.Generic.List[object]]::new()
+    Warnings           = [System.Collections.Generic.List[string]]::new()
+    Stack              = [System.Collections.Generic.List[string]]::new()
+    Directories        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Files              = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    ExecFlags          = @{}
+    LastExecFlags      = @{}
+    ShellVarContext    = $null
+    TargetArchitecture = $Architecture
+    TargetScope        = $Scope
+    Metadata           = [ordered]@{
+      Path                               = $HeaderData.Path
+      InstallerType                      = 'Nullsoft'
+      TargetArchitecture                 = $Architecture
+      HasArchitectureRuntimeCheck        = $false
+      TargetScope                        = $Scope
+      HasScopeRuntimeCheck               = $false
+      SupportedScopes                    = [string[]]@()
+      IsPortable                         = $false
+      PortableEvidence                   = [string[]]@()
+      ProductCode                        = $null
+      UpgradeCode                        = $null
+      DisplayName                        = $null
+      DisplayVersion                     = $null
+      Publisher                          = $null
+      Scope                              = $null
+      DefaultInstallLocation             = $null
+      WritesAppsAndFeaturesEntry         = $false
+      AppsAndFeaturesProductCode         = $null
+      AppsAndFeaturesInstallerType       = $null
+      Warnings                           = [string[]]@()
+      UnresolvedFields                   = [string[]]@()
+      UninstallString                    = $null
+      QuietUninstallString               = $null
+      DisplayIcon                        = $null
+      SystemComponent                    = $null
+      RegistryValues                     = @{}
+      RegistryWrites                     = @()
+      AppsAndFeaturesEntries             = @()
+      AppsAndFeaturesEntryEvidence       = @()
+      HasLocalizedAppsAndFeaturesEntries = $false
+      Notices                            = [string[]]@()
+      ExtractedFiles                     = @()
+      ExecutedPayloads                   = @()
+      ParserVersionInfo                  = $null
     }
   }
 
@@ -2588,6 +2769,317 @@ function Initialize-NSISState {
   }
 }
 
+function Pop-NSISStackValue {
+  <#
+  .SYNOPSIS
+    Remove and return the value at the top of the simulated NSIS stack
+  .PARAMETER State
+    The mutable NSIS execution state that owns the stack
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  if ($State.Stack.Count -eq 0) { return '' }
+  $Index = $State.Stack.Count - 1
+  $Value = [string]$State.Stack[$Index]
+  $State.Stack.RemoveAt($Index)
+  return $Value
+}
+
+function Get-NSISNativeMachineValue {
+  <#
+  .SYNOPSIS
+    Convert a WinGet architecture into the IMAGE_FILE_MACHINE value returned by Windows
+  .PARAMETER Architecture
+    The target Windows architecture
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The target Windows architecture')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
+  )
+
+  switch ($Architecture) {
+    'x86' { return $Script:NSIS_IMAGE_FILE_MACHINE_I386 }
+    'x64' { return $Script:NSIS_IMAGE_FILE_MACHINE_AMD64 }
+    'arm64' { return $Script:NSIS_IMAGE_FILE_MACHINE_ARM64 }
+  }
+}
+
+function Invoke-NSISSystemPluginCall {
+  <#
+  .SYNOPSIS
+    Simulate deterministic NSIS System plug-in operations used by installer scripts
+  .DESCRIPTION
+    NSIS compiles System::Call arguments as stack pushes followed by EW_REGISTERDLL.
+    This helper consumes those arguments where the plug-in would and models the
+    known-folder and Windows architecture APIs used by electron-builder and
+    x64.nsh. Other calls receive empty outputs rather than values derived from
+    the parser host.
+  .PARAMETER State
+    The mutable NSIS execution state
+  .PARAMETER FunctionName
+    The exported System plug-in function invoked by EW_REGISTERDLL
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The exported System plug-in function')]
+    [string]$FunctionName
+  )
+
+  if ($FunctionName -ieq 'Int64Op') {
+    # System::Int64Op pops ARG1, OP, and ARG2, then pushes one result. x64.nsh
+    # uses bitwise OR to combine IsWow64Process2 with its legacy fallback.
+    $LeftText = Pop-NSISStackValue -State $State
+    $Operator = Pop-NSISStackValue -State $State
+    $RightText = if ($Operator -in @('~', '!')) { '0' } else { Pop-NSISStackValue -State $State }
+    $Left = 0L
+    $Right = 0L
+    $null = [long]::TryParse($LeftText, [ref]$Left)
+    $null = [long]::TryParse($RightText, [ref]$Right)
+    $Result = switch ($Operator) {
+      '|' { $Left -bor $Right }
+      '||' { [long]($Left -ne 0 -or $Right -ne 0) }
+      default { 0L }
+    }
+    $State.Stack.Add([string]$Result)
+    return $true
+  }
+
+  if ($FunctionName -ine 'Call') { return $false }
+  $Command = Pop-NSISStackValue -State $State
+  if ([string]::IsNullOrWhiteSpace($Command)) { return $true }
+
+  if ($Command -match '(?i)SHELL32::SHGetKnownFolderPath\(g\s+"?(?<FolderId>\{[0-9A-F-]{36}\})"?.*\*p\s+\.r(?<PathRegister>\d+)\)i\.r(?<ResultRegister>\d+)') {
+    # electron-builder resolves FOLDERID_UserProgramFiles and copies the
+    # allocated result into its per-user installation root. The System plug-in
+    # writes both values directly to NSIS variables; neither value is pushed.
+    $KnownFolderPath = switch ($Matches.FolderId.ToUpperInvariant()) {
+      '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}' { Join-Path $env:LOCALAPPDATA 'Programs' }
+      default { '' }
+    }
+    Set-NSISVariableValue -State $State -Index ([int]$Matches.PathRegister) -Value $KnownFolderPath
+    Set-NSISVariableValue -State $State -Index ([int]$Matches.ResultRegister) -Value $(if ($KnownFolderPath) { '0' } else { '-2147024894' })
+    return $true
+  }
+
+  if ($Command -match '(?i)KERNEL32::lstrcpynW\(w\s+\.r(?<DestinationRegister>\d+)\s*,\s*p\s+r(?<SourceRegister>\d+)') {
+    # lstrcpynW writes into the destination buffer represented by the direct
+    # NSIS register operand. Copy the deterministic source value without
+    # attempting to model the transient native pointer.
+    $SourceValue = Get-NSISVariableValue -State $State -Index ([int]$Matches.SourceRegister)
+    Set-NSISVariableValue -State $State -Index ([int]$Matches.DestinationRegister) -Value $SourceValue
+    return $true
+  }
+
+  if ($Command -match '(?i)OLE32::CoTaskMemFree\(') {
+    # The allocation belongs to the simulated shell call; freeing it has no
+    # additional script-visible output.
+    return $true
+  }
+
+  if ($Command -match '(?i)kernel32::GetCurrentProcess\(\)p\.s') {
+    # The pseudo handle is only consumed by later static API emulation.
+    $State.Stack.Add('-1')
+    return $true
+  }
+
+  if ($Command -match '(?i)kernel32::IsWow64Process2\((?<Arguments>[^)]*)\)') {
+    # Architecture-dependent calls need an explicit target. Keep the stack
+    # contract deterministic when the caller requested architecture-neutral
+    # metadata, but do not derive the result from the parser host.
+    $Architecture = [string]$State.TargetArchitecture
+    $NativeMachine = if ($Architecture) { Get-NSISNativeMachineValue -Architecture $Architecture } else { 0 }
+    $Arguments = @($Matches.Arguments -split '\s*,\s*')
+    if ($Arguments.Count -gt 0 -and $Arguments[0] -match '(?i)^ps$') {
+      $null = Pop-NSISStackValue -State $State
+    }
+
+    # A 32-bit stub reports I386 as its process machine on x64/ARM64 and zero
+    # when it runs natively on x86. The second output is the native OS machine.
+    $ProcessMachine = if ($Architecture -eq 'x86') { 0 } else { $Script:NSIS_IMAGE_FILE_MACHINE_I386 }
+    for ($Index = 1; $Index -lt $Arguments.Count; $Index++) {
+      if ($Arguments[$Index] -notmatch '(?i)^\*[^,]*s$') { continue }
+      $OutputMachine = if ($Index -eq 1) { $ProcessMachine } else { $NativeMachine }
+      $State.Stack.Add([string]$OutputMachine)
+    }
+    return $true
+  }
+
+  if ($Command -match '(?i)kernel32::IsWow64Process\((?<Arguments>[^)]*)\)') {
+    $Architecture = [string]$State.TargetArchitecture
+    $Arguments = @($Matches.Arguments -split '\s*,\s*')
+    if ($Arguments.Count -gt 0 -and $Arguments[0] -match '(?i)^ps$') {
+      $null = Pop-NSISStackValue -State $State
+    }
+
+    # The legacy API returns FALSE for native x86 and for x86 emulation on
+    # ARM64. Current x64.nsh combines it with IsWow64Process2 on ARM64.
+    $IsWow64 = [int]($Architecture -eq 'x64')
+    foreach ($Argument in $Arguments | Select-Object -Skip 1) {
+      if ($Argument -match '(?i)^\*[^,]*s$') { $State.Stack.Add([string]$IsWow64) }
+    }
+    return $true
+  }
+
+  if ($Command -match '(?i)^\*0x7FFE002E\(&i2\.s\)') {
+    # GetNativeMachineArchitecture reads this shared-user-data processor field
+    # as the fallback on Windows versions predating IsWow64Process2.
+    $Architecture = [string]$State.TargetArchitecture
+    $NativeMachine = if ($Architecture) { Get-NSISNativeMachineValue -Architecture $Architecture } else { 0 }
+    $State.Stack.Add([string]$NativeMachine)
+    return $true
+  }
+
+  # Consume unsupported System::Call input like the real plug-in. Direct .rN
+  # outputs write variables, whereas .s outputs are pushed onto the NSIS stack.
+  # Preserve those contracts without fabricating values from the parser host.
+  foreach ($RegisterMatch in [regex]::Matches($Command, '(?i)\.r(?<Register>\d+)')) {
+    Set-NSISVariableValue -State $State -Index ([int]$RegisterMatch.Groups['Register'].Value) -Value ''
+  }
+  if ($Command -match '\((?<Arguments>[^)]*)\)') {
+    foreach ($Argument in @($Matches.Arguments -split '\s*,\s*')) {
+      if ($Argument -match '(?i)^\*[^,]*s$') { $State.Stack.Add('') }
+    }
+  }
+  if ($Command -match '(?i)\)[a-z0-9&*]+\.s(?:\s|$)') { $State.Stack.Add('') }
+  return $true
+}
+
+function Get-NSISArchitectureProbeStart {
+  <#
+  .SYNOPSIS
+    Locate the start of a compiled NSIS x64.nsh architecture probe
+  .PARAMETER State
+    The mutable NSIS execution state containing normalized command entries
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  for ($Index = 0; $Index -lt $State.Entries.Count; $Index++) {
+    $Entry = $State.Entries[$Index]
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_PUSH_POP -or $Entry.Values[2] -ne 0) { continue }
+    $Command = Get-NSISString -State $State -RelativeOffset $Entry.Values[1]
+    if ($Command -notmatch '(?i)kernel32::IsWow64Process2?\(') { continue }
+
+    # x64.nsh first pushes GetCurrentProcess, then invokes one or both WOW64
+    # APIs. Start there so the System plug-in stack contract remains intact.
+    $MinimumIndex = [Math]::Max(0, $Index - 24)
+    for ($Candidate = $Index - 1; $Candidate -ge $MinimumIndex; $Candidate--) {
+      $CandidateEntry = $State.Entries[$Candidate]
+      if ($CandidateEntry.Opcode -ne $Script:NSIS_OPCODE_PUSH_POP -or $CandidateEntry.Values[2] -ne 0) { continue }
+      $CandidateCommand = Get-NSISString -State $State -RelativeOffset $CandidateEntry.Values[1]
+      if ($CandidateCommand -match '(?i)kernel32::GetCurrentProcess\(\)') { return $Candidate }
+    }
+  }
+
+  return -1
+}
+
+function Get-NSISScopeSelectionStart {
+  <#
+  .SYNOPSIS
+    Locate a compiled NSIS function that selects one installation scope
+  .DESCRIPTION
+    Both NSIS MultiUser.nsh and Drizin/NsisMultiUser compile their scope setters
+    to an assignment of AllUsers or CurrentUser followed by SetShellVarContext.
+    This structural pair is stronger evidence than the presence of switch text
+    and lets the simulator enter the selected function without modeling UAC UI.
+  .PARAMETER State
+    The mutable NSIS execution state containing normalized command entries
+  .PARAMETER Scope
+    The scope whose compiled setter should be located
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The installation scope whose compiled setter should be located')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
+  )
+
+  $ModeName = if ($Scope -eq 'machine') { 'AllUsers' } else { 'CurrentUser' }
+  $ExpectedContext = if ($Scope -eq 'machine') { 1 } else { 0 }
+
+  for ($Index = 0; $Index -lt $State.Entries.Count; $Index++) {
+    $Entry = $State.Entries[$Index]
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_ASSIGN_VAR) { continue }
+
+    try { $AssignedValue = Get-NSISString -State $State -RelativeOffset $Entry.Values[2] } catch { continue }
+    if ($AssignedValue -cne $ModeName) { continue }
+
+    # Require the nearby shell-context opcode so unrelated variables named
+    # AllUsers or CurrentUser cannot become scope-selector false positives.
+    $ContextEntry = $null
+    for ($Candidate = $Index + 1; $Candidate -le [Math]::Min($Index + 4, $State.Entries.Count - 1); $Candidate++) {
+      $CandidateEntry = $State.Entries[$Candidate]
+      if ($CandidateEntry.Opcode -ne $Script:NSIS_OPCODE_SET_FLAG -or
+        $CandidateEntry.Values[1] -ne $Script:NSIS_EXEC_FLAG_SHELL_VAR_CONTEXT) { continue }
+      if ((Get-NSISInt -State $State -RelativeOffset $CandidateEntry.Values[2]) -ne $ExpectedContext) { continue }
+      $ContextEntry = $CandidateEntry
+      break
+    }
+    if (-not $ContextEntry) { continue }
+
+    # Include the idempotence comparison at the function entrance when present.
+    # Starting there preserves the source macro's normal return behavior.
+    if ($Index -ge 2 -and $State.Entries[$Index - 1].Opcode -eq $Script:NSIS_OPCODE_RETURN -and
+      $State.Entries[$Index - 2].Opcode -eq $Script:NSIS_OPCODE_STR_CMP) {
+      $Comparison = $State.Entries[$Index - 2]
+      $Left = Get-NSISString -State $State -RelativeOffset $Comparison.Values[1]
+      $Right = Get-NSISString -State $State -RelativeOffset $Comparison.Values[2]
+      if ($Left -ceq $ModeName -or $Right -ceq $ModeName) { return $Index - 2 }
+    }
+
+    return $Index
+  }
+
+  return -1
+}
+
+function Initialize-NSISTargetRegistryState {
+  <#
+  .SYNOPSIS
+    Remove registry evidence collected before an explicit runtime branch is selected
+  .DESCRIPTION
+    Initialization can visit a default architecture or scope path before the
+    caller-requested branch is applied. Clearing only registry-derived metadata
+    preserves other initialized variables while preventing alternate ARP entries
+    from contaminating the targeted result.
+  .PARAMETER State
+    The mutable NSIS execution state to reset
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state to reset')]
+    [pscustomobject]$State
+  )
+
+  $State.Registry.Clear()
+  $State.RegistryWrites.Clear()
+  foreach ($Name in @('ProductCode', 'DisplayName', 'DisplayVersion', 'Publisher', 'Scope', 'DefaultInstallLocation', 'UninstallString', 'QuietUninstallString', 'DisplayIcon', 'SystemComponent')) {
+    $State.Metadata[$Name] = $null
+  }
+  $State.Metadata.RegistryValues = @{}
+  $State.Metadata.WritesAppsAndFeaturesEntry = $false
+  $State.Metadata.AppsAndFeaturesProductCode = $null
+  $State.Metadata.AppsAndFeaturesInstallerType = $null
+  $State.Metadata.AppsAndFeaturesEntries = @()
+  $State.Metadata.AppsAndFeaturesEntryEvidence = @()
+}
+
 function Add-NSISDirectUninstallWrites {
   <#
   .SYNOPSIS
@@ -2601,9 +3093,10 @@ function Add-NSISDirectUninstallWrites {
     [pscustomobject]$State
   )
 
-  foreach ($Entry in $State.Entries) {
+  for ($EntryIndex = 0; $EntryIndex -lt $State.Entries.Count; $EntryIndex++) {
+    $Entry = $State.Entries[$EntryIndex]
     if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
-    $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+    $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry -EntryIndex $EntryIndex
     if (-not $Write -or -not $Write.IsUninstallKey) { continue }
     $State.RegistryWrites.Add($Write)
     Set-NSISRegistryValue -State $State -Root $Write.Root -Key $Write.Key -Name $Write.Name -Value $Write.Value
@@ -2757,24 +3250,26 @@ function Invoke-NSISEntry {
       return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_ASSIGN_VAR {
-      # Reproduce NSIS substring assignment, including negative start offsets and
-      # packed maximum-length fields, before updating derived install paths.
+      # EW_ASSIGNVAR stores MaxLen and StartOffset as string-table operands, not
+      # immediate integers. This mirrors GetIntFromParmEx(2)/GetIntFromParm(3)
+      # in the NSIS runtime, including negative lengths and start positions.
       $Result = Get-NSISString -State $State -RelativeOffset $Values[2]
-      $Start = $Values[4]
-      $MaxLengthLow = $Values[3] -band 0xFFFF
-      $MaxLengthHigh = ($Values[3] -shr 16) -band 0xFFFF
-      $NewLength = if ($MaxLengthHigh -eq 0) { $Result.Length } else { $MaxLengthLow }
-
-      if ($NewLength -le 0) {
-        $null = $State.Variables.Remove([Math]::Abs($Values[1]))
-        return $Script:NSIS_CONTINUE_RESULT
-      }
+      $MaximumLengthText = Get-NSISString -State $State -RelativeOffset $Values[3]
+      $NewLength = if ([string]::IsNullOrEmpty($MaximumLengthText)) { $Result.Length } else { Get-NSISInt -State $State -RelativeOffset $Values[3] }
+      $Start = Get-NSISInt -State $State -RelativeOffset $Values[4]
 
       if ($Start -lt 0) { $Start += $Result.Length }
-      if ($Start -lt 0) { $Start = 0 }
-      if ($Start -gt $Result.Length) { $Start = $Result.Length }
+      if ($Start -lt 0) {
+        $Result = ''
+      } else {
+        if ($Start -gt $Result.Length) { $Start = $Result.Length }
+        $Result = $Result.Substring($Start)
+      }
 
-      $Result = $Result.Substring($Start)
+      # A negative MaxLen removes characters from the end of the selected
+      # substring. NSIS clamps an underflow to an empty destination variable.
+      if ($NewLength -lt 0) { $NewLength += $Result.Length }
+      if ($NewLength -lt 0) { $NewLength = 0 }
       if ($Result.Length -gt $NewLength) { $Result = $Result.Substring(0, $NewLength) }
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value $Result
       return $Script:NSIS_CONTINUE_RESULT
@@ -2868,6 +3363,17 @@ function Invoke-NSISEntry {
         $State.Stack.Add((Get-NSISString -State $State -RelativeOffset $Values[1]))
       }
 
+      return $Script:NSIS_CONTINUE_RESULT
+    }
+    $Script:NSIS_OPCODE_REGISTER_DLL {
+      # Plug-in calls are encoded as EW_REGISTERDLL even though no COM
+      # registration occurs. Resolve only the deterministic System operations
+      # needed by architecture macros; all other plug-ins remain no-ops.
+      $LibraryPath = Get-NSISString -State $State -RelativeOffset $Values[1]
+      $FunctionName = Get-NSISString -State $State -RelativeOffset $Values[2]
+      if ([IO.Path]::GetFileName($LibraryPath) -ieq 'System.dll') {
+        $null = Invoke-NSISSystemPluginCall -State $State -FunctionName $FunctionName
+      }
       return $Script:NSIS_CONTINUE_RESULT
     }
     $Script:NSIS_OPCODE_SHELL_EXEC {
@@ -2966,17 +3472,478 @@ function ConvertTo-NSISManifestPath {
   return $Path
 }
 
+function Get-NSISLanguageLocaleName {
+  <#
+  .SYNOPSIS
+    Convert an NSIS Windows language identifier to a BCP47 culture name
+  .PARAMETER LanguageId
+    The unsigned Windows language identifier stored in the NSIS language record
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The Windows language identifier')]
+    [uint16]$LanguageId
+  )
+
+  try {
+    return [System.Globalization.CultureInfo]::GetCultureInfo([int]$LanguageId).Name
+  } catch {
+    # Custom or obsolete LANGIDs remain useful numeric evidence even when .NET
+    # cannot map them to a current BCP47 culture name.
+    return $null
+  }
+}
+
+function Get-NSISAppsAndFeaturesEntryInfo {
+  <#
+  .SYNOPSIS
+    Resolve visible uninstall registry identities across every compiled NSIS language
+  .DESCRIPTION
+    NSIS language strings are selected at runtime. This function reevaluates only
+    explicit EW_WRITEREG commands for each compiled language table; it does not
+    probe arbitrary strings or execute the installer. The simulation's primary
+    scalar metadata remains unchanged for compatibility.
+  .PARAMETER State
+    The mutable NSIS execution state after direct or simulated registry discovery
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  $LanguageTables = if ($State.PSObject.Properties.Name -contains 'LanguageTables') {
+    @($State.LanguageTables)
+  } elseif ($State.LanguageTable) {
+    @($State.LanguageTable)
+  } else {
+    @()
+  }
+  if ($LanguageTables.Count -eq 0) {
+    # Installers without a language block still need one pass for literal ARP writes.
+    $LanguageTables = @([pscustomobject]@{
+        LanguageId = [uint16]$Script:NSIS_DEFAULT_LANGUAGE; DialogOffset = [uint32]0
+        RightToLeft = $false; StringOffsets = [int[]]@()
+      })
+  }
+
+  $TargetArchitectureProperty = $State.PSObject.Properties['TargetArchitecture']
+  $HasTargetArchitecture = $null -ne $TargetArchitectureProperty -and
+  -not [string]::IsNullOrWhiteSpace([string]$TargetArchitectureProperty.Value)
+  $TargetScopeProperty = $State.PSObject.Properties['TargetScope']
+  $HasTargetScope = $null -ne $TargetScopeProperty -and
+  -not [string]::IsNullOrWhiteSpace([string]$TargetScopeProperty.Value)
+  $AllowedRegistryIdentities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  if ($HasTargetArchitecture -and $State.PSObject.Properties.Name -contains 'RegistryWrites') {
+    foreach ($RegistryWrite in @($State.RegistryWrites)) {
+      if ($RegistryWrite.IsUninstallKey) {
+        $null = $AllowedRegistryIdentities.Add("$($RegistryWrite.Root)`0$($RegistryWrite.Key)")
+      }
+    }
+  }
+
+  $Evidence = [System.Collections.Generic.List[object]]::new()
+  if ($HasTargetScope -and $State.PSObject.Properties.Name -contains 'RegistryWrites') {
+    $EntriesByRegistryKey = [ordered]@{}
+
+    # A selected MultiUser branch has already resolved temporary variables and
+    # SHCTX. Preserve only the uninstall writes reached by that branch instead
+    # of re-reading every compiled EW_WRITEREG instruction from both scopes.
+    foreach ($Write in @($State.RegistryWrites)) {
+      if (-not $Write.IsUninstallKey) { continue }
+      $ResolvedScope = if ($Write.Root -eq 'HKLM') { 'machine' } elseif ($Write.Root -eq 'HKCU') { 'user' } else { $null }
+      if ($ResolvedScope -ne $TargetScopeProperty.Value) { continue }
+
+      $RegistryIdentity = "$($Write.Root)`0$($Write.Key)"
+      if (-not $EntriesByRegistryKey.Contains($RegistryIdentity)) {
+        $EntriesByRegistryKey[$RegistryIdentity] = [pscustomobject]@{
+          Root   = $Write.Root
+          Key    = $Write.Key
+          Scope  = $ResolvedScope
+          Values = [ordered]@{}
+        }
+      }
+      $EntriesByRegistryKey[$RegistryIdentity].Values[$Write.Name] = $Write.Value
+    }
+
+    $SelectedLanguageTable = if ($State.LanguageTable) {
+      $State.LanguageTable
+    } else {
+      $LanguageTables | Select-Object -First 1
+    }
+    foreach ($RegistryEntry in $EntriesByRegistryKey.Values) {
+      $Values = $RegistryEntry.Values
+      if ([string]::IsNullOrWhiteSpace([string]$Values['DisplayName']) -and
+        [string]::IsNullOrWhiteSpace([string]$Values['DisplayVersion']) -and
+        [string]::IsNullOrWhiteSpace([string]$Values['Publisher'])) { continue }
+
+      $SystemComponent = [string]$Values['SystemComponent']
+      $Evidence.Add([pscustomobject][ordered]@{
+          LanguageId      = [uint16]$SelectedLanguageTable.LanguageId
+          Locale          = Get-NSISLanguageLocaleName -LanguageId $SelectedLanguageTable.LanguageId
+          RegistryRoot    = $RegistryEntry.Root
+          RegistryKey     = $RegistryEntry.Key
+          Scope           = $RegistryEntry.Scope
+          ProductCode     = $RegistryEntry.Key.Substring($RegistryEntry.Key.LastIndexOf('\') + 1)
+          DisplayName     = $Values['DisplayName']
+          DisplayVersion  = $Values['DisplayVersion']
+          Publisher       = $Values['Publisher']
+          InstallerType   = 'nullsoft'
+          SystemComponent = $SystemComponent
+          IsVisible       = $SystemComponent -notin @('1', '0x00000001')
+        })
+    }
+  }
+
+  $HadLanguageTableProperty = $State.PSObject.Properties.Name -contains 'LanguageTable'
+  $OriginalLanguageTable = if ($HadLanguageTableProperty) { $State.LanguageTable } else { $null }
+  if (-not $HadLanguageTableProperty) {
+    $State | Add-Member -NotePropertyName LanguageTable -NotePropertyValue $null
+  }
+  $HadLanguageVariable = $State.Variables.ContainsKey($Script:NSIS_PREDEFINED_VAR_LANGUAGE)
+  $OriginalLanguageVariable = if ($HadLanguageVariable) { $State.Variables[$Script:NSIS_PREDEFINED_VAR_LANGUAGE] } else { $null }
+  $LanguageTablesToScan = if ($HasTargetScope) { @() } else { $LanguageTables }
+  try {
+    # Untargeted analysis intentionally evaluates every language table. A
+    # targeted scope uses reached writes above because rescanning source entries
+    # would lose runtime-computed key suffixes such as " (current user)".
+    foreach ($LanguageTable in $LanguageTablesToScan) {
+      $State.LanguageTable = $LanguageTable
+      Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_LANGUAGE -Value ([string]$LanguageTable.LanguageId)
+      $EntriesByRegistryKey = [ordered]@{}
+
+      # Re-resolve only source-backed registry commands. This catches $(LangString)
+      # values while retaining the exact uninstall key, hive, and registry type.
+      foreach ($Entry in $State.Entries) {
+        if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
+        $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+        if (-not $Write -or -not $Write.IsUninstallKey) { continue }
+
+        $RegistryIdentity = "$($Write.Root)`0$($Write.Key)"
+        if ($HasTargetArchitecture -and $AllowedRegistryIdentities.Count -gt 0 -and
+          -not $AllowedRegistryIdentities.Contains($RegistryIdentity)) { continue }
+        if (-not $EntriesByRegistryKey.Contains($RegistryIdentity)) {
+          $EntriesByRegistryKey[$RegistryIdentity] = [pscustomobject]@{
+            Root   = $Write.Root
+            Key    = $Write.Key
+            Values = [ordered]@{}
+          }
+        }
+        $EntriesByRegistryKey[$RegistryIdentity].Values[$Write.Name] = $Write.Value
+      }
+
+      foreach ($RegistryEntry in $EntriesByRegistryKey.Values) {
+        $Values = $RegistryEntry.Values
+        $SystemComponent = [string]$Values['SystemComponent']
+        $IsVisible = $SystemComponent -notin @('1', '0x00000001')
+        $ProductCode = $RegistryEntry.Key.Substring($RegistryEntry.Key.LastIndexOf('\') + 1)
+        $Scope = if ($RegistryEntry.Root -eq 'HKLM') { 'machine' } elseif ($RegistryEntry.Root -eq 'HKCU') { 'user' } else { $null }
+
+        # Omit empty registry shells that do not establish an ARP identity.
+        if ([string]::IsNullOrWhiteSpace([string]$Values['DisplayName']) -and
+          [string]::IsNullOrWhiteSpace([string]$Values['DisplayVersion']) -and
+          [string]::IsNullOrWhiteSpace([string]$Values['Publisher'])) { continue }
+
+        $Evidence.Add([pscustomobject][ordered]@{
+            LanguageId      = [uint16]$LanguageTable.LanguageId
+            Locale          = Get-NSISLanguageLocaleName -LanguageId $LanguageTable.LanguageId
+            RegistryRoot    = $RegistryEntry.Root
+            RegistryKey     = $RegistryEntry.Key
+            Scope           = $Scope
+            ProductCode     = $ProductCode
+            DisplayName     = $Values['DisplayName']
+            DisplayVersion  = $Values['DisplayVersion']
+            Publisher       = $Values['Publisher']
+            InstallerType   = 'nullsoft'
+            SystemComponent = $SystemComponent
+            IsVisible       = $IsVisible
+          })
+      }
+    }
+  } finally {
+    if ($HadLanguageTableProperty) {
+      $State.LanguageTable = $OriginalLanguageTable
+    } else {
+      $State.PSObject.Properties.Remove('LanguageTable')
+    }
+    if ($HadLanguageVariable) {
+      $State.Variables[$Script:NSIS_PREDEFINED_VAR_LANGUAGE] = $OriginalLanguageVariable
+    } else {
+      $null = $State.Variables.Remove($Script:NSIS_PREDEFINED_VAR_LANGUAGE)
+    }
+  }
+
+  $ManifestEntries = [System.Collections.Generic.List[object]]::new()
+  $SeenManifestEntries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  foreach ($Entry in $Evidence) {
+    if (-not $Entry.IsVisible) { continue }
+    $Identity = "$($Entry.ProductCode)`0$($Entry.DisplayName)`0$($Entry.DisplayVersion)`0$($Entry.Publisher)`0$($Entry.InstallerType)"
+    if (-not $SeenManifestEntries.Add($Identity)) { continue }
+
+    # Keep this projection schema-shaped. Language and registry provenance stay
+    # in AppsAndFeaturesEntryEvidence for analyzer display and VM correlation.
+    $ManifestEntry = [ordered]@{}
+    foreach ($Name in @('DisplayName', 'DisplayVersion', 'Publisher', 'ProductCode', 'InstallerType')) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$Entry.$Name)) { $ManifestEntry[$Name] = $Entry.$Name }
+    }
+    $ManifestEntries.Add([pscustomobject]$ManifestEntry)
+  }
+
+  $LocalizedRegistryKeys = [System.Collections.Generic.List[string]]::new()
+  foreach ($Group in @($Evidence | Where-Object IsVisible | Group-Object { "$($_.RegistryRoot)`0$($_.RegistryKey)" })) {
+    $Identities = @($Group.Group | ForEach-Object { "$($_.DisplayName)`0$($_.Publisher)" } | Select-Object -Unique)
+    if ($Identities.Count -gt 1) { $LocalizedRegistryKeys.Add($Group.Name) }
+  }
+
+  $Notices = [System.Collections.Generic.List[string]]::new()
+  if ($LocalizedRegistryKeys.Count -gt 0) {
+    $Locales = @($Evidence | Where-Object IsVisible | ForEach-Object { $_.Locale ?? "LANGID-$($_.LanguageId)" } | Select-Object -Unique)
+    $Notices.Add("NSIS uninstall DisplayName or Publisher varies by installer language ($($Locales -join ', ')); AppsAndFeaturesEntries contains $($ManifestEntries.Count) distinct visible ARP identities. Preserve the applicable localized identities and validate installed-language behavior in a VM when authoring the manifest.")
+  }
+
+  return [pscustomobject][ordered]@{
+    AppsAndFeaturesEntries       = $ManifestEntries.ToArray()
+    AppsAndFeaturesEntryEvidence = $Evidence.ToArray()
+    Notices                      = [string[]]$Notices.ToArray()
+    HasLocalizedEntries          = $LocalizedRegistryKeys.Count -gt 0
+  }
+}
+
+function Repair-NSISIncompleteInstallMetadata {
+  <#
+  .SYNOPSIS
+    Recover a missing install root from a unique explicit compiled path assignment
+  .DESCRIPTION
+    Custom directory pages can initialize INSTDIR only after UI interaction. If
+    static simulation therefore observes a root-relative suffix, this helper
+    accepts a replacement only when one explicit StrCpy source is an absolute
+    known install-root path ending in that exact suffix.
+  .PARAMETER State
+    The mutable NSIS execution state and metadata to repair
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  $ObservedInstallRoot = Get-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_INSTDIR
+  if ([string]::IsNullOrWhiteSpace($ObservedInstallRoot)) { $ObservedInstallRoot = [string]$State.Metadata.DefaultInstallLocation }
+  $EffectiveScope = [string]$State.Metadata.Scope
+  $UninstallRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($Entry in $State.Entries) {
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
+    $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+    if ($Write.IsUninstallKey) { $null = $UninstallRoots.Add($Write.Root) }
+  }
+  if ($UninstallRoots.Count -eq 1) {
+    # An explicit uninstall hive is stronger scope evidence than a temporary
+    # path left by incomplete simulation of a custom directory page.
+    $EffectiveScope = if (@($UninstallRoots)[0] -eq 'HKLM') { 'machine' } elseif (@($UninstallRoots)[0] -eq 'HKCU') { 'user' } else { $EffectiveScope }
+    if ($EffectiveScope) { $State.Metadata.Scope = $EffectiveScope }
+  }
+
+  $IsRootRelative = $ObservedInstallRoot -match '^[\\/](?![\\/])'
+  $TemporaryRoot = [System.IO.Path]::GetTempPath().TrimEnd('\')
+  $IsTemporaryMachineRoot = $EffectiveScope -eq 'machine' -and $ObservedInstallRoot.StartsWith($TemporaryRoot, [System.StringComparison]::OrdinalIgnoreCase)
+  if (-not $IsRootRelative -and -not $IsTemporaryMachineRoot) { return }
+
+  $InstallSuffix = if ($IsRootRelative) {
+    $ObservedInstallRoot.TrimStart('\', '/')
+  } else {
+    Split-Path -Path $ObservedInstallRoot -Leaf
+  }
+  if ([string]::IsNullOrWhiteSpace($InstallSuffix)) { return }
+  $SuffixPath = '\' + $InstallSuffix
+
+  $KnownRoots = if ($EffectiveScope -eq 'machine') {
+    @($env:ProgramFiles, ${env:ProgramFiles(x86)}, ${env:ProgramW6432})
+  } elseif ($EffectiveScope -eq 'user') {
+    @($env:LOCALAPPDATA, $env:APPDATA)
+  } else {
+    @($env:ProgramFiles, ${env:ProgramFiles(x86)}, ${env:ProgramW6432}, $env:LOCALAPPDATA, $env:APPDATA)
+  }
+  $KnownRoots = @($KnownRoots) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+  $DirectInstallDirectoryCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $SuffixCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+  foreach ($Entry in $State.Entries) {
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_ASSIGN_VAR) { continue }
+    $Candidate = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
+    if ([string]::IsNullOrWhiteSpace($Candidate) -or -not [System.IO.Path]::IsPathFullyQualified($Candidate)) { continue }
+    if (-not @($KnownRoots).Where({ $Candidate.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }, 'First')) { continue }
+
+    if ([Math]::Abs($Entry.Values[1]) -eq $Script:NSIS_PREDEFINED_VAR_INSTDIR) {
+      $ResolvedCandidate = if ($Candidate.EndsWith($SuffixPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $Candidate
+      } else {
+        Join-Path $Candidate $InstallSuffix
+      }
+      $null = $DirectInstallDirectoryCandidates.Add($ResolvedCandidate.TrimEnd('\'))
+    } elseif ($Candidate.EndsWith($SuffixPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $null = $SuffixCandidates.Add($Candidate.TrimEnd('\'))
+    }
+  }
+
+  # Multiple explicit roots represent conditional behavior and must remain
+  # unresolved until the caller supplies scope/architecture or VM evidence.
+  $Candidates = if ($DirectInstallDirectoryCandidates.Count -gt 0) { $DirectInstallDirectoryCandidates } else { $SuffixCandidates }
+  if ($Candidates.Count -ne 1) { return }
+  $InstallRoot = @($Candidates)[0]
+
+  # Variables derived while INSTDIR was root-relative retain that same prefix.
+  # Replace it before re-evaluating explicit ARP writes so versioned paths keep
+  # their compiled suffix without inheriting a branch-only lexical value.
+  foreach ($VariableIndex in @($State.Variables.Keys)) {
+    $VariableValue = [string]$State.Variables[$VariableIndex]
+    if ($VariableValue.StartsWith($ObservedInstallRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $State.Variables[$VariableIndex] = $InstallRoot + $VariableValue.Substring($ObservedInstallRoot.Length)
+    }
+  }
+  $State.Metadata.DefaultInstallLocation = $InstallRoot
+  $State.Variables[$Script:NSIS_PREDEFINED_VAR_INSTDIR] = $InstallRoot
+
+  foreach ($PropertyName in @('UninstallString', 'QuietUninstallString', 'DisplayIcon')) {
+    $Value = [string]$State.Metadata[$PropertyName]
+    if ($Value.StartsWith('"' + $ObservedInstallRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $State.Metadata[$PropertyName] = '"' + $InstallRoot + $Value.Substring($ObservedInstallRoot.Length + 1)
+    } elseif ($Value.StartsWith($ObservedInstallRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $State.Metadata[$PropertyName] = $InstallRoot + $Value.Substring($ObservedInstallRoot.Length)
+    }
+  }
+
+  # Keep the structured registry projection consistent with the top-level
+  # metadata returned to bridge and analyzer callers.
+  foreach ($PropertyName in @('InstallLocation', 'UninstallString', 'QuietUninstallString', 'DisplayIcon')) {
+    $MetadataName = if ($PropertyName -eq 'InstallLocation') { 'DefaultInstallLocation' } else { $PropertyName }
+    if ($State.Metadata.RegistryValues.ContainsKey($PropertyName) -and $State.Metadata[$MetadataName]) {
+      $State.Metadata.RegistryValues[$PropertyName] = $State.Metadata[$MetadataName]
+    }
+  }
+  foreach ($Write in $State.RegistryWrites) {
+    $MetadataName = if ($Write.Name -eq 'InstallLocation') { 'DefaultInstallLocation' } else { [string]$Write.Name }
+    if ($MetadataName -in @('DefaultInstallLocation', 'UninstallString', 'QuietUninstallString', 'DisplayIcon') -and $State.Metadata[$MetadataName]) {
+      $Write.Value = $State.Metadata[$MetadataName]
+    }
+  }
+
+  # Re-evaluate path-valued uninstall writes with the repaired live variables.
+  # This intentionally bypasses direct lexical data-flow: current variables now
+  # contain the branch selected by simulation rather than every compiled branch.
+  foreach ($Entry in $State.Entries) {
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
+    $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+    if (-not $Write.IsUninstallKey -or $Write.Name -notin @('InstallLocation', 'UninstallString', 'QuietUninstallString', 'DisplayIcon')) { continue }
+    Set-NSISRegistryValue -State $State -Root $Write.Root -Key $Write.Key -Name $Write.Name -Value $Write.Value
+    foreach ($ExistingWrite in $State.RegistryWrites) {
+      if ($ExistingWrite.Root -eq $Write.Root -and $ExistingWrite.Key -eq $Write.Key -and $ExistingWrite.Name -eq $Write.Name) {
+        $ExistingWrite.Value = $Write.Value
+      }
+    }
+  }
+}
+
+function Get-NSISPortableLauncherInfo {
+  <#
+  .SYNOPSIS
+    Detect a source-backed NSIS portable-launcher layout
+  .DESCRIPTION
+    electron-builder's portable.nsi template sets three PORTABLE_EXECUTABLE_*
+    environment variables before executing the unpacked application from a
+    temporary directory. Requiring that complete marker set, temporary payload
+    execution, and no visible uninstall write avoids classifying ordinary NSIS
+    bootstrappers as portable merely because they also unpack into TEMP.
+  .PARAMETER State
+    The completed NSIS simulation state containing strings, files, execution,
+    and Apps & Features evidence
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The completed NSIS simulation state')]
+    [pscustomobject]$State
+  )
+
+  $RequiredMarkers = [string[]]@(
+    'PORTABLE_EXECUTABLE_DIR'
+    'PORTABLE_EXECUTABLE_FILE'
+    'PORTABLE_EXECUTABLE_APP_FILENAME'
+  )
+  $PresentMarkers = [System.Collections.Generic.List[string]]::new()
+  $MarkerEncoding = if ($State.VersionInfo.Unicode) { [System.Text.Encoding]::Unicode } else { [System.Text.Encoding]::ASCII }
+  foreach ($Marker in $RequiredMarkers) {
+    # Search the bounded decoded strings block directly. Materializing every
+    # string solely for three exact markers is slower and allocates many
+    # short-lived PowerShell objects on large generated installers.
+    $Pattern = $MarkerEncoding.GetBytes($Marker)
+    if (@(Find-BinaryPattern -Bytes $State.StringsBlock -Pattern $Pattern -Maximum 1).Count -gt 0) {
+      $PresentMarkers.Add($Marker)
+    }
+  }
+
+  # The portable template extracts under $PLUGINSDIR or an optional $TEMP
+  # unpack directory, then waits for the application before deleting that tree.
+  $TemporaryRoots = [System.Collections.Generic.List[string]]::new()
+  foreach ($Root in @(
+      [System.IO.Path]::GetTempPath().TrimEnd('\')
+      (Get-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_PLUGINSDIR)
+    )) {
+    if (-not [string]::IsNullOrWhiteSpace($Root) -and -not $TemporaryRoots.Contains($Root)) {
+      $TemporaryRoots.Add($Root)
+    }
+  }
+  $TemporaryPayloads = [System.Collections.Generic.List[string]]::new()
+  foreach ($Payload in @($State.ExecutedPayloads)) {
+    $Command = ([string]$Payload.Command).Trim().TrimStart('"')
+    if (@($TemporaryRoots).Where({
+          $Command.Equals($_, [System.StringComparison]::OrdinalIgnoreCase) -or
+          $Command.StartsWith("$_\", [System.StringComparison]::OrdinalIgnoreCase)
+        }, 'First').Count -gt 0) {
+      $TemporaryPayloads.Add([string]$Payload.Command)
+    }
+  }
+
+  $AppPackageFiles = @(
+    foreach ($Value in @($State.Files)) {
+      if ($Value -match '(?i)(app-(?:32|64|arm64)(?:\.(?:7z|zip))?)') {
+        $Matches[1].ToLowerInvariant()
+      }
+    }
+  ) | Select-Object -Unique
+  $HasPortableMarkers = $PresentMarkers.Count -eq $RequiredMarkers.Count
+  $IsPortable = $HasPortableMarkers -and $TemporaryPayloads.Count -gt 0 -and -not $State.Metadata.WritesAppsAndFeaturesEntry
+
+  $Evidence = [System.Collections.Generic.List[string]]::new()
+  foreach ($Marker in $PresentMarkers) { $Evidence.Add("EnvironmentVariable:$Marker") }
+  foreach ($AppPackageFile in $AppPackageFiles) { $Evidence.Add("AppPackage:$AppPackageFile") }
+  foreach ($Payload in $TemporaryPayloads) { $Evidence.Add("TemporaryExecution:$Payload") }
+  if (-not $State.Metadata.WritesAppsAndFeaturesEntry) { $Evidence.Add('NoAppsAndFeaturesEntry') }
+
+  return [pscustomobject][ordered]@{
+    IsPortable                = $IsPortable
+    Family                    = if ($HasPortableMarkers) { 'electron-builder' } else { $null }
+    EnvironmentVariables      = [string[]]$PresentMarkers.ToArray()
+    AppPackageFiles           = [string[]]@($AppPackageFiles)
+    TemporaryExecutedPayloads = [string[]]$TemporaryPayloads.ToArray()
+    Evidence                  = [string[]]$Evidence.ToArray()
+  }
+}
+
 function Complete-NSISMetadata {
   <#
   .SYNOPSIS
     Apply deterministic fallbacks after the NSIS simulation completes
   .PARAMETER State
     The mutable NSIS execution state
+  .PARAMETER SkipLocalizedAppsAndFeaturesEntries
+    Skip the all-language registry projection during intermediate completeness checks
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
-    [pscustomobject]$State
+    [pscustomobject]$State,
+
+    [Parameter(HelpMessage = 'Skip localized ARP projection during an intermediate parser pass')]
+    [switch]$SkipLocalizedAppsAndFeaturesEntries
   )
 
   # Language-table name and split VersionMajor/VersionMinor values are structured
@@ -2998,6 +3965,13 @@ function Complete-NSISMetadata {
     $State.Metadata.DefaultInstallLocation = Get-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_INSTDIR
   }
 
+  if (-not $SkipLocalizedAppsAndFeaturesEntries) {
+    # Some custom directory pages establish the root only after UI interaction.
+    # Run this only for the final projection; intermediate completeness checks
+    # must not mutate variables before section simulation selects its branches.
+    Repair-NSISIncompleteInstallMetadata -State $State
+  }
+
   if (-not $State.Metadata.Scope) {
     # Scope fallback uses the resolved install root only when no explicit
     # uninstall hive or ShellVarContext evidence established it during simulation.
@@ -3013,6 +3987,19 @@ function Complete-NSISMetadata {
 
   if ($State.Metadata.SystemComponent -eq '1' -or $State.Metadata.SystemComponent -eq '0x00000001') {
     $State.Metadata.WritesAppsAndFeaturesEntry = $false
+  }
+
+  if (-not $SkipLocalizedAppsAndFeaturesEntries) {
+    # Portable launchers have an extraction directory rather than a persistent
+    # installation location. Detect the compiled template before path
+    # normalization and prevent that transient directory entering manifests.
+    $PortableInfo = Get-NSISPortableLauncherInfo -State $State
+    $State.Metadata.IsPortable = $PortableInfo.IsPortable
+    $State.Metadata.PortableEvidence = [string[]]$PortableInfo.Evidence
+    if ($PortableInfo.IsPortable) {
+      $State.Metadata.DefaultInstallLocation = $null
+      $State.Warnings.Add('The NSIS executable is an electron-builder portable launcher: it sets the PORTABLE_EXECUTABLE_* environment variables, executes the unpacked application from a temporary directory, and writes no visible Apps & Features entry. Treat the outer EXE as portable payload evidence rather than an installed NSIS package.')
+    }
   }
 
   # Manifests carry environment-variable install roots, not host-absolute paths.
@@ -3042,10 +4029,49 @@ function Complete-NSISMetadata {
     # ownership; surface that ambiguity instead of inventing an NSIS ProductCode.
     $State.Warnings.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
   }
+  if (-not $SkipLocalizedAppsAndFeaturesEntries -and
+    -not $State.Metadata.IsPortable -and
+    $State.Metadata.HasArchitectureRuntimeCheck -and
+    [string]::IsNullOrWhiteSpace([string]$State.TargetArchitecture) -and
+    [string]::IsNullOrWhiteSpace([string]$State.Metadata.ProductCode)) {
+    $State.Warnings.Add('The installer contains a runtime architecture branch; pass -Architecture x86, x64, or arm64 to resolve architecture-specific ARP metadata deterministically.')
+  }
+  if (-not $SkipLocalizedAppsAndFeaturesEntries -and
+    $State.Metadata.HasScopeRuntimeCheck -and
+    [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
+    @($State.Metadata.SupportedScopes).Count -gt 1) {
+    $State.Warnings.Add('The installer contains runtime user and machine scope branches; pass -Scope user or machine to resolve scope-specific ARP metadata deterministically.')
+  }
+  if (-not $SkipLocalizedAppsAndFeaturesEntries -and
+    $State.Metadata.HasScopeRuntimeCheck -and
+    -not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
+    -not [string]::IsNullOrWhiteSpace([string]$State.Metadata.Scope) -and
+    $State.TargetScope -ne $State.Metadata.Scope) {
+    $State.Warnings.Add("The requested '$($State.TargetScope)' scope did not resolve to matching uninstall registry evidence; the parser observed '$($State.Metadata.Scope)' scope instead.")
+  }
 
   $State.Metadata.AppsAndFeaturesProductCode = if ($State.Metadata.WritesAppsAndFeaturesEntry) { $State.Metadata.ProductCode } else { $null }
   $State.Metadata.AppsAndFeaturesInstallerType = if ($State.Metadata.WritesAppsAndFeaturesEntry) { 'nullsoft' } else { $null }
   $State.Metadata.RegistryWrites = @($RegistryWrites)
+  if (-not $SkipLocalizedAppsAndFeaturesEntries) {
+    # The all-language projection scans explicit registry commands once per
+    # language. Defer it until a result is returned rather than repeating it for
+    # the simulator's intermediate completeness checks.
+    $AppsAndFeaturesInfo = Get-NSISAppsAndFeaturesEntryInfo -State $State
+    $State.Metadata.AppsAndFeaturesEntries = @($AppsAndFeaturesInfo.AppsAndFeaturesEntries)
+    $State.Metadata.AppsAndFeaturesEntryEvidence = @($AppsAndFeaturesInfo.AppsAndFeaturesEntryEvidence)
+    $State.Metadata.Notices = [string[]]@($AppsAndFeaturesInfo.Notices)
+    $State.Metadata.HasLocalizedAppsAndFeaturesEntries = $AppsAndFeaturesInfo.HasLocalizedEntries
+
+    # Architecture-targeted simulation can intentionally skip a direct scan.
+    # Recover a missing scalar only when every explicit visible ARP projection
+    # agrees, preserving localized or architecture-specific differences.
+    foreach ($PropertyName in @('DisplayName', 'DisplayVersion', 'Publisher')) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$State.Metadata[$PropertyName])) { continue }
+      $Values = @($AppsAndFeaturesInfo.AppsAndFeaturesEntryEvidence | Where-Object IsVisible | ForEach-Object { $_.$PropertyName } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      if ($Values.Count -eq 1) { $State.Metadata[$PropertyName] = $Values[0] }
+    }
+  }
   $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
   foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $State.Warnings.Add($Warning) }
   $State.Metadata.RegistryAssociationInfo = $RegistryAssociationInfo
@@ -3068,6 +4094,10 @@ function Invoke-NSISStaticSimulation {
     The path to the NSIS installer
   .PARAMETER Mode
     The simulation mode. Full runs initialization and sections; Fast returns early when direct uninstall metadata is complete.
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve compiled runtime architecture checks
+  .PARAMETER Scope
+    The target installation scope used to resolve compiled MultiUser scope setters
   #>
   [OutputType([pscustomobject])]
   param (
@@ -3076,20 +4106,43 @@ function Invoke-NSISStaticSimulation {
 
     [Parameter(HelpMessage = 'The simulation mode')]
     [ValidateSet('Full', 'Fast')]
-    [string]$Mode = 'Full'
+    [string]$Mode = 'Full',
+
+    [Parameter(HelpMessage = 'The target Windows architecture used to resolve runtime architecture checks')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [Parameter(HelpMessage = 'The target installation scope used to resolve runtime scope checks')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
     # Parse and normalize the compiled header once; all later phases share the
     # same mutable state so callbacks and sections observe prior variable writes.
     $HeaderData = Get-NSISHeaderData -Path $Path
-    $InitializedState = Initialize-NSISState -HeaderData $HeaderData
+    $InitializationArguments = @{ HeaderData = $HeaderData }
+    if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $InitializationArguments.Architecture = $Architecture }
+    if (-not [string]::IsNullOrWhiteSpace($Scope)) { $InitializationArguments.Scope = $Scope }
+    $InitializedState = Initialize-NSISState @InitializationArguments
     $State = $InitializedState.State
     $Layout = $InitializedState.Layout
+    $ArchitectureProbeStart = Get-NSISArchitectureProbeStart -State $State
+    $State.Metadata.HasArchitectureRuntimeCheck = $ArchitectureProbeStart -ge 0
+    $ScopeSelectionStarts = [ordered]@{
+      user    = Get-NSISScopeSelectionStart -State $State -Scope user
+      machine = Get-NSISScopeSelectionStart -State $State -Scope machine
+    }
+    $State.Metadata.SupportedScopes = [string[]]@($ScopeSelectionStarts.Keys | Where-Object { $ScopeSelectionStarts[$_] -ge 0 })
+    $State.Metadata.HasScopeRuntimeCheck = $State.Metadata.SupportedScopes.Count -gt 0
+    $ScopeSelectionStart = if (-not [string]::IsNullOrWhiteSpace($Scope)) { $ScopeSelectionStarts[$Scope] } else { -1 }
+    $HasTargetArchitectureResolver = $ArchitectureProbeStart -ge 0 -and -not [string]::IsNullOrWhiteSpace($Architecture)
+    $HasTargetScopeResolver = $ScopeSelectionStart -ge 0 -and -not [string]::IsNullOrWhiteSpace($Scope)
+    $UseDirectRegistryFallback = -not ($HasTargetArchitectureResolver -or $HasTargetScopeResolver)
 
     # Prefer direct uninstall registry writes when they already expose a single deterministic ARP identity.
-    Add-NSISDirectUninstallWrites -State $State
-    $Metadata = Complete-NSISMetadata -State $State
+    if ($UseDirectRegistryFallback) { Add-NSISDirectUninstallWrites -State $State }
+    $Metadata = Complete-NSISMetadata -State $State -SkipLocalizedAppsAndFeaturesEntries
     if ($Mode -eq 'Fast' -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and -not [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion) -and -not [string]::IsNullOrWhiteSpace($Metadata.ProductCode)) {
       # Fast mode is an explicit optimization: direct uninstall writes must
       # already provide complete deterministic identity before callbacks are skipped.
@@ -3097,30 +4150,58 @@ function Invoke-NSISStaticSimulation {
         State       = $State
         Layout      = $Layout
         HeaderData  = $HeaderData
-        Metadata    = $Metadata
+        Metadata    = Complete-NSISMetadata -State $State
         IsEarlyExit = $true
       }
     }
 
+    $InitializationCompleted = $true
     if ($Layout.CodeOnInit -ge 0) {
       try {
         $null = Invoke-NSISCodeSegment -State $State -Position $Layout.CodeOnInit
       } catch {
         # Continue parsing when non-metadata callbacks loop or rely on unsupported runtime state.
+        $InitializationCompleted = $false
+      }
+    }
+
+    if (-not $InitializationCompleted -and -not [string]::IsNullOrWhiteSpace($Architecture)) {
+      # Some legacy installers execute complex UI helpers before their x64.nsh
+      # probe. If that prefix exceeds the watchdog, resume at the source-backed
+      # architecture macro rather than losing architecture-selected ARP values.
+      if ($ArchitectureProbeStart -ge 0) {
+        try {
+          $null = Invoke-NSISCodeSegment -State $State -Position $ArchitectureProbeStart
+        } catch {
+          # Later UI-only initialization remains optional after the architecture
+          # branch has had an opportunity to populate deterministic variables.
+        }
+      }
+    }
+
+    if ($HasTargetScopeResolver) {
+      # Enter the compiled scope setter directly after initialization. This
+      # mirrors the deterministic MultiUser macro branch without emulating UAC,
+      # account privilege checks, dialogs, or command-line parsing.
+      Initialize-NSISTargetRegistryState -State $State
+      try {
+        $null = Invoke-NSISCodeSegment -State $State -Position $ScopeSelectionStart
+      } catch {
+        $State.Warnings.Add("The compiled '$Scope' scope selector could not be simulated completely: $($_.Exception.Message)")
       }
     }
 
     # Initialization commonly establishes SHCTX before install sections begin.
     # Replay explicit writes so their scope reflects that context instead of the
     # conservative pre-simulation fallback used by the first literal scan.
-    if ($State.ShellVarContext) { Add-NSISDirectUninstallWrites -State $State }
+    if ($State.ShellVarContext -and -not $HasTargetScopeResolver) { Add-NSISDirectUninstallWrites -State $State }
 
     # Very large NSISBI installers can contain one extraction command per
     # payload file. Walking all of those commands adds no identity evidence once
     # initialization and explicit uninstall writes are complete, and can take
     # minutes for Unity-sized archives. Keep Full as the normal behavior while
     # bounding this payload-only path after deterministic ARP metadata is known.
-    $InitializedMetadata = Complete-NSISMetadata -State $State
+    $InitializedMetadata = Complete-NSISMetadata -State $State -SkipLocalizedAppsAndFeaturesEntries
     if ($HeaderData.IsNsisBi -and $State.Entries.Count -gt $Script:NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayName) -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayVersion) -and
@@ -3157,7 +4238,8 @@ function Invoke-NSISStaticSimulation {
       }
     }
 
-    if ([string]::IsNullOrWhiteSpace($State.Metadata.DisplayVersion) -or [string]::IsNullOrWhiteSpace($State.Metadata.ProductCode)) {
+    if ($UseDirectRegistryFallback -and
+      ([string]::IsNullOrWhiteSpace($State.Metadata.DisplayVersion) -or [string]::IsNullOrWhiteSpace($State.Metadata.ProductCode))) {
       # Re-scan literal EW_WRITEREG instructions only when dynamic control flow
       # did not reach enough explicit uninstall metadata.
       Add-NSISDirectUninstallWrites -State $State
@@ -3393,9 +4475,12 @@ function Get-ElectronBuilderNSISDetection {
     }, 'First').Count -gt 0
 
   $OrderedArchitectures = @('arm64', 'x64', 'x86').Where({ $Architectures.Contains($_) })
+  $PortableInfo = Get-NSISPortableLauncherInfo -State $State
 
   return [pscustomobject]@{
     IsElectronBuilder = $Architectures.Count -gt 0
+    IsPortable        = $PortableInfo.IsPortable
+    PortableEvidence  = [string[]]$PortableInfo.Evidence
     Architectures     = $OrderedArchitectures
     AppPackageFiles   = $AppPackageEvidence
     HasUpdatedSwitch  = @($Strings).Where({ $_ -eq '--updated' }, 'First').Count -gt 0
@@ -3458,6 +4543,7 @@ function Get-ElectronBuilderNSISInfo {
       InstallerType          = 'Nullsoft'
       Family                 = 'electron-builder'
       IsElectronBuilder      = $Detection.IsElectronBuilder
+      IsPortable             = $Detection.IsPortable
       Architectures          = @($Architectures)
       Architecture           = if ($Architectures.Count -gt 0) { Get-ElectronBuilderNSISArchitecture -Architectures @($Architectures) } else { $null }
       SupportedScopes        = [string[]]$SupportedScopes
@@ -3473,6 +4559,7 @@ function Get-ElectronBuilderNSISInfo {
         AppPackageFiles  = $Detection.AppPackageFiles
         HasUpdatedSwitch = $Detection.HasUpdatedSwitch
         HasDualScopeUi   = $Detection.HasDualScopeUi
+        PortableEvidence = [string[]]$Detection.PortableEvidence
       }
     }
   }
@@ -4053,15 +5140,30 @@ function Get-NSISInfo {
     Get static metadata from a Nullsoft Scriptable Install System installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used when the installer selects architecture-specific ARP metadata
+  .PARAMETER Scope
+    The target installation scope used when the installer selects scope-specific ARP metadata
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The target Windows architecture used to resolve architecture-specific ARP metadata')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [Parameter(HelpMessage = 'The target installation scope used to resolve scope-specific ARP metadata')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Metadata = (Invoke-NSISStaticSimulation -Path $Path).Metadata
+    $SimulationArguments = @{ Path = $Path }
+    if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $SimulationArguments.Architecture = $Architecture }
+    if (-not [string]::IsNullOrWhiteSpace($Scope)) { $SimulationArguments.Scope = $Scope }
+    $Metadata = (Invoke-NSISStaticSimulation @SimulationArguments).Metadata
     if ([string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion)) {
       throw 'The NSIS installer does not expose deterministic uninstall metadata'
     }
@@ -4078,15 +5180,28 @@ function Read-ProductVersionFromNSIS {
     Read the product version from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { throw 'The NSIS installer does not expose a DisplayVersion value' }
     return $Info.DisplayVersion
   }
@@ -4098,15 +5213,28 @@ function Read-ProductNameFromNSIS {
     Read the product name from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { throw 'The NSIS installer does not expose a DisplayName value' }
     return $Info.DisplayName
   }
@@ -4118,15 +5246,28 @@ function Read-PublisherFromNSIS {
     Read the publisher from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.Publisher)) { throw 'The NSIS installer does not expose a Publisher value' }
     return $Info.Publisher
   }
@@ -4138,15 +5279,28 @@ function Read-ProductCodeFromNSIS {
     Read the uninstall registry key name from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.ProductCode)) { throw 'The NSIS installer does not expose an uninstall registry key' }
     return $Info.ProductCode
   }

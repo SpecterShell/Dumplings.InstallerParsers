@@ -26,6 +26,14 @@ param (
   [Parameter(HelpMessage = 'The Inno Setup language selector')]
   [string]$Language,
 
+  [Parameter(HelpMessage = 'The target Windows architecture used by architecture-selecting installers')]
+  [ValidateSet('x86', 'x64', 'arm64')]
+  [string]$Architecture,
+
+  [Parameter(HelpMessage = 'The target installation scope used by scope-selecting installers')]
+  [ValidateSet('user', 'machine')]
+  [string]$Scope,
+
   [Parameter(HelpMessage = 'The maximum number of bytes written while expanding an installer')]
   [long]$MaximumExpandedBytes
 )
@@ -46,7 +54,10 @@ try {
   $Result = switch ($Action) {
     'NSIS.GetInfo' {
       Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
-      Get-NSISInfo -Path $Path
+      $Arguments = @{ Path = $Path }
+      if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
+      if (-not [string]::IsNullOrWhiteSpace($Scope)) { $Arguments.Scope = $Scope }
+      Get-NSISInfo @Arguments
     }
     'NSIS.Expand' {
       Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force

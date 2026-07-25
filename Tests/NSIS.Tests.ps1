@@ -550,6 +550,70 @@ Describe 'NSIS parser' {
     $Result.SystemComponent | Should -Be '1'
   }
 
+  It 'Should return distinct localized ARP identities from NSIS language strings' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $StringBytes = [System.Collections.Generic.List[byte]]::new()
+
+      function Add-TestString {
+        param([string]$Text)
+
+        $Offset = [int]($StringBytes.Count / 2)
+        $StringBytes.AddRange([System.Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+
+      $null = Add-TestString 'unused'
+      $KeyOffset = Add-TestString 'Software\Microsoft\Windows\CurrentVersion\Uninstall\WeMeet'
+      $DisplayNameOffset = Add-TestString 'DisplayName'
+      $PublisherOffset = Add-TestString 'Publisher'
+      $EnglishNameOffset = Add-TestString 'Tencent Meeting'
+      $EnglishPublisherOffset = Add-TestString 'Tencent Technology (Shenzhen) Co. Ltd.'
+      $ChineseNameOffset = Add-TestString '腾讯会议'
+      $ChinesePublisherOffset = Add-TestString '腾讯科技（深圳）有限公司'
+      $HklmRawValue = [uint32]$Script:NSIS_REG_ROOT_HKLM
+      $HklmSignedValue = [BitConverter]::ToInt32([BitConverter]::GetBytes($HklmRawValue), 0)
+
+      $Entries = @(
+        [pscustomobject]@{
+          Opcode = $Script:NSIS_OPCODE_WRITE_REG; RawOpcode = $Script:NSIS_OPCODE_WRITE_REG
+          Raw = [uint32[]]@($Script:NSIS_OPCODE_WRITE_REG, $HklmRawValue, $KeyOffset, $DisplayNameOffset, 0, 1, 1)
+          Values = [int[]]@($Script:NSIS_OPCODE_WRITE_REG, $HklmSignedValue, $KeyOffset, $DisplayNameOffset, -1, 1, 1)
+        },
+        [pscustomobject]@{
+          Opcode = $Script:NSIS_OPCODE_WRITE_REG; RawOpcode = $Script:NSIS_OPCODE_WRITE_REG
+          Raw = [uint32[]]@($Script:NSIS_OPCODE_WRITE_REG, $HklmRawValue, $KeyOffset, $PublisherOffset, 0, 1, 1)
+          Values = [int[]]@($Script:NSIS_OPCODE_WRITE_REG, $HklmSignedValue, $KeyOffset, $PublisherOffset, -2, 1, 1)
+        }
+      )
+      $State = [pscustomobject]@{
+        Entries         = $Entries
+        StringsBlock    = $StringBytes.ToArray()
+        VersionInfo     = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3' }
+        LanguageTable   = $null
+        LanguageTables  = @(
+          [pscustomobject]@{ LanguageId = [uint16]1033; StringOffsets = [int[]]@($EnglishNameOffset, $EnglishPublisherOffset) },
+          [pscustomobject]@{ LanguageId = [uint16]2052; StringOffsets = [int[]]@($ChineseNameOffset, $ChinesePublisherOffset) }
+        )
+        Variables       = @{}
+        ShellVarContext = 'HKLM'
+      }
+
+      Get-NSISAppsAndFeaturesEntryInfo -State $State
+    }
+
+    $Result.HasLocalizedEntries | Should -BeTrue
+    @($Result.AppsAndFeaturesEntries).Count | Should -Be 2
+    $Result.AppsAndFeaturesEntries.DisplayName | Should -Contain 'Tencent Meeting'
+    $Result.AppsAndFeaturesEntries.DisplayName | Should -Contain '腾讯会议'
+    $Result.AppsAndFeaturesEntries.Publisher | Should -Contain 'Tencent Technology (Shenzhen) Co. Ltd.'
+    $Result.AppsAndFeaturesEntries.Publisher | Should -Contain '腾讯科技（深圳）有限公司'
+    $Result.AppsAndFeaturesEntryEvidence.Locale | Should -Contain 'en-US'
+    $Result.AppsAndFeaturesEntryEvidence.Locale | Should -Contain 'zh-CN'
+    $Result.Notices | Should -HaveCount 1
+    $Result.Notices[0] | Should -Match 'varies by installer language'
+  }
+
   It 'Should normalize source-backed NSIS command layouts' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -567,6 +631,69 @@ Describe 'NSIS parser' {
     $Result.ParkFileWrite | Should -Be 68
     $Result.RegEnum | Should -Be 53
     $Result.NsisBiWriteReg | Should -Be 51
+  }
+
+  It 'Should model the source-backed x64.nsh System plug-in architecture probes' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Values = [ordered]@{}
+      foreach ($Architecture in @('x86', 'x64', 'arm64')) {
+        $State = [pscustomobject]@{
+          TargetArchitecture = $Architecture
+          Stack              = [System.Collections.Generic.List[string]]::new()
+        }
+
+        $State.Stack.Add('kernel32::GetCurrentProcess()p.s')
+        $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+        $State.Stack.Add('kernel32::IsWow64Process2(ps,*i0s,*i)')
+        $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+        $State.Stack.Add('|')
+        $State.Stack.Add('kernel32::IsWow64Process(p-1,*i0s)')
+        $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+        $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Int64Op'
+        $Values[$Architecture] = Pop-NSISStackValue -State $State
+      }
+      $Values
+    }
+
+    $Result.x86 | Should -Be '0'
+    [int]$Result.x64 | Should -BeGreaterThan 0
+    [int]$Result.arm64 | Should -BeGreaterThan 0
+  }
+
+  It 'Should model electron-builder System plug-in known-folder register outputs' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        Variables = @{}
+        Stack     = [System.Collections.Generic.List[string]]::new()
+        Metadata  = [ordered]@{ DefaultInstallLocation = $null }
+      }
+
+      # multiUser.nsh receives both SHGetKnownFolderPath outputs in direct NSIS
+      # registers, then copies the returned pointer string into $0.
+      $State.Stack.Add('SHELL32::SHGetKnownFolderPath(g "{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}", i 0, p 0, *p .r2)i.r1')
+      $KnownFolderHandled = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+      $State.Stack.Add('KERNEL32::lstrcpynW(w .r0, p r2, i 1024)')
+      $CopyHandled = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+
+      [pscustomobject]@{
+        KnownFolderHandled = $KnownFolderHandled
+        CopyHandled        = $CopyHandled
+        Result             = $State.Variables[1]
+        Pointer            = $State.Variables[2]
+        Destination        = $State.Variables[0]
+        StackCount         = $State.Stack.Count
+      }
+    }
+
+    $ExpectedPath = Join-Path $env:LOCALAPPDATA 'Programs'
+    $Result.KnownFolderHandled | Should -BeTrue
+    $Result.CopyHandled | Should -BeTrue
+    $Result.Result | Should -Be '0'
+    $Result.Pointer | Should -Be $ExpectedPath
+    $Result.Destination | Should -Be $ExpectedPath
+    $Result.StackCount | Should -Be 0
   }
 
   It 'Should recognize bounded vendor LZMA2 header framing' {
@@ -613,6 +740,51 @@ Describe 'NSIS parser' {
     $Info.DisplayName | Should -Be 'alist-desktop'
     $Info.DisplayVersion | Should -Be '3.60.0'
     $Info.ProductCode | Should -Be 'alist-desktop'
+    $Info.IsPortable | Should -BeFalse
+    $Info.PortableEvidence | Should -BeNullOrEmpty
+    @($Info.AppsAndFeaturesEntries).Count | Should -Be 1
+    $Info.HasLocalizedAppsAndFeaturesEntries | Should -BeFalse
+    $Info.Notices | Should -BeNullOrEmpty
+  }
+
+  It 'Should resolve architecture-specific ARP identities from the BitComet installer' {
+    $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
+
+    $X86Info = Get-NSISInfo -Path $Fixture -Architecture x86
+    $X64Info = Get-NSISInfo -Path $Fixture -Architecture x64
+
+    $X86Info.ProductCode | Should -Be 'BitComet'
+    $X86Info.DefaultInstallLocation | Should -Be '%ProgramFiles(x86)%\BitComet'
+    $X86Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $X86Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'BitComet'
+
+    $X64Info.ProductCode | Should -Be 'BitComet_x64'
+    $X64Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\BitComet'
+    $X64Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $X64Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'BitComet_x64'
+  }
+
+  It 'Should resolve scope-specific ARP identities from the DBeaver installer' {
+    $Fixture = Get-InstallerFixture -Name 'dbeaver-ce-26.1.3-windows-x86_64.exe' -Url 'https://github.com/dbeaver/dbeaver/releases/download/26.1.3/dbeaver-ce-26.1.3-windows-x86_64.exe' -Sha256 'DF3E522E3DBD4E6A7F91DCD8E422A0BE13220D2E895A681B5B6732ADB518297D'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $UserInfo.HasScopeRuntimeCheck | Should -BeTrue
+    $UserInfo.SupportedScopes | Should -Contain 'user'
+    $UserInfo.SupportedScopes | Should -Contain 'machine'
+    $UserInfo.ProductCode | Should -Be 'DBeaver (current user)'
+    $UserInfo.DisplayName | Should -Be 'DBeaver 26.1.3 (current user)'
+    $UserInfo.Scope | Should -Be 'user'
+    $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\DBeaver'
+    $UserInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver (current user)'
+
+    $MachineInfo.ProductCode | Should -Be 'DBeaver'
+    $MachineInfo.DisplayName | Should -Be 'DBeaver 26.1.3'
+    $MachineInfo.Scope | Should -Be 'machine'
+    $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\DBeaver'
+    $MachineInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver'
+    $MachineInfo.Warnings | Should -BeNullOrEmpty
   }
 
   It 'Should extract a selected executable from a solid LZMA AList installer' {
@@ -702,6 +874,65 @@ Describe 'NSIS parser' {
     $Info.Scope | Should -Be 'machine'
     $SwitchInfo.AdditionalSwitches | Should -BeNullOrEmpty
     $SwitchInfo.RejectedSwitchCandidates.Switch | Should -Contain '/IM'
+  }
+
+  It 'Should detect the electron-builder Bitwarden portable launcher' {
+    $Fixture = Get-InstallerFixture `
+      -Name 'Bitwarden-Portable-2026.6.1.exe' `
+      -Url 'https://github.com/bitwarden/clients/releases/download/desktop-v2026.6.1/Bitwarden-Portable-2026.6.1.exe' `
+      -Sha256 'ECE0E69AE6907564364A8E4B99FB8CB95BE23DC418201871CFA69B11967DAC53'
+    $Info = Get-NSISInfo -Path $Fixture
+    $ElectronBuilderInfo = Get-ElectronBuilderNSISInfo -Path $Fixture
+
+    $Info.IsPortable | Should -BeTrue
+    $Info.WritesAppsAndFeaturesEntry | Should -BeFalse
+    $Info.DefaultInstallLocation | Should -BeNullOrEmpty
+    $Info.PortableEvidence | Should -Contain 'EnvironmentVariable:PORTABLE_EXECUTABLE_DIR'
+    $Info.PortableEvidence | Should -Contain 'EnvironmentVariable:PORTABLE_EXECUTABLE_FILE'
+    $Info.PortableEvidence | Should -Contain 'EnvironmentVariable:PORTABLE_EXECUTABLE_APP_FILENAME'
+    $Info.PortableEvidence | Should -Contain 'NoAppsAndFeaturesEntry'
+    $Info.Warnings | Should -HaveCount 1
+    $Info.Warnings[0] | Should -Match 'portable launcher'
+    $ElectronBuilderInfo.IsElectronBuilder | Should -BeTrue
+    $ElectronBuilderInfo.IsPortable | Should -BeTrue
+    $ElectronBuilderInfo.Evidence.PortableEvidence | Should -Contain 'NoAppsAndFeaturesEntry'
+  }
+
+  It 'Should repair Tencent Meeting paths after its custom directory page' {
+    $Fixture = Get-InstallerFixture `
+      -Name 'TencentMeeting_0300000000_3.44.10.457_x86_64.publish.exe' `
+      -Url 'https://updatecdn.meeting.qq.com/cos/a2bf9c01f76b1df44383ab2f529bec13/TencentMeeting_0300000000_3.44.10.457_x86_64.publish.exe' `
+      -Sha256 '91C02F0877B83052B4D2C0C20736ED1CA6DBC64F5FB09DA3911A5DE91A51BD93'
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64
+    $InstallRoot = Join-Path $env:ProgramFiles 'Tencent\WeMeet'
+
+    $Info.ProductCode | Should -Be 'WeMeet'
+    $Info.DisplayName | Should -Be 'Tencent Meeting'
+    $Info.DisplayVersion | Should -Be '3.44.10.457'
+    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\Tencent\WeMeet\3.44.10.457'
+    $Info.UninstallString | Should -Be "`"$InstallRoot\3.44.10.457\WeMeetUninstall.exe`""
+    $Info.DisplayIcon | Should -Be "`"$InstallRoot\WeMeetApp.exe`""
+    $Info.Scope | Should -Be 'machine'
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should resolve GoTo electron-builder uninstall commands from StrCpy assignments' {
+    $Fixture = Get-InstallerFixture `
+      -Name 'GoToSetup-4.19.1.exe' `
+      -Url 'https://goto-desktop.goto.com/GoToSetup-4.19.1.exe' `
+      -Sha256 '6EF77AB5904A7FEDDA696F54AA346BDE535537D85D9F09DC8A6C321CEE1BDF41'
+    $Info = Get-NSISInfo -Path $Fixture
+    $InstallRoot = Join-Path $env:LOCALAPPDATA 'Programs\goto'
+
+    $Info.ProductCode | Should -Be 'b5746384-3503-4fbf-824a-0a42d1bd0639'
+    $Info.DisplayName | Should -Be 'GoTo 4.19.1'
+    $Info.DisplayVersion | Should -Be '4.19.1'
+    $Info.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\goto'
+    $Info.UninstallString | Should -Be "`"$InstallRoot\Uninstall GoTo.exe`" /currentuser"
+    $Info.QuietUninstallString | Should -Be "`"$InstallRoot\Uninstall GoTo.exe`" /currentuser /S"
+    $Info.DisplayIcon | Should -Be "$InstallRoot\GoTo.exe,0"
+    $Info.Scope | Should -Be 'user'
+    $Info.Warnings | Should -BeNullOrEmpty
   }
 
   It 'Should read NetEase UU Remote metadata from a vendor LZMA2 NSIS header' {
