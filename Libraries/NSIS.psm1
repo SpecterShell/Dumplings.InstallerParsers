@@ -1,5 +1,5 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
-# Format sources: https://github.com/NSIS-Dev/nsis, https://sourceforge.net/projects/nsisbi/, https://github.com/ip7z/7zip, https://github.com/russellbanks/Komac, https://github.com/electron-userland/electron-builder, and https://github.com/Drizin/NsisMultiUser
+# Format sources: https://github.com/NSIS-Dev/nsis, https://sourceforge.net/projects/nsisbi/, https://github.com/ip7z/7zip, https://github.com/russellbanks/Komac, https://github.com/electron-userland/electron-builder, https://github.com/tauri-apps/tauri/tree/dev/crates/tauri-bundler/src/bundle/windows/nsis, and https://github.com/Drizin/NsisMultiUser
 #
 # Binary structure consumed by this parser (archive-relative, LE integers):
 #
@@ -228,6 +228,15 @@ $NSIS_ABORT_RESULT = [pscustomobject]@{ Action = 'Abort'; Address = 0 }
 $NSIS_QUIT_RESULT = [pscustomobject]@{ Action = 'Quit'; Address = 0 }
 
 $NSIS_POP_OPERATION = 1
+$NSIS_GET_OS_INFO_KNOWN_FOLDER = 0
+$NSIS_GET_OS_INFO_READ_MEMORY = 1
+$NSIS_FOLDER_ID_USER_PROGRAM_FILES = '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}'
+$NSIS_ABI_OS_INFO_OFFSET = 56
+$NSIS_TARGET_WINDOWS_MAJOR = 10
+$NSIS_TARGET_WINDOWS_MINOR = 0
+$NSIS_TARGET_WINDOWS_BUILD = 17763
+$NSIS_TARGET_WINDOWS_PRODUCT = 1
+$NSIS_TARGET_WINDOWS_SERVICE_PACK = 0
 
 $NSIS_IMAGE_FILE_MACHINE_I386 = 332
 $NSIS_IMAGE_FILE_MACHINE_AMD64 = 34404
@@ -2677,27 +2686,28 @@ function Initialize-NSISState {
   }
 
   $State = [pscustomobject]@{
-    Path               = $HeaderData.Path
-    Entries            = $Entries
-    Sections           = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
-    StringsBlock       = $StringsBlock
-    LanguageTable      = $LanguageTable
-    LanguageTables     = $LanguageTables
-    VersionInfo        = $VersionInfo
-    Variables          = @{}
-    Registry           = @{}
-    RegistryWrites     = [System.Collections.Generic.List[object]]::new()
-    ExecutedPayloads   = [System.Collections.Generic.List[object]]::new()
-    Warnings           = [System.Collections.Generic.List[string]]::new()
-    Stack              = [System.Collections.Generic.List[string]]::new()
-    Directories        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Files              = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    ExecFlags          = @{}
-    LastExecFlags      = @{}
-    ShellVarContext    = $null
-    TargetArchitecture = $Architecture
-    TargetScope        = $Scope
-    Metadata           = [ordered]@{
+    Path                = $HeaderData.Path
+    Entries             = $Entries
+    Sections            = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+    StringsBlock        = $StringsBlock
+    LanguageTable       = $LanguageTable
+    LanguageTables      = $LanguageTables
+    VersionInfo         = $VersionInfo
+    Variables           = @{}
+    Registry            = @{}
+    RegistryWrites      = [System.Collections.Generic.List[object]]::new()
+    ExecutedPayloads    = [System.Collections.Generic.List[object]]::new()
+    Warnings            = [System.Collections.Generic.List[string]]::new()
+    Stack               = [System.Collections.Generic.List[string]]::new()
+    SystemVariableStack = [System.Collections.Generic.List[object]]::new()
+    Directories         = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Files               = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    ExecFlags           = @{}
+    LastExecFlags       = @{}
+    ShellVarContext     = $null
+    TargetArchitecture  = $Architecture
+    TargetScope         = $Scope
+    Metadata            = [ordered]@{
       Path                               = $HeaderData.Path
       InstallerType                      = 'Nullsoft'
       TargetArchitecture                 = $Architecture
@@ -2705,6 +2715,10 @@ function Initialize-NSISState {
       TargetScope                        = $Scope
       HasScopeRuntimeCheck               = $false
       SupportedScopes                    = [string[]]@()
+      RequestedExecutionLevel            = $null
+      IsTauri                            = $false
+      TauriInstallerMode                 = $null
+      TauriEvidence                      = [string[]]@()
       IsPortable                         = $false
       PortableEvidence                   = [string[]]@()
       ProductCode                        = $null
@@ -2810,6 +2824,125 @@ function Get-NSISNativeMachineValue {
   }
 }
 
+function Resolve-NSISKnownFolderPath {
+  <#
+  .SYNOPSIS
+    Resolve a compiled Windows known-folder identifier without querying the parser host shell
+  .DESCRIPTION
+    NSIS 3 GetKnownFolderPath and older System plug-in macros carry the same
+    canonical GUID. Only installer-related folders derived from stable Windows
+    environment roots are resolved. Redirectable content folders such as
+    Desktop, Documents, and Downloads remain unresolved because synthesizing
+    them below the parser host's profile would contradict the target machine's
+    SHGetKnownFolderPath result. Unknown identifiers return an empty string,
+    matching the NSIS runtime's failed-call destination.
+  .PARAMETER FolderId
+    The brace-delimited known-folder GUID compiled into the NSIS string table
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The brace-delimited Windows known-folder GUID')]
+    [string]$FolderId
+  )
+
+  $ParsedFolderId = [guid]::Empty
+  if (-not [guid]::TryParse($FolderId, [ref]$ParsedFolderId)) { return '' }
+  $CanonicalFolderId = $ParsedFolderId.ToString('B').ToUpperInvariant()
+
+  # Resolve from well-known environment roots so paths are deterministic and
+  # ConvertTo-NSISManifestPath can normalize them without retaining a username
+  # or drive letter. Do not call SHGetKnownFolderPath on the parser host.
+  $WindowsDirectory = $Script:NSIS_WINDOWS_DIRECTORY
+  $SystemDirectory = $Script:NSIS_SYSTEM_DIRECTORY
+  $SystemX86Directory = if ([Environment]::Is64BitOperatingSystem) { Join-Path $WindowsDirectory 'SysWOW64' } else { $SystemDirectory }
+  $ProgramFiles64 = if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }
+  $ProgramFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $ProgramFiles64 }
+  $CommonProgramFiles64 = if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { $env:CommonProgramFiles }
+  $CommonProgramFilesX86 = if (${env:CommonProgramFiles(x86)}) { ${env:CommonProgramFiles(x86)} } else { $CommonProgramFiles64 }
+  $UserStartMenu = if ($env:APPDATA) { Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu' } else { $null }
+  $CommonStartMenu = if ($env:ProgramData) { Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu' } else { $null }
+
+  switch ($CanonicalFolderId) {
+    # Application-data and machine-data roots.
+    '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' { return [string]$env:LOCALAPPDATA } # FOLDERID_LocalAppData
+    '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' { return [string]$env:APPDATA } # FOLDERID_RoamingAppData
+    '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' { return $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'AppData\LocalLow' } else { '' }) } # FOLDERID_LocalAppDataLow
+    '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' { return [string]$env:ProgramData } # FOLDERID_ProgramData
+    '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' { return [string]$env:USERPROFILE } # FOLDERID_Profile
+
+    # Windows and system roots.
+    '{F38BF404-1D43-42F2-9305-67DE0B28FC23}' { return $WindowsDirectory } # FOLDERID_Windows
+    '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}' { return $SystemDirectory } # FOLDERID_System
+    '{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}' { return $SystemX86Directory } # FOLDERID_SystemX86
+    '{FD228CB7-AE11-4AE3-864C-16F3910AB8FE}' { return Join-Path $WindowsDirectory 'Fonts' } # FOLDERID_Fonts
+
+    # Program Files and Common Files variants. Generic IDs use the native
+    # Program Files roots, while explicit X86/X64 IDs retain their bitness.
+    '{905E63B6-C1BF-494E-B29C-65B732D3D21A}' { return [string]$ProgramFiles64 } # FOLDERID_ProgramFiles
+    '{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}' { return [string]$ProgramFilesX86 } # FOLDERID_ProgramFilesX86
+    '{6D809377-6AF0-444B-8957-A3773F02200E}' { return [string]$ProgramFiles64 } # FOLDERID_ProgramFilesX64
+    '{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}' { return [string]$CommonProgramFiles64 } # FOLDERID_ProgramFilesCommon
+    '{DE974D24-D9C6-4D3E-BF91-F4455120B917}' { return [string]$CommonProgramFilesX86 } # FOLDERID_ProgramFilesCommonX86
+    '{6365D5A7-0F0D-45E5-87F6-0DA56B6A4F7D}' { return [string]$CommonProgramFiles64 } # FOLDERID_ProgramFilesCommonX64
+    $Script:NSIS_FOLDER_ID_USER_PROGRAM_FILES { return $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs' } else { '' }) }
+    '{BCBD3057-CA5C-4622-B42D-BC56DB0AE516}' { return $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\Common' } else { '' }) } # FOLDERID_UserProgramFilesCommon
+
+    # Per-user Start Menu folders.
+    '{625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}' { return [string]$UserStartMenu } # FOLDERID_StartMenu
+    '{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}' { return $(if ($UserStartMenu) { Join-Path $UserStartMenu 'Programs' } else { '' }) } # FOLDERID_Programs
+    '{B97D20BB-F46A-4C97-BA10-5E3608430854}' { return $(if ($UserStartMenu) { Join-Path $UserStartMenu 'Programs\Startup' } else { '' }) } # FOLDERID_Startup
+    '{724EF170-A42D-4FEF-9F26-B60E846FBA4F}' { return $(if ($UserStartMenu) { Join-Path $UserStartMenu 'Programs\Administrative Tools' } else { '' }) } # FOLDERID_AdminTools
+
+    # All-users Start Menu folders.
+    '{A4115719-D62E-491D-AA7C-E74B8BE3B067}' { return [string]$CommonStartMenu } # FOLDERID_CommonStartMenu
+    '{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}' { return $(if ($CommonStartMenu) { Join-Path $CommonStartMenu 'Programs' } else { '' }) } # FOLDERID_CommonPrograms
+    '{82A5EA35-D9CD-47C5-9629-E15D2F714E6E}' { return $(if ($CommonStartMenu) { Join-Path $CommonStartMenu 'Programs\Startup' } else { '' }) } # FOLDERID_CommonStartup
+    '{D0384E7D-BAC3-4797-8F14-CBA229B392B5}' { return $(if ($CommonStartMenu) { Join-Path $CommonStartMenu 'Programs\Administrative Tools' } else { '' }) } # FOLDERID_CommonAdminTools
+    default { return '' }
+  }
+}
+
+function Get-NSISOsInfoMemoryValue {
+  <#
+  .SYNOPSIS
+    Resolve source-generated GetWinVer reads from the NSIS runtime ABI block
+  .DESCRIPTION
+    NSIS compiles GetWinVer to EW_GETOSINFO/READMEMORY against an eight-byte
+    osinfo record following fourteen 32-bit execution flags. Dumplings models
+    the Windows 10 1809 baseline supported by WinGet instead of leaking the
+    parser host's OS version into static installer control flow. Arbitrary
+    ReadMemory addresses and unrecognized byte ranges remain unresolved.
+  .PARAMETER Address
+    The compiled source address; zero is NSIS ABI_OSINFOADDRESS
+  .PARAMETER Specification
+    Packed byte count in bits 0..7 and osinfo byte offset in bits 24..31
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The compiled memory address')]
+    [long]$Address,
+
+    [Parameter(Mandatory, HelpMessage = 'The packed byte-count and osinfo offset')]
+    [uint32]$Specification
+  )
+
+  if ($Address -ne 0) { return $null }
+  $ByteCount = [int]($Specification -band 0xFF)
+  $FieldOffset = [int]($Specification -shr 24) - $Script:NSIS_ABI_OS_INFO_OFFSET
+
+  # This mirrors little-endian mini_memcpy from NSIS exec.c. The two-byte
+  # major/minor form starts at WVMin, so major occupies the high byte.
+  switch ("$FieldOffset`:$ByteCount") {
+    '0:4' { return [string]$Script:NSIS_TARGET_WINDOWS_BUILD }
+    '4:1' { return [string]$Script:NSIS_TARGET_WINDOWS_PRODUCT }
+    '5:1' { return [string]$Script:NSIS_TARGET_WINDOWS_SERVICE_PACK }
+    '6:1' { return [string]$Script:NSIS_TARGET_WINDOWS_MINOR }
+    '7:1' { return [string]$Script:NSIS_TARGET_WINDOWS_MAJOR }
+    '6:2' { return [string](($Script:NSIS_TARGET_WINDOWS_MAJOR -shl 8) -bor $Script:NSIS_TARGET_WINDOWS_MINOR) }
+    default { return $null }
+  }
+}
+
 function Invoke-NSISSystemPluginCall {
   <#
   .SYNOPSIS
@@ -2818,8 +2951,10 @@ function Invoke-NSISSystemPluginCall {
     NSIS compiles System::Call arguments as stack pushes followed by EW_REGISTERDLL.
     This helper consumes those arguments where the plug-in would and models the
     known-folder and Windows architecture APIs used by electron-builder and
-    x64.nsh. Other calls receive empty outputs rather than values derived from
-    the parser host.
+    x64.nsh. System::Store is also modeled because electron-builder protects
+    its temporary registers around the legacy Windows 7 known-folder path.
+    Other calls receive empty outputs rather than values derived from the
+    parser host.
   .PARAMETER State
     The mutable NSIS execution state
   .PARAMETER FunctionName
@@ -2853,6 +2988,53 @@ function Invoke-NSISSystemPluginCall {
     return $true
   }
 
+  if ($FunctionName -ieq 'Store') {
+    # System::Store consumes a compact operation string. S/L save and restore
+    # all general registers on the plug-in's private stack; p/r transfer one
+    # numbered register through the ordinary NSIS stack. This follows
+    # Contrib/System/Source/Buffers.c instead of treating Store as a no-op.
+    $Command = Pop-NSISStackValue -State $State
+    if (-not $State.PSObject.Properties['SystemVariableStack']) {
+      $State | Add-Member -NotePropertyName SystemVariableStack -NotePropertyValue ([System.Collections.Generic.List[object]]::new())
+    }
+
+    for ($Index = 0; $Index -lt $Command.Length; $Index++) {
+      switch -CaseSensitive ($Command[$Index]) {
+        { $_ -in @('s', 'S') } {
+          $Snapshot = [string[]]::new(20)
+          for ($RegisterIndex = 0; $RegisterIndex -lt $Snapshot.Length; $RegisterIndex++) {
+            $Snapshot[$RegisterIndex] = Get-NSISVariableValue -State $State -Index $RegisterIndex
+          }
+          $State.SystemVariableStack.Add($Snapshot)
+        }
+        { $_ -in @('l', 'L') } {
+          if ($State.SystemVariableStack.Count -eq 0) { continue }
+          $SnapshotIndex = $State.SystemVariableStack.Count - 1
+          $Snapshot = $State.SystemVariableStack[$SnapshotIndex]
+          $State.SystemVariableStack.RemoveAt($SnapshotIndex)
+          for ($RegisterIndex = 0; $RegisterIndex -lt 20; $RegisterIndex++) {
+            # These indexes are exactly $0-$9 and $R0-$R9, so restoring them
+            # cannot alter predefined paths such as $INSTDIR or $OUTDIR.
+            $State.Variables[$RegisterIndex] = [string]$Snapshot[$RegisterIndex]
+          }
+        }
+        { $_ -in @('p', 'P') } {
+          if ($Index + 1 -ge $Command.Length -or -not [char]::IsDigit($Command[$Index + 1])) { continue }
+          $RegisterIndex = [int][char]::GetNumericValue($Command[++$Index])
+          if ($_ -ceq 'P') { $RegisterIndex += 10 }
+          $State.Stack.Add((Get-NSISVariableValue -State $State -Index $RegisterIndex))
+        }
+        { $_ -in @('r', 'R') } {
+          if ($Index + 1 -ge $Command.Length -or -not [char]::IsDigit($Command[$Index + 1])) { continue }
+          $RegisterIndex = [int][char]::GetNumericValue($Command[++$Index])
+          if ($_ -ceq 'R') { $RegisterIndex += 10 }
+          Set-NSISVariableValue -State $State -Index $RegisterIndex -Value (Pop-NSISStackValue -State $State)
+        }
+      }
+    }
+    return $true
+  }
+
   if ($FunctionName -ine 'Call') { return $false }
   $Command = Pop-NSISStackValue -State $State
   if ([string]::IsNullOrWhiteSpace($Command)) { return $true }
@@ -2861,10 +3043,7 @@ function Invoke-NSISSystemPluginCall {
     # electron-builder resolves FOLDERID_UserProgramFiles and copies the
     # allocated result into its per-user installation root. The System plug-in
     # writes both values directly to NSIS variables; neither value is pushed.
-    $KnownFolderPath = switch ($Matches.FolderId.ToUpperInvariant()) {
-      '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}' { Join-Path $env:LOCALAPPDATA 'Programs' }
-      default { '' }
-    }
+    $KnownFolderPath = Resolve-NSISKnownFolderPath -FolderId $Matches.FolderId
     Set-NSISVariableValue -State $State -Index ([int]$Matches.PathRegister) -Value $KnownFolderPath
     Set-NSISVariableValue -State $State -Index ([int]$Matches.ResultRegister) -Value $(if ($KnownFolderPath) { '0' } else { '-2147024894' })
     return $true
@@ -2991,10 +3170,12 @@ function Get-NSISScopeSelectionStart {
   .SYNOPSIS
     Locate a compiled NSIS function that selects one installation scope
   .DESCRIPTION
-    Both NSIS MultiUser.nsh and Drizin/NsisMultiUser compile their scope setters
-    to an assignment of AllUsers or CurrentUser followed by SetShellVarContext.
-    This structural pair is stronger evidence than the presence of switch text
-    and lets the simulator enter the selected function without modeling UAC UI.
+    NSIS MultiUser templates compile their scope setters to a mode assignment
+    followed by SetShellVarContext. Drizin/NsisMultiUser uses AllUsers while
+    current electron-builder uses the shorter all value; both use CurrentUser
+    for per-user mode. This structural pair is stronger evidence than switch
+    text and lets the simulator enter the selected function without modeling
+    UAC UI.
   .PARAMETER State
     The mutable NSIS execution state containing normalized command entries
   .PARAMETER Scope
@@ -3010,7 +3191,11 @@ function Get-NSISScopeSelectionStart {
     [string]$Scope
   )
 
-  $ModeName = if ($Scope -eq 'machine') { 'AllUsers' } else { 'CurrentUser' }
+  $ModeNames = if ($Scope -eq 'machine') {
+    [string[]]@('AllUsers', 'all')
+  } else {
+    [string[]]@('CurrentUser')
+  }
   $ExpectedContext = if ($Scope -eq 'machine') { 1 } else { 0 }
 
   for ($Index = 0; $Index -lt $State.Entries.Count; $Index++) {
@@ -3018,7 +3203,7 @@ function Get-NSISScopeSelectionStart {
     if ($Entry.Opcode -ne $Script:NSIS_OPCODE_ASSIGN_VAR) { continue }
 
     try { $AssignedValue = Get-NSISString -State $State -RelativeOffset $Entry.Values[2] } catch { continue }
-    if ($AssignedValue -cne $ModeName) { continue }
+    if ($ModeNames -cnotcontains $AssignedValue) { continue }
 
     # Require the nearby shell-context opcode so unrelated variables named
     # AllUsers or CurrentUser cannot become scope-selector false positives.
@@ -3040,7 +3225,7 @@ function Get-NSISScopeSelectionStart {
       $Comparison = $State.Entries[$Index - 2]
       $Left = Get-NSISString -State $State -RelativeOffset $Comparison.Values[1]
       $Right = Get-NSISString -State $State -RelativeOffset $Comparison.Values[2]
-      if ($Left -ceq $ModeName -or $Right -ceq $ModeName) { return $Index - 2 }
+      if ($ModeNames -ccontains $Left -or $ModeNames -ccontains $Right) { return $Index - 2 }
     }
 
     return $Index
@@ -3292,6 +3477,29 @@ function Invoke-NSISEntry {
       Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[1])) -Value $EnvironmentValue
       return $Script:NSIS_CONTINUE_RESULT
     }
+    $Script:NSIS_OPCODE_GET_OS_INFO {
+      # NSIS 3 compiles GetKnownFolderPath into EW_GETOSINFO rather than a
+      # System plug-in call. offsets[1] is the output variable, offsets[2] is
+      # the GUID string, and offsets[3] selects the operation. Tauri's standard
+      # dual-scope template reaches this path through upstream MultiUser.nsh.
+      $Operation = $Values[4]
+      if ($Operation -eq $Script:NSIS_GET_OS_INFO_KNOWN_FOLDER) {
+        $FolderId = Get-NSISString -State $State -RelativeOffset $Values[3]
+        $KnownFolderPath = Resolve-NSISKnownFolderPath -FolderId $FolderId
+        Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[2])) -Value $KnownFolderPath
+      } elseif ($Operation -eq $Script:NSIS_GET_OS_INFO_READ_MEMORY) {
+        $Address = Get-NSISInt -State $State -RelativeOffset $Values[3]
+        $Specification = [uint32](Get-NSISInt -State $State -RelativeOffset $Values[5])
+        $OsInfoValue = Get-NSISOsInfoMemoryValue -Address $Address -Specification $Specification
+        if ($null -ne $OsInfoValue) {
+          Set-NSISVariableValue -State $State -Index ([Math]::Abs($Values[2])) -Value $OsInfoValue
+        }
+      }
+
+      # Arbitrary GETOSINFO_READMEMORY addresses remain unresolved; never copy
+      # process memory from the parser host into installer evidence.
+      return $Script:NSIS_CONTINUE_RESULT
+    }
     $Script:NSIS_OPCODE_INT_CMP {
       $Left = Get-NSISInt -State $State -RelativeOffset $Values[1]
       $Right = Get-NSISInt -State $State -RelativeOffset $Values[2]
@@ -3459,6 +3667,7 @@ function ConvertTo-NSISManifestPath {
     @($env:LOCALAPPDATA, '%LocalAppData%'),
     @($env:APPDATA, '%AppData%'),
     @($env:ProgramData, '%ProgramData%'),
+    @($env:USERPROFILE, '%UserProfile%'),
     @($Script:NSIS_WINDOWS_DIRECTORY, '%SystemRoot%')
   ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_[0]) } | Sort-Object -Property { - $_[0].Length } -Stable
 
@@ -3928,6 +4137,94 @@ function Get-NSISPortableLauncherInfo {
   }
 }
 
+function Test-NSISStringBlockLiteral {
+  <#
+  .SYNOPSIS
+    Test whether the decoded NSIS string block contains one exact template marker
+  .PARAMETER State
+    The mutable NSIS execution state containing the decoded strings block
+  .PARAMETER Value
+    The case-sensitive literal emitted by the installer template
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The exact template marker to locate')]
+    [string]$Value
+  )
+
+  # Search bytes directly instead of materializing every decoded string merely
+  # to identify a few compiler-generated markers on large installers.
+  $Encoding = if ($State.VersionInfo.Unicode) { [Text.Encoding]::Unicode } else { [Text.Encoding]::Default }
+  $Pattern = $Encoding.GetBytes($Value)
+  return @(Find-BinaryPattern -Bytes $State.StringsBlock -Pattern $Pattern -Maximum 1).Count -gt 0
+}
+
+function Get-NSISTauriInstallerInfo {
+  <#
+  .SYNOPSIS
+    Identify the standard Tauri NSIS template and its compiled install mode
+  .DESCRIPTION
+    Tauri permits custom NSIS templates, so generic product strings are not
+    enough. Detection requires three markers emitted together by Tauri's
+    standard template: its native utility plug-in, MainBinaryName registry
+    value, and placeholder installation directory. The mode then comes from
+    compiled MultiUser setters, the visible ARP scope, and the PE execution
+    level rather than a package-name allowlist.
+  .PARAMETER State
+    The mutable NSIS execution state after scope selectors were discovered
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  if (-not $State.PSObject.Properties['TauriTemplateEvidence']) {
+    $Markers = [System.Collections.Generic.List[string]]::new()
+    foreach ($Marker in @('nsis_tauri_utils.dll', 'MainBinaryName', 'placeholder\')) {
+      if (Test-NSISStringBlockLiteral -State $State -Value $Marker) { $Markers.Add($Marker) }
+    }
+
+    $IsTauri = $Markers.Count -eq 3
+    $RequestedExecutionLevel = if ($IsTauri) { Get-PERequestedExecutionLevel -Path $State.Path } else { $null }
+    $State | Add-Member -NotePropertyName TauriTemplateEvidence -NotePropertyValue ([pscustomobject]@{
+        IsTauri                 = $IsTauri
+        Markers                 = [string[]]$Markers.ToArray()
+        RequestedExecutionLevel = $RequestedExecutionLevel
+      })
+  }
+
+  $Template = $State.TauriTemplateEvidence
+  $InstallerMode = $null
+  if ($Template.IsTauri) {
+    $SupportedScopes = @($State.Metadata.SupportedScopes)
+    if ($SupportedScopes -contains 'user' -and $SupportedScopes -contains 'machine' -and
+      $Template.RequestedExecutionLevel -eq 'highestAvailable') {
+      $InstallerMode = 'both'
+    } elseif ($State.Metadata.Scope -eq 'user' -and $Template.RequestedExecutionLevel -eq 'asInvoker') {
+      $InstallerMode = 'currentUser'
+    } elseif ($State.Metadata.Scope -eq 'machine' -and $Template.RequestedExecutionLevel -eq 'requireAdministrator') {
+      $InstallerMode = 'perMachine'
+    }
+  }
+
+  $Evidence = [System.Collections.Generic.List[string]]::new()
+  foreach ($Marker in @($Template.Markers)) { $Evidence.Add("String:$Marker") }
+  if ($Template.RequestedExecutionLevel) { $Evidence.Add("RequestedExecutionLevel:$($Template.RequestedExecutionLevel)") }
+  foreach ($SupportedScope in @($State.Metadata.SupportedScopes)) { $Evidence.Add("CompiledScope:$SupportedScope") }
+  if ($State.Metadata.Scope) { $Evidence.Add("ObservedArpScope:$($State.Metadata.Scope)") }
+
+  return [pscustomobject][ordered]@{
+    IsTauri                 = [bool]$Template.IsTauri
+    InstallerMode           = $InstallerMode
+    RequestedExecutionLevel = $Template.RequestedExecutionLevel
+    Evidence                = [string[]]$Evidence.ToArray()
+  }
+}
+
 function Complete-NSISMetadata {
   <#
   .SYNOPSIS
@@ -3982,6 +4279,30 @@ function Complete-NSISMetadata {
       $State.Metadata.Scope = 'machine'
     } else {
       $State.Metadata.Scope = 'user'
+    }
+  }
+
+  # Tauri's standard template has three install-mode variants. Record only a
+  # mode proven by its template markers plus compiled scope/execution evidence;
+  # custom templates remain ordinary NSIS when those markers do not agree.
+  $TauriInfo = Get-NSISTauriInstallerInfo -State $State
+  $State.Metadata.IsTauri = $TauriInfo.IsTauri
+  $State.Metadata.TauriInstallerMode = $TauriInfo.InstallerMode
+  $State.Metadata.RequestedExecutionLevel = $TauriInfo.RequestedExecutionLevel
+  $State.Metadata.TauriEvidence = [string[]]$TauriInfo.Evidence
+  if ($TauriInfo.IsTauri) {
+    if ($TauriInfo.InstallerMode -eq 'currentUser' -and @($State.Metadata.SupportedScopes).Count -eq 0) {
+      $State.Metadata.SupportedScopes = [string[]]@('user')
+    } elseif ($TauriInfo.InstallerMode -eq 'perMachine' -and @($State.Metadata.SupportedScopes).Count -eq 0) {
+      $State.Metadata.SupportedScopes = [string[]]@('machine')
+    } elseif (-not $TauriInfo.InstallerMode) {
+      $State.Warnings.Add('The standard Tauri NSIS template was detected, but its compiled installer mode could not be resolved from scope and PE execution-level evidence.')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
+      @($State.Metadata.SupportedScopes).Count -gt 0 -and
+      $State.Metadata.SupportedScopes -notcontains $State.TargetScope) {
+      $State.Warnings.Add("The Tauri installer supports '$($State.Metadata.SupportedScopes -join ', ')' scope, not the requested '$($State.TargetScope)' scope.")
     }
   }
 
@@ -4323,16 +4644,24 @@ function Get-NSISInstallerSwitchInfo {
     # invoke individual metadata readers, which would parse the installer again.
     $Simulation = Invoke-NSISStaticSimulation -Path $Path
     $Strings = Get-NSISPlainStrings -State $Simulation.State
+    $TauriInfo = Get-NSISTauriInstallerInfo -State $Simulation.State
     $Switches = [System.Collections.Generic.List[object]]::new()
     $RejectedSwitches = [System.Collections.Generic.List[object]]::new()
     $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $Pattern = '(?<![A-Za-z0-9_./\\-])(?:--[A-Za-z][A-Za-z0-9][A-Za-z0-9._-]*|/[A-Za-z][A-Za-z0-9][A-Za-z0-9._-]*)(?::[^\s"''<>]+|=[^\s"''<>]+)?'
+    $Pattern = '(?<![A-Za-z0-9_./\\-])(?:--[A-Za-z][A-Za-z0-9._-]+|/[A-Za-z](?:[A-Za-z0-9._-]+)?)(?::[^\s"''<>]+|=[^\s"''<>]+)?'
     $DefaultSwitches = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($Switch in @('/S', '/NCRC', '/D', '/SD', '/LANG', '/LOG')) { $null = $DefaultSwitches.Add($Switch) }
     $ScopeSwitches = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($Switch in @('/CURRENTUSER', '/currentuser', '/AllUsers', '/ALLUSERS', '/allusers', '--all-users', '--current-user')) { $null = $ScopeSwitches.Add($Switch) }
     $SilentSwitches = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($Switch in @('/S', '/silent', '/verysilent', '--silent', '--updated')) { $null = $SilentSwitches.Add($Switch) }
+    $TauriSwitchPurposes = [ordered]@{
+      '/P'      = 'Passive installation with progress'
+      '/NS'     = 'Suppress shortcut creation'
+      '/UPDATE' = 'Internal updater mode'
+      '/R'      = 'Run the application after silent or passive installation'
+      '/ARGS'   = 'Arguments passed to the application launched by /R'
+    }
     $ParsingMarkers = @($Strings | Where-Object {
         $_ -match '(?i)\b(TestParameter|GetParameters|GetOptions|IfSilent|StrStr|CommandLine|Parameters)\b'
       } | Select-Object -First 20)
@@ -4346,7 +4675,8 @@ function Get-NSISInstallerSwitchInfo {
         if ($Name -match '\.(exe|dll|msi|zip|7z|ico|png|jpg|jpeg|json|yml|yaml|txt|html?)$') { continue }
         if ($Name -match '^/[A-Z]:$') { continue }
 
-        $IsKnownSwitch = $DefaultSwitches.Contains($Name) -or $ScopeSwitches.Contains($Name) -or $SilentSwitches.Contains($Name)
+        $IsTauriSwitch = $TauriInfo.IsTauri -and $TauriSwitchPurposes.Contains($Name)
+        $IsKnownSwitch = $DefaultSwitches.Contains($Name) -or $ScopeSwitches.Contains($Name) -or $SilentSwitches.Contains($Name) -or $IsTauriSwitch
         $HasParsingEvidence = $String -match '(?i)\b(TestParameter|GetParameters|GetOptions|IfSilent|StrStr|CommandLine|Parameters)\b'
         $EscapedValue = [regex]::Escape($Value)
         $TrimmedString = $String.Trim()
@@ -4368,6 +4698,8 @@ function Get-NSISInstallerSwitchInfo {
             IsDefaultNsisSwitch = $DefaultSwitches.Contains($Name)
             IsScopeSwitch       = $ScopeSwitches.Contains($Name)
             IsSilentSwitch      = $SilentSwitches.Contains($Name)
+            IsTauriSwitch       = $IsTauriSwitch
+            Purpose             = if ($IsTauriSwitch) { $TauriSwitchPurposes[$Name] } else { $null }
             IsCustomCandidate   = -not $DefaultSwitches.Contains($Name)
             Evidence            = $Evidence
           })
@@ -4376,16 +4708,25 @@ function Get-NSISInstallerSwitchInfo {
 
     $AdditionalSwitches = @($Switches | Where-Object { $_.IsCustomCandidate } | Select-Object -ExpandProperty Switch)
 
+    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Warnings.Add('Switch extraction is static string evidence. Confirm switch control-flow in the NSIS script or a VM before using custom switches in manifests.')
+    if ($TauriInfo.IsTauri) {
+      $Warnings.Add('Tauri /P is passive installation with progress; /R launches the application after installation, while /UPDATE and /ARGS are internal update/run arguments rather than general manifest switches.')
+    }
+
     [pscustomobject]@{
       Path                       = (Get-Item -Path $Path -Force).FullName
       InstallerType              = 'Nullsoft'
+      IsTauri                    = $TauriInfo.IsTauri
+      TauriInstallerMode         = $TauriInfo.InstallerMode
       Switches                   = $Switches.ToArray()
+      TauriSwitches              = @($Switches | Where-Object { $_.IsTauriSwitch })
       AdditionalSwitches         = $AdditionalSwitches
       ScopeSwitches              = @($Switches | Where-Object { $_.IsScopeSwitch } | Select-Object -ExpandProperty Switch)
       SilentSwitches             = @($Switches | Where-Object { $_.IsSilentSwitch } | Select-Object -ExpandProperty Switch)
       CommandLineParsingEvidence = $ParsingMarkers
       RejectedSwitchCandidates   = $RejectedSwitches.ToArray()
-      Warnings                   = @('Switch extraction is static string evidence. Confirm switch control-flow in the NSIS script or a VM before using custom switches in manifests.')
+      Warnings                   = [string[]]$Warnings.ToArray()
     }
   }
 }

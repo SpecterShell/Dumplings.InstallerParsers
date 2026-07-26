@@ -696,6 +696,140 @@ Describe 'NSIS parser' {
     $Result.StackCount | Should -Be 0
   }
 
+  It 'Should model the source-backed NSIS 3 GetKnownFolderPath opcode' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $FolderId = '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}'
+      $StringsBlock = [Text.Encoding]::ASCII.GetBytes("x`0$FolderId`0")
+      $State = [pscustomobject]@{
+        Variables     = @{}
+        StringsBlock  = $StringsBlock
+        LanguageTable = $null
+        VersionInfo   = [pscustomobject]@{ Unicode = $false; IsV3 = $true; Type = 3 }
+        Metadata      = [ordered]@{ DefaultInstallLocation = $null }
+      }
+      $Entry = [pscustomobject]@{
+        Opcode = $Script:NSIS_OPCODE_GET_OS_INFO
+        Raw    = [uint32[]](65, 0, 21, 2, 0, 0, 0)
+        Values = [int[]](65, 0, 21, 2, 0, 0, 0)
+      }
+
+      $null = Invoke-NSISEntry -State $State -Entry $Entry
+      $State.Variables[21]
+    }
+
+    $Result | Should -Be (Join-Path $env:LOCALAPPDATA 'Programs')
+  }
+
+  It 'Should resolve stable installer-related Windows known folders' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $WindowsDirectory = if ($env:windir) { $env:windir } else { 'C:\Windows' }
+    $SystemDirectory = Join-Path $WindowsDirectory 'System32'
+    $SystemX86Directory = if ([Environment]::Is64BitOperatingSystem) { Join-Path $WindowsDirectory 'SysWOW64' } else { $SystemDirectory }
+    $ProgramFiles64 = if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }
+    $ProgramFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $ProgramFiles64 }
+    $CommonProgramFiles64 = if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { $env:CommonProgramFiles }
+    $CommonProgramFilesX86 = if (${env:CommonProgramFiles(x86)}) { ${env:CommonProgramFiles(x86)} } else { $CommonProgramFiles64 }
+    $UserStartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu'
+    $CommonStartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu'
+    $Cases = [ordered]@{
+      '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' = $env:LOCALAPPDATA
+      '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' = $env:APPDATA
+      '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' = Join-Path $env:USERPROFILE 'AppData\LocalLow'
+      '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' = $env:ProgramData
+      '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' = $env:USERPROFILE
+      '{F38BF404-1D43-42F2-9305-67DE0B28FC23}' = $WindowsDirectory
+      '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}' = $SystemDirectory
+      '{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}' = $SystemX86Directory
+      '{FD228CB7-AE11-4AE3-864C-16F3910AB8FE}' = Join-Path $WindowsDirectory 'Fonts'
+      '{905E63B6-C1BF-494E-B29C-65B732D3D21A}' = $ProgramFiles64
+      '{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}' = $ProgramFilesX86
+      '{6D809377-6AF0-444B-8957-A3773F02200E}' = $ProgramFiles64
+      '{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}' = $CommonProgramFiles64
+      '{DE974D24-D9C6-4D3E-BF91-F4455120B917}' = $CommonProgramFilesX86
+      '{6365D5A7-0F0D-45E5-87F6-0DA56B6A4F7D}' = $CommonProgramFiles64
+      '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}' = Join-Path $env:LOCALAPPDATA 'Programs'
+      '{BCBD3057-CA5C-4622-B42D-BC56DB0AE516}' = Join-Path $env:LOCALAPPDATA 'Programs\Common'
+      '{625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}' = $UserStartMenu
+      '{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}' = Join-Path $UserStartMenu 'Programs'
+      '{B97D20BB-F46A-4C97-BA10-5E3608430854}' = Join-Path $UserStartMenu 'Programs\Startup'
+      '{724EF170-A42D-4FEF-9F26-B60E846FBA4F}' = Join-Path $UserStartMenu 'Programs\Administrative Tools'
+      '{A4115719-D62E-491D-AA7C-E74B8BE3B067}' = $CommonStartMenu
+      '{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}' = Join-Path $CommonStartMenu 'Programs'
+      '{82A5EA35-D9CD-47C5-9629-E15D2F714E6E}' = Join-Path $CommonStartMenu 'Programs\Startup'
+      '{D0384E7D-BAC3-4797-8F14-CBA229B392B5}' = Join-Path $CommonStartMenu 'Programs\Administrative Tools'
+    }
+
+    $Result = & $Module {
+      param($Cases)
+      $Resolved = [ordered]@{}
+      foreach ($Case in $Cases.GetEnumerator()) {
+        $Resolved[$Case.Key] = Resolve-NSISKnownFolderPath -FolderId $Case.Key.ToLowerInvariant().Trim('{', '}')
+      }
+      $Resolved['Unknown'] = Resolve-NSISKnownFolderPath -FolderId '{00000000-0000-0000-0000-000000000000}'
+      $Resolved['Invalid'] = Resolve-NSISKnownFolderPath -FolderId 'not-a-guid'
+      $Resolved
+    } $Cases
+
+    foreach ($Case in $Cases.GetEnumerator()) {
+      $Result[$Case.Key] | Should -Be $Case.Value
+    }
+    $Result.Unknown | Should -BeNullOrEmpty
+    $Result.Invalid | Should -BeNullOrEmpty
+  }
+
+  It 'Should normalize known-folder profile paths without retaining the host user name' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      [pscustomobject]@{
+        Profile  = ConvertTo-NSISManifestPath -Path (Resolve-NSISKnownFolderPath '{5E6C858F-0E22-4760-9AFE-EA3317B67173}')
+        LocalLow = ConvertTo-NSISManifestPath -Path (Resolve-NSISKnownFolderPath '{A520A1A4-1780-4FF6-BD18-167343C5AF16}')
+      }
+    }
+
+    $Result.Profile | Should -Be '%UserProfile%'
+    $Result.LocalLow | Should -Be '%UserProfile%\AppData\LocalLow'
+  }
+
+  It 'Should preserve temporary NSIS registers through source-backed System Store calls' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        Variables           = @{ 0 = 'original'; 11 = 'original-r1' }
+        Stack               = [System.Collections.Generic.List[string]]::new()
+        SystemVariableStack = [System.Collections.Generic.List[object]]::new()
+      }
+
+      $State.Stack.Add('S')
+      $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Store'
+      $State.Variables[0] = 'temporary'
+      $State.Variables[11] = 'temporary-r1'
+      $State.Stack.Add('L')
+      $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Store'
+
+      $State.Variables[2] = 'general-2'
+      $State.Variables[12] = 'high-general-2'
+      $State.Stack.Add('p2P2r3R3')
+      $null = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Store'
+
+      [pscustomobject]@{
+        Register0        = $State.Variables[0]
+        RegisterR1       = $State.Variables[11]
+        GeneralRegister3 = $State.Variables[3]
+        HighRegister3    = $State.Variables[13]
+        PrivateStackSize = $State.SystemVariableStack.Count
+        PublicStackSize  = $State.Stack.Count
+      }
+    }
+
+    $Result.Register0 | Should -Be 'original'
+    $Result.RegisterR1 | Should -Be 'original-r1'
+    $Result.GeneralRegister3 | Should -Be 'high-general-2'
+    $Result.HighRegister3 | Should -Be 'general-2'
+    $Result.PrivateStackSize | Should -Be 0
+    $Result.PublicStackSize | Should -Be 0
+  }
+
   It 'Should recognize bounded vendor LZMA2 header framing' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -785,6 +919,73 @@ Describe 'NSIS parser' {
     $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\DBeaver'
     $MachineInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver'
     $MachineInfo.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should resolve both current electron-builder scopes from the WorkBuddy installer' {
+    $Fixture = Get-InstallerFixture -Name 'WorkBuddy-win32-x64-user-5.3.5.34189228-8044e898.exe' -Url 'https://download.codebuddy.cn/workbuddy/saas/win32-x64-user/WorkBuddy-win32-x64-user-5.3.5.34189228-8044e898.exe' -Sha256 '3064D6E873BD74169E62EA2E480382C120125E6B8F99155649EC2389C3CBFAFF'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $UserInfo.SupportedScopes | Should -Contain 'user'
+    $UserInfo.SupportedScopes | Should -Contain 'machine'
+    $UserInfo.ProductCode | Should -Be 'BFD312E9-1019-4F57-9F44-F86246833B50'
+    $UserInfo.Scope | Should -Be 'user'
+    $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\WorkBuddy'
+    $UserInfo.UninstallString | Should -Be ('"{0}\Programs\WorkBuddy\Uninstall WorkBuddy.exe" /currentuser' -f $env:LOCALAPPDATA)
+    @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKCU'
+    $UserInfo.Warnings | Should -BeNullOrEmpty
+
+    $MachineInfo.ProductCode | Should -Be 'BFD312E9-1019-4F57-9F44-F86246833B50'
+    $MachineInfo.Scope | Should -Be 'machine'
+    $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\WorkBuddy'
+    $MachineInfo.UninstallString | Should -Be ('"{0}\WorkBuddy\Uninstall WorkBuddy.exe" /allusers' -f $env:ProgramFiles)
+    @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
+    $MachineInfo.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should identify the three standard Tauri NSIS install modes from compiled evidence' {
+    $Readest = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe' -Sha256 'DF8C9E2763CC9EC3E453CCE6320DF442798D115F9127C0C6BA831B800CBDB7DD'
+    $Yaak = Get-InstallerFixture -Name 'Yaak_2026.4.0_x64-setup.exe' -Url 'https://github.com/mountain-loop/yaak/releases/download/v2026.4.0/Yaak_2026.4.0_x64-setup.exe' -Sha256 '026DC0753F4880313B93BBFF848A9CD09A114F87111AAAEF5E4E698C52C8B561'
+    $ClashVerge = Get-InstallerFixture -Name 'Clash.Verge_2.5.2_x64-setup.exe' -Url 'https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.2/Clash.Verge_2.5.2_x64-setup.exe' -Sha256 'BA42F00B1082E352352080170FE86AE411BCC854CB13F1B8BEBC9025E8A7CBF4'
+
+    $BothInfo = Get-NSISInfo -Path $Readest -Scope user
+    $UserInfo = Get-NSISInfo -Path $Yaak
+    $MachineInfo = Get-NSISInfo -Path $ClashVerge
+
+    $BothInfo.IsTauri | Should -BeTrue
+    $BothInfo.TauriInstallerMode | Should -Be 'both'
+    $BothInfo.RequestedExecutionLevel | Should -Be 'highestAvailable'
+    $BothInfo.SupportedScopes | Should -Be @('user', 'machine')
+    $BothInfo.Scope | Should -Be 'user'
+    $BothInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\Readest'
+
+    $UserInfo.IsTauri | Should -BeTrue
+    $UserInfo.TauriInstallerMode | Should -Be 'currentUser'
+    $UserInfo.RequestedExecutionLevel | Should -Be 'asInvoker'
+    $UserInfo.SupportedScopes | Should -Be @('user')
+    $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Yaak'
+
+    $MachineInfo.IsTauri | Should -BeTrue
+    $MachineInfo.TauriInstallerMode | Should -Be 'perMachine'
+    $MachineInfo.RequestedExecutionLevel | Should -Be 'requireAdministrator'
+    $MachineInfo.SupportedScopes | Should -Be @('machine')
+    $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\Clash Verge'
+  }
+
+  It 'Should classify standard Tauri command-line switches by purpose' {
+    $Fixture = Get-InstallerFixture -Name 'Yaak_2026.4.0_x64-setup.exe' -Url 'https://github.com/mountain-loop/yaak/releases/download/v2026.4.0/Yaak_2026.4.0_x64-setup.exe' -Sha256 '026DC0753F4880313B93BBFF848A9CD09A114F87111AAAEF5E4E698C52C8B561'
+    $Info = Get-NSISInstallerSwitchInfo -Path $Fixture
+
+    $Info.IsTauri | Should -BeTrue
+    $Info.TauriInstallerMode | Should -Be 'currentUser'
+    $Info.TauriSwitches.Switch | Should -Contain '/P'
+    $Info.TauriSwitches.Switch | Should -Contain '/NS'
+    $Info.TauriSwitches.Switch | Should -Contain '/UPDATE'
+    $Info.TauriSwitches.Switch | Should -Contain '/R'
+    $Info.TauriSwitches.Switch | Should -Contain '/ARGS'
+    ($Info.TauriSwitches | Where-Object Switch -EQ '/P').Purpose | Should -Be 'Passive installation with progress'
+    ($Info.TauriSwitches | Where-Object Switch -EQ '/R').Purpose | Should -Be 'Run the application after silent or passive installation'
   }
 
   It 'Should extract a selected executable from a solid LZMA AList installer' {
