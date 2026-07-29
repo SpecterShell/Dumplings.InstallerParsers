@@ -916,6 +916,24 @@ Describe 'NSIS parser' {
     $Info.Warnings | Should -BeNullOrEmpty
   }
 
+  It 'Should select BeeDrive machine ARP writes when dormant user writes are also compiled' {
+    $Fixture = Get-InstallerFixture -Name 'BeeDrive-2.0.3-20301-x64.exe' `
+      -Url 'https://global.synologydownload.com/download/Utility/BeeDrive/2.0.3-20301/Windows/x86_64/BeeDrive-2.0.3-20301-x64.exe' `
+      -Sha256 '253353785A303A704CDA2F4C906AFF1F0986BD5E6A84BCD788826477A41C7A0D'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $Info.ProductCode | Should -Be '986aaad0-133f-5ad2-87e6-59ea820cbbad'
+    $Info.DisplayName | Should -Be 'BeeDrive 2.0.3-20301'
+    $Info.DisplayVersion | Should -Be '2.0.3-20301'
+    $Info.Publisher | Should -Be 'Synology'
+    $Info.Scope | Should -Be 'machine'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain '986aaad0-133f-5ad2-87e6-59ea820cbbad'
+    @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
   It 'Should resolve scope-specific ARP identities from the DBeaver installer' {
     $Fixture = Get-InstallerFixture -Name 'dbeaver-ce-26.1.3-windows-x86_64.exe' -Url 'https://github.com/dbeaver/dbeaver/releases/download/26.1.3/dbeaver-ce-26.1.3-windows-x86_64.exe' -Sha256 'DF3E522E3DBD4E6A7F91DCD8E422A0BE13220D2E895A681B5B6732ADB518297D'
 

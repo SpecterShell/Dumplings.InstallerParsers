@@ -3316,9 +3316,11 @@ function Add-NSISUnambiguousTargetUninstallWrites {
   .DESCRIPTION
     Custom installer hooks can abort static section simulation before a standard
     registry macro runs. This fallback accepts compiled EW_WRITEREG evidence only
-    when every uninstall write resolves to one key beneath the hive selected by
-    the requested scope. Branch-dependent command strings are deliberately left
-    unresolved because a lexical scan cannot prove their runtime assignments.
+    when uninstall writes in the hive selected by the requested scope resolve to
+    one key. Writes compiled for another scope are ignored because templates can
+    retain both HKCU and HKLM command paths even when only one is reachable.
+    Branch-dependent command strings are deliberately left unresolved because a
+    lexical scan cannot prove their runtime assignments.
   .PARAMETER State
     The mutable NSIS execution state after target scope selection and section simulation
   .OUTPUTS
@@ -3332,10 +3334,11 @@ function Add-NSISUnambiguousTargetUninstallWrites {
 
   if ([string]::IsNullOrWhiteSpace([string]$State.TargetScope)) { return $false }
   $ExpectedRoot = $State.TargetScope -eq 'machine' ? 'HKLM' : 'HKCU'
-  $Candidates = @(Get-NSISDirectUninstallWrites -State $State)
-  if ($Candidates.Count -eq 0 -or @($Candidates | Where-Object Root -CNE $ExpectedRoot).Count -gt 0) { return $false }
+  $Candidates = @(Get-NSISDirectUninstallWrites -State $State | Where-Object Root -CEQ $ExpectedRoot)
+  if ($Candidates.Count -eq 0) { return $false }
 
-  $Identities = @($Candidates | ForEach-Object { "$($_.Root)`0$($_.Key)" } | Select-Object -Unique)
+  $Identities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($Candidate in $Candidates) { $null = $Identities.Add("$($Candidate.Root)`0$($Candidate.Key)") }
   if ($Identities.Count -ne 1) { return $false }
 
   # DisplayName and DisplayVersion prove that the single key is an ARP entry,
