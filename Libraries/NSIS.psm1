@@ -3278,14 +3278,83 @@ function Add-NSISDirectUninstallWrites {
     [pscustomobject]$State
   )
 
+  foreach ($Write in @(Get-NSISDirectUninstallWrites -State $State)) {
+    $State.RegistryWrites.Add($Write)
+    Set-NSISRegistryValue -State $State -Root $Write.Root -Key $Write.Key -Name $Write.Name -Value $Write.Value
+  }
+}
+
+function Get-NSISDirectUninstallWrites {
+  <#
+  .SYNOPSIS
+    Decode explicit uninstall-key writes without following installer control flow
+  .PARAMETER State
+    The mutable NSIS execution state whose current variables and shell context resolve operands
+  .OUTPUTS
+    Source-backed EW_WRITEREG evidence in command-table order
+  #>
+  [OutputType([object[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  $Writes = [System.Collections.Generic.List[object]]::new()
   for ($EntryIndex = 0; $EntryIndex -lt $State.Entries.Count; $EntryIndex++) {
     $Entry = $State.Entries[$EntryIndex]
     if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
     $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry -EntryIndex $EntryIndex
-    if (-not $Write -or -not $Write.IsUninstallKey) { continue }
+    if ($Write -and $Write.IsUninstallKey) { $Writes.Add($Write) }
+  }
+  return [object[]]$Writes.ToArray()
+}
+
+function Add-NSISUnambiguousTargetUninstallWrites {
+  <#
+  .SYNOPSIS
+    Recover stable ARP identity when targeted section simulation stops before registry creation
+  .DESCRIPTION
+    Custom installer hooks can abort static section simulation before a standard
+    registry macro runs. This fallback accepts compiled EW_WRITEREG evidence only
+    when every uninstall write resolves to one key beneath the hive selected by
+    the requested scope. Branch-dependent command strings are deliberately left
+    unresolved because a lexical scan cannot prove their runtime assignments.
+  .PARAMETER State
+    The mutable NSIS execution state after target scope selection and section simulation
+  .OUTPUTS
+    True when one deterministic uninstall identity was applied; otherwise false
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The targeted NSIS execution state')]
+    [pscustomobject]$State
+  )
+
+  if ([string]::IsNullOrWhiteSpace([string]$State.TargetScope)) { return $false }
+  $ExpectedRoot = $State.TargetScope -eq 'machine' ? 'HKLM' : 'HKCU'
+  $Candidates = @(Get-NSISDirectUninstallWrites -State $State)
+  if ($Candidates.Count -eq 0 -or @($Candidates | Where-Object Root -CNE $ExpectedRoot).Count -gt 0) { return $false }
+
+  $Identities = @($Candidates | ForEach-Object { "$($_.Root)`0$($_.Key)" } | Select-Object -Unique)
+  if ($Identities.Count -ne 1) { return $false }
+
+  # DisplayName and DisplayVersion prove that the single key is an ARP entry,
+  # rather than an unrelated helper value under an uninstall-like path.
+  $Names = @($Candidates.Name)
+  if ('DisplayName' -cnotin $Names -or 'DisplayVersion' -cnotin $Names) { return $false }
+
+  $StableNames = @('DisplayName', 'DisplayVersion', 'Publisher', 'SystemComponent')
+  foreach ($Write in @($Candidates | Where-Object Name -CIn $StableNames)) {
     $State.RegistryWrites.Add($Write)
     Set-NSISRegistryValue -State $State -Root $Write.Root -Key $Write.Key -Name $Write.Name -Value $Write.Value
   }
+
+  # The standard electron-builder registry macro composes these values from
+  # scope-dependent registers. Preserve that limitation explicitly instead of
+  # reporting a lexically nearest but potentially wrong switch or path.
+  $DynamicNames = @('UninstallString', 'QuietUninstallString', 'DisplayIcon') | Where-Object { $_ -cin $Names }
+  $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields + $DynamicNames | Select-Object -Unique)
+  return [bool]$State.Metadata.WritesAppsAndFeaturesEntry
 }
 
 function Invoke-NSISCodeSegment {
@@ -3940,10 +4009,24 @@ function Repair-NSISIncompleteInstallMetadata {
   if ([string]::IsNullOrWhiteSpace($ObservedInstallRoot)) { $ObservedInstallRoot = [string]$State.Metadata.DefaultInstallLocation }
   $EffectiveScope = [string]$State.Metadata.Scope
   $UninstallRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($Entry in $State.Entries) {
-    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
-    $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
-    if ($Write.IsUninstallKey) { $null = $UninstallRoots.Add($Write.Root) }
+
+  # Reached registry writes retain the shell context selected when each command
+  # executed. Prefer them over re-decoding every compiled EW_WRITEREG command
+  # with the simulator's final ambient context, which can incorrectly turn a
+  # targeted HKLM branch back into the template's default HKCU scope.
+  if ($State.PSObject.Properties.Name -contains 'RegistryWrites') {
+    foreach ($Write in @($State.RegistryWrites)) {
+      if ($Write.IsUninstallKey) { $null = $UninstallRoots.Add($Write.Root) }
+    }
+  }
+  if ($UninstallRoots.Count -eq 0) {
+    # Incomplete UI-driven simulations may not reach registry creation. Retain
+    # the previous source-backed fallback only for that evidence-free case.
+    foreach ($Entry in $State.Entries) {
+      if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
+      $Write = Get-NSISRegistryWriteFromEntry -State $State -Entry $Entry
+      if ($Write.IsUninstallKey) { $null = $UninstallRoots.Add($Write.Root) }
+    }
   }
   if ($UninstallRoots.Count -eq 1) {
     # An explicit uninstall hive is stronger scope evidence than a temporary
@@ -4557,6 +4640,15 @@ function Invoke-NSISStaticSimulation {
       } catch {
         # Continue parsing when the success callback contains unsupported UI-only behavior.
       }
+    }
+
+    if (($HasTargetArchitectureResolver -or $HasTargetScopeResolver) -and
+      @($State.RegistryWrites | Where-Object IsUninstallKey).Count -eq 0) {
+      # A selected architecture branch or an electron-builder custom scope hook
+      # can stop the bounded simulator before explicit uninstall writes are
+      # reached. Recover only one identity in the caller-requested hive;
+      # architecture- or scope-dependent alternatives remain unresolved.
+      $null = Add-NSISUnambiguousTargetUninstallWrites -State $State
     }
 
     if ($UseDirectRegistryFallback -and

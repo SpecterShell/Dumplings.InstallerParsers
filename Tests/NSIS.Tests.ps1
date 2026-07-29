@@ -898,6 +898,24 @@ Describe 'NSIS parser' {
     $X64Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'BitComet_x64'
   }
 
+  It 'Should retain Yuanfudao ARP writes when resolving its x64 runtime branch' {
+    $Fixture = Get-InstallerFixture -Name 'yuanfudao-student-7.27.0.22424-installer-x64.exe' `
+      -Url 'https://apphub.fbcontent.cn/ape-gallery/app/yuanfudao-student-7.27.0.22424-installer-x64.exe' `
+      -Sha256 '4ECC35BB89473DA3C4C227BF6B6480493A73CFC293ABF05BB4CE483EDC279B66'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $Info.ProductCode | Should -Be 'tutor-electron-student'
+    $Info.DisplayName | Should -Be '猿辅导'
+    $Info.DisplayVersion | Should -Be '7.27.0.22424'
+    $Info.Publisher | Should -Be '北京贞观雨科技有限公司'
+    $Info.Scope | Should -Be 'machine'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'tutor-electron-student'
+    @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
   It 'Should resolve scope-specific ARP identities from the DBeaver installer' {
     $Fixture = Get-InstallerFixture -Name 'dbeaver-ce-26.1.3-windows-x86_64.exe' -Url 'https://github.com/dbeaver/dbeaver/releases/download/26.1.3/dbeaver-ce-26.1.3-windows-x86_64.exe' -Sha256 'DF3E522E3DBD4E6A7F91DCD8E422A0BE13220D2E895A681B5B6732ADB518297D'
 
@@ -942,6 +960,62 @@ Describe 'NSIS parser' {
     $MachineInfo.UninstallString | Should -Be ('"{0}\WorkBuddy\Uninstall WorkBuddy.exe" /allusers' -f $env:ProgramFiles)
     @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
     $MachineInfo.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should recover one explicit scoped ARP identity after custom AionUi hooks stop section simulation' {
+    $Fixture = Get-InstallerFixture -Name 'AionUi-2.1.42-win-x64.exe' -Url 'https://github.com/iOfficeAI/AionUi/releases/download/v2.1.42/AionUi-2.1.42-win-x64.exe'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    foreach ($Info in @($UserInfo, $MachineInfo)) {
+      $Info.ProductCode | Should -Be 'f3bfde38-8429-545c-a4e9-a078d87dee6c'
+      $Info.DisplayName | Should -Be 'AionUi'
+      $Info.DisplayVersion | Should -Be '2.1.42'
+      $Info.Publisher | Should -Be 'AionUi'
+      $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+      $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'f3bfde38-8429-545c-a4e9-a078d87dee6c'
+      $Info.UninstallString | Should -BeNullOrEmpty
+      $Info.QuietUninstallString | Should -BeNullOrEmpty
+      $Info.UnresolvedFields | Should -Contain 'UninstallString'
+      $Info.UnresolvedFields | Should -Contain 'QuietUninstallString'
+      $Info.Warnings | Should -BeNullOrEmpty
+    }
+
+    $UserInfo.Scope | Should -Be 'user'
+    $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\AionUi'
+    @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Count | Should -BeGreaterThan 0
+    @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKCU')
+
+    $MachineInfo.Scope | Should -Be 'machine'
+    $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\AionUi'
+    @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Count | Should -BeGreaterThan 0
+    @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
+  }
+
+  It 'Should retain the selected RivonClaw scope after later sections change ambient shell context' {
+    $Fixture = Get-InstallerFixture -Name 'TK-Copilot.Setup.1.8.82.exe' -Url 'https://github.com/gaoyangz77/rivonclaw/releases/download/v1.8.82/TK-Copilot.Setup.1.8.82.exe' -Sha256 '02AD6F71BCE64307EB3EBAE25041503D690E0C64FFAD4D209BF791B91A684824'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    foreach ($Info in @($UserInfo, $MachineInfo)) {
+      $Info.ProductCode | Should -Be '51492edb-6d67-582c-a781-6b48bbf5f3bf'
+      $Info.DisplayName | Should -Be 'TK Copilot'
+      $Info.DisplayVersion | Should -Be '1.8.82'
+      $Info.SupportedScopes | Should -Contain 'user'
+      $Info.SupportedScopes | Should -Contain 'machine'
+      $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+      $Info.Warnings | Should -BeNullOrEmpty
+    }
+
+    $UserInfo.Scope | Should -Be 'user'
+    $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\TK Copilot'
+    @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKCU')
+
+    $MachineInfo.Scope | Should -Be 'machine'
+    $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\TK Copilot'
+    @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
   }
 
   It 'Should identify the three standard Tauri NSIS install modes from compiled evidence' {
