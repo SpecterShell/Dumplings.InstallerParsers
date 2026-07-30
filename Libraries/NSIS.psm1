@@ -44,6 +44,16 @@
 #         +00 UnpackedSize:u32/u64
 #         +04/+08 FileData[UnpackedSize]
 #
+# Archive paths are reconstructed from the compiled command stream:
+#
+#   initial prefix $INSTDIR
+#     SetOutPath -> replace/extend prefix through $OUTDIR or saved $_OUTDIR
+#     File name  -> prefix relative names; preserve absolute symbolic variables
+#     item path  -> remove the leading virtual $INSTDIR\ root only
+#
+# This produces stable paths such as $PLUGINSDIR\System.dll, bin\tool.exe, and
+# $_17_\payload.dll without resolving variables against the parser host.
+#
 # A packed-size high bit marks a compressed non-solid block; solid archives start
 # directly with one codec stream. Opcode numbering is normalized for NSIS 2/3,
 # Unicode/Park, log-enabled, and NSISBI layouts before simulation. Explicit
@@ -309,6 +319,28 @@ $NSIS_SHELL_STRINGS = @(
   'CDBurnArea',
   $null,
   'ComputersNearMe'
+)
+
+# 7-Zip renders compiled variables and shell-folder control codes symbolically
+# when constructing archive item paths. Keep a separate table from the metadata
+# resolver above so extraction never embeds paths from the parser host.
+$NSIS_SYMBOLIC_VARIABLE_NAMES = @(
+  'CMDLINE', 'INSTDIR', 'OUTDIR', 'EXEDIR', 'LANGUAGE', 'TEMP',
+  'PLUGINSDIR', 'EXEPATH', 'EXEFILE', 'HWNDPARENT', '_CLICK', '_OUTDIR'
+)
+$NSIS_SYMBOLIC_SHELL_STRINGS = @(
+  'DESKTOP', 'INTERNET', 'SMPROGRAMS', 'CONTROLS', 'PRINTERS', 'DOCUMENTS',
+  'FAVORITES', 'SMSTARTUP', 'RECENT', 'SENDTO', 'BITBUCKET', 'STARTMENU',
+  $null, 'MUSIC', 'VIDEOS', $null, 'DESKTOP', 'DRIVES', 'NETWORK', 'NETHOOD',
+  'FONTS', 'TEMPLATES', 'STARTMENU', 'SMPROGRAMS', 'SMSTARTUP', 'DESKTOP',
+  'APPDATA', 'PRINTHOOD', 'LOCALAPPDATA', 'ALTSTARTUP', 'ALTSTARTUP',
+  'FAVORITES', 'INTERNET_CACHE', 'COOKIES', 'HISTORY', 'APPDATA', 'WINDIR',
+  'SYSDIR', 'PROGRAM_FILES', 'PICTURES', 'PROFILE', 'SYSTEMX86',
+  'PROGRAM_FILESX86', 'PROGRAM_FILES_COMMON', 'PROGRAM_FILES_COMMONX8',
+  'TEMPLATES', 'DOCUMENTS', 'ADMINTOOLS', 'ADMINTOOLS', 'CONNECTIONS',
+  $null, $null, $null, 'MUSIC', 'PICTURES', 'VIDEOS', 'RESOURCES',
+  'RESOURCES_LOCALIZED', 'COMMON_OEM_LINKS', 'CDBURN_AREA', $null,
+  'COMPUTERSNEARME'
 )
 
 function Get-PEInfo {
@@ -1836,6 +1868,159 @@ function Resolve-NSISShellValue {
   if ($Index1 -lt $Script:NSIS_SHELL_STRINGS.Count -and $Script:NSIS_SHELL_STRINGS[$Index1]) { return [string]$Script:NSIS_SHELL_STRINGS[$Index1] }
   if ($Index2 -lt $Script:NSIS_SHELL_STRINGS.Count -and $Script:NSIS_SHELL_STRINGS[$Index2]) { return [string]$Script:NSIS_SHELL_STRINGS[$Index2] }
   return ''
+}
+
+function ConvertTo-NSISSymbolicVariable {
+  <#
+  .SYNOPSIS
+    Render a compiled NSIS variable index using the stable source spelling
+  .PARAMETER Index
+    Zero-based NSIS variable-table index encoded in a string control sequence.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The compiled NSIS variable index')]
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$Index
+  )
+
+  # User variables occupy $0..$9 and $R0..$R9. Modern NSIS then exposes twelve
+  # predefined variables; compiler-private variables use the $_N_ notation that
+  # 7-Zip presents in its NSIS archive catalog.
+  if ($Index -lt 10) { return '$' + $Index }
+  if ($Index -lt 20) { return '$R' + ($Index - 10) }
+  $InternalIndex = $Index - 20
+  if ($InternalIndex -lt $Script:NSIS_SYMBOLIC_VARIABLE_NAMES.Count) {
+    return '$' + $Script:NSIS_SYMBOLIC_VARIABLE_NAMES[$InternalIndex]
+  }
+  return '$_' + ($InternalIndex - $Script:NSIS_SYMBOLIC_VARIABLE_NAMES.Count) + '_'
+}
+
+function Resolve-NSISSymbolicShellValue {
+  <#
+  .SYNOPSIS
+    Render an NSIS shell-folder control payload without consulting the host
+  .PARAMETER State
+    Initialized NSIS parser state containing the source string table.
+  .PARAMETER Character
+    Packed primary and fallback shell-folder indexes.
+  .PARAMETER Depth
+    Current bounded symbolic-string recursion depth.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [Parameter(Mandatory)][uint16]$Character,
+    [ValidateRange(0, 32)][int]$Depth = 0
+  )
+
+  $Bytes = [BitConverter]::GetBytes($Character)
+  $Index1 = [int]$Bytes[0]
+  $Index2 = [int]$Bytes[1]
+
+  # The high bit selects a registry-backed Program Files/Common Files lookup;
+  # bit 6 selects its 64-bit view. Keep unsupported values explicit rather than
+  # resolving them against the machine running Dumplings.
+  if (($Index1 -band 0x80) -ne 0) {
+    $StringOffset = $Index1 -band 0x3F
+    $RegistryName = Get-NSISSymbolicString -State $State -RelativeOffset $StringOffset -Depth ($Depth + 1)
+    $Suffix = if (($Index1 -band 0x40) -ne 0) { '64' } else { '' }
+    switch ($RegistryName) {
+      'ProgramFilesDir' { return '$PROGRAMFILES' + $Suffix }
+      'CommonFilesDir' { return '$COMMONFILES' + $Suffix }
+      default { return '$_ERROR_UNSUPPORTED_VALUE_REGISTRY_(' + $RegistryName + ')' }
+    }
+  }
+
+  foreach ($Index in @($Index1, $Index2)) {
+    if ($Index -lt $Script:NSIS_SYMBOLIC_SHELL_STRINGS.Count -and $Script:NSIS_SYMBOLIC_SHELL_STRINGS[$Index]) {
+      return '$' + $Script:NSIS_SYMBOLIC_SHELL_STRINGS[$Index]
+    }
+  }
+  return '$_ERROR_UNSUPPORTED_SHELL_[' + $Index1 + ',' + $Index2 + ']'
+}
+
+function Get-NSISSymbolicString {
+  <#
+  .SYNOPSIS
+    Decode an NSIS string while preserving variables, shell folders, and language references
+  .PARAMETER State
+    Initialized NSIS parser state containing strings and command-layout evidence.
+  .PARAMETER RelativeOffset
+    String-table offset, measured in characters for Unicode installers.
+  .PARAMETER Depth
+    Current recursion depth for registry-backed shell strings.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [Parameter(Mandatory)][int]$RelativeOffset,
+    [ValidateRange(0, 32)][int]$Depth = 0
+  )
+
+  if ($Depth -ge 8) { return '$_ERROR_STRING_RECURSION_' }
+  if ($RelativeOffset -lt 0) {
+    return '$(LSTR_' + [Math]::Abs($RelativeOffset + 1) + ')'
+  }
+
+  $Multiplier = if ($State.VersionInfo.Unicode) { 2 } else { 1 }
+  $Offset = $RelativeOffset * $Multiplier
+  if ($Offset -lt 0 -or $Offset -ge $State.StringsBlock.Length) { return '$_ERROR_BAD_STRING_' }
+
+  # Decode the bounded code-unit sequence once, then render control sequences in
+  # a second pass. This follows the same NSIS 2/3/Park layouts as Get-NSISString
+  # but intentionally does not read mutable simulated variable values.
+  if ($State.VersionInfo.Unicode) {
+    $EndOffset = $Offset
+    while ($EndOffset + 1 -lt $State.StringsBlock.Length -and
+      -not ($State.StringsBlock[$EndOffset] -eq 0 -and $State.StringsBlock[$EndOffset + 1] -eq 0)) { $EndOffset += 2 }
+    if ($EndOffset -le $Offset) { return '' }
+    $Characters = [uint16[]]::new(($EndOffset - $Offset) / 2)
+    [Buffer]::BlockCopy($State.StringsBlock, $Offset, $Characters, 0, $EndOffset - $Offset)
+  } else {
+    $EndOffset = $Offset
+    while ($EndOffset -lt $State.StringsBlock.Length -and $State.StringsBlock[$EndOffset] -ne 0) { $EndOffset++ }
+    if ($EndOffset -le $Offset) { return '' }
+    $Characters = [uint16[]]::new($EndOffset - $Offset)
+    for ($CharacterIndex = 0; $CharacterIndex -lt $Characters.Length; $CharacterIndex++) {
+      $Characters[$CharacterIndex] = $State.StringsBlock[$Offset + $CharacterIndex]
+    }
+  }
+
+  $Builder = [Text.StringBuilder]::new()
+  for ($Index = 0; $Index -lt $Characters.Count; $Index++) {
+    $Current = $Characters[$Index]
+    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
+    if (-not $CodeKind) {
+      $null = $Builder.Append([char]$Current)
+      continue
+    }
+    if ($Index + 1 -ge $Characters.Count) { break }
+
+    if ($CodeKind -eq 'Skip') {
+      $Index++
+      $null = $Builder.Append([char]$Characters[$Index])
+      continue
+    }
+
+    if ($State.VersionInfo.Unicode) {
+      $Index++
+      $Payload = $Characters[$Index]
+    } else {
+      if ($Index + 2 -ge $Characters.Count) { break }
+      $Index++
+      $Low = $Characters[$Index]
+      $Index++
+      $Payload = [uint16]($Low -bor ($Characters[$Index] -shl 8))
+    }
+    $Number = ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type
+    switch ($CodeKind) {
+      'Var' { $null = $Builder.Append((ConvertTo-NSISSymbolicVariable -Index $Number)) }
+      'Shell' { $null = $Builder.Append((Resolve-NSISSymbolicShellValue -State $State -Character $Payload -Depth $Depth)) }
+      'Lang' { $null = $Builder.Append(('$(LSTR_' + $Number + ')')) }
+    }
+  }
+  return $Builder.ToString()
 }
 
 function Get-NSISString {
@@ -5046,16 +5231,118 @@ function ConvertTo-NSISExtractionRelativePath {
   return [string]::Join([IO.Path]::DirectorySeparatorChar, $Segments)
 }
 
+function Join-NSISArchivePath {
+  <#
+  .SYNOPSIS
+    Join two symbolic NSIS path fragments without consulting host path semantics
+  .PARAMETER Prefix
+    Current compiled SetOutPath prefix.
+  .PARAMETER Path
+    Relative compiled File operand or SetOutPath suffix.
+  #>
+  [OutputType([string])]
+  param (
+    [AllowEmptyString()][Parameter(Mandatory)][string]$Prefix,
+    [AllowEmptyString()][Parameter(Mandatory)][string]$Path
+  )
+
+  $Left = $Prefix.Replace('/', '\').TrimEnd('\')
+  $Right = $Path.Replace('/', '\').TrimStart('\')
+  if ([string]::IsNullOrEmpty($Left)) { return $Right }
+  if ([string]::IsNullOrEmpty($Right)) { return $Left }
+  return $Left + '\' + $Right
+}
+
+function Test-NSISAbsoluteArchivePath {
+  <#
+  .SYNOPSIS
+    Test whether a compiled File operand bypasses the active SetOutPath prefix
+  .PARAMETER Path
+    Symbolically decoded compiled File operand.
+  #>
+  [OutputType([bool])]
+  param (
+    [AllowEmptyString()][Parameter(Mandatory)][string]$Path
+  )
+
+  # 7-Zip treats these four predefined variables as absolute path sources. Shell
+  # folder controls are not included here because they can also establish the
+  # active SetOutPath and must follow the compiled command sequence.
+  return $Path -match '^(?i:\$(?:INSTDIR|EXEDIR|TEMP|PLUGINSDIR))(?=\\|$)' -or
+  $Path -match '^[A-Za-z]:' -or $Path.StartsWith('\\')
+}
+
+function Resolve-NSISArchiveOutputPrefix {
+  <#
+  .SYNOPSIS
+    Resolve a symbolic SetOutPath operand against current and saved output paths
+  .PARAMETER Path
+    Symbolically decoded SetOutPath operand.
+  .PARAMETER CurrentPrefix
+    Output prefix active before this command.
+  .PARAMETER SavedPrefix
+    Prefix saved by the compiler-private _OUTDIR variable.
+  #>
+  [OutputType([string])]
+  param (
+    [AllowEmptyString()][Parameter(Mandatory)][string]$Path,
+    [AllowEmptyString()][Parameter(Mandatory)][string]$CurrentPrefix,
+    [AllowEmptyString()][Parameter(Mandatory)][string]$SavedPrefix
+  )
+
+  $Candidate = $Path.Replace('/', '\')
+  foreach ($Variable in @(
+      [pscustomobject]@{ Name = '$_OUTDIR'; Value = $SavedPrefix },
+      [pscustomobject]@{ Name = '$OUTDIR'; Value = $CurrentPrefix }
+    )) {
+    if ($Candidate.Equals($Variable.Name, [StringComparison]::OrdinalIgnoreCase)) { return $Variable.Value }
+    if ($Candidate.StartsWith($Variable.Name + '\', [StringComparison]::OrdinalIgnoreCase)) {
+      return Join-NSISArchivePath -Prefix $Variable.Value -Path $Candidate.Substring($Variable.Name.Length + 1)
+    }
+  }
+  return $Candidate
+}
+
+function Get-NSISReducedArchivePath {
+  <#
+  .SYNOPSIS
+    Combine a File operand with SetOutPath and remove 7-Zip's virtual $INSTDIR root
+  .PARAMETER SourcePath
+    Symbolically decoded EW_EXTRACTFILE filename operand.
+  .PARAMETER OutputPrefix
+    Active symbolic output prefix at the command position.
+  #>
+  [OutputType([string])]
+  param (
+    [AllowEmptyString()][Parameter(Mandatory)][string]$SourcePath,
+    [AllowEmptyString()][Parameter(Mandatory)][string]$OutputPrefix
+  )
+
+  $Path = $SourcePath.Replace('/', '\')
+  if (-not (Test-NSISAbsoluteArchivePath -Path $Path)) {
+    $Path = Join-NSISArchivePath -Prefix $OutputPrefix -Path $Path
+  }
+
+  # The archive browser presents $INSTDIR as its virtual root. Other symbolic
+  # variables remain visible so architecture/scope-dependent destinations do not
+  # collapse into one flat directory.
+  if ($Path.Equals('$INSTDIR', [StringComparison]::OrdinalIgnoreCase)) { return '' }
+  if ($Path.StartsWith('$INSTDIR\', [StringComparison]::OrdinalIgnoreCase)) {
+    return $Path.Substring('$INSTDIR\'.Length)
+  }
+  return $Path
+}
+
 function Get-NSISPayloadEntries {
   <#
   .SYNOPSIS
-    Read source filenames and data offsets from normalized EW_EXTRACTFILE entries
+    Build a 7-Zip-style payload path catalog from normalized NSIS commands
   .PARAMETER State
     Initialized NSIS parser state containing normalized command and string tables.
   .PARAMETER HeaderData
     Validated first-header and archive layout evidence.
   .PARAMETER Name
-    Wildcard matched against the compiled path, safe relative path, and base name.
+    Wildcard matched against the compiled operand, archive path, safe path, and base name.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -5065,7 +5352,30 @@ function Get-NSISPayloadEntries {
   )
 
   $Payloads = [System.Collections.Generic.List[object]]::new()
+  $CurrentPrefix = '$INSTDIR'
+  $SavedPrefix = ''
   foreach ($Entry in $State.Entries) {
+    if ($Entry.Opcode -eq $Script:NSIS_OPCODE_CREATE_DIR -and $Entry.Values[2] -ne 0) {
+      # SetOutPath is encoded as EW_CREATEDIR with a nonzero second operand. A
+      # literal $OUTDIR or compiler-private $_OUTDIR prefix is relative to the
+      # corresponding previously tracked path; all other operands replace it.
+      $SetOutPath = Get-NSISSymbolicString -State $State -RelativeOffset $Entry.Values[1]
+      $CurrentPrefix = Resolve-NSISArchiveOutputPrefix -Path $SetOutPath -CurrentPrefix $CurrentPrefix -SavedPrefix $SavedPrefix
+      continue
+    }
+
+    if ($Entry.Opcode -eq $Script:NSIS_OPCODE_ASSIGN_VAR -and [int]$Entry.Raw[1] -eq $Script:NSIS_PREDEFINED_VAR__OUTDIR) {
+      # NSIS macros save $OUTDIR in the private _OUTDIR variable before changing
+      # it, then restore or extend that path later. Only the source-defined plain
+      # StrCpy form has deterministic prefix semantics.
+      $SavedPrefix = ''
+      if ($Entry.Raw[3] -eq 0 -and $Entry.Raw[4] -eq 0) {
+        $AssignedValue = Get-NSISSymbolicString -State $State -RelativeOffset $Entry.Values[2]
+        if ($AssignedValue.Equals('$OUTDIR', [StringComparison]::OrdinalIgnoreCase)) { $SavedPrefix = $CurrentPrefix }
+      }
+      continue
+    }
+
     if ($Entry.Opcode -ne $Script:NSIS_OPCODE_EXTRACT_FILE) { continue }
 
     # Standard NSIS stores a uint32 data offset in operand 2. NSISBI widens that
@@ -5075,15 +5385,18 @@ function Get-NSISPayloadEntries {
     } else {
       [uint64]$Entry.Raw[3]
     }
-    $SourcePath = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
-    $RelativePath = ConvertTo-NSISExtractionRelativePath -Path $SourcePath -DataOffset $DataOffset
+    $SourcePath = Get-NSISSymbolicString -State $State -RelativeOffset $Entry.Values[2]
+    $ArchivePath = Get-NSISReducedArchivePath -SourcePath $SourcePath -OutputPrefix $CurrentPrefix
+    $RelativePath = ConvertTo-NSISExtractionRelativePath -Path $ArchivePath -DataOffset $DataOffset
     if (-not (Test-ExtractionPattern -Path $SourcePath -Pattern $Name) -and
+      -not (Test-ExtractionPattern -Path $ArchivePath -Pattern $Name) -and
       -not (Test-ExtractionPattern -Path $RelativePath -Pattern $Name)) { continue }
 
     $TimeLowIndex = if ($HeaderData.IsNsisBi) { 5 } else { 4 }
     $TimeHighIndex = if ($HeaderData.IsNsisBi) { 6 } else { 5 }
     $Payloads.Add([pscustomobject]@{
         SourcePath   = $SourcePath
+        ArchivePath  = $ArchivePath
         RelativePath = $RelativePath
         DataOffset   = $DataOffset
         TimeLow      = $Entry.Raw[$TimeLowIndex]

@@ -32,6 +32,80 @@ BeforeAll {
 }
 
 Describe 'NSIS parser' {
+  It 'Should render extraction strings with stable symbolic NSIS variables and shell folders' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      function ConvertTo-TestPackedNumber([int]$Value) {
+        return [uint16](0x8080 -bor ($Value -band 0x7F) -bor (($Value -shr 7) -shl 8))
+      }
+
+      $Strings = [System.Collections.Generic.List[uint16]]::new()
+      function Add-TestString([uint16[]]$Characters) {
+        $Offset = $Strings.Count
+        foreach ($Character in $Characters) { $Strings.Add($Character) }
+        $Strings.Add(0)
+        return $Offset
+      }
+
+      $PluginOffset = Add-TestString @(
+        3, (ConvertTo-TestPackedNumber 26), [char]'\', [char]'p', [char]'l', [char]'u', [char]'g', [char]'i', [char]'n', [char]'.', [char]'d', [char]'l', [char]'l'
+      )
+      $RegisterOffset = Add-TestString @(
+        3, (ConvertTo-TestPackedNumber 11), [char]'\', [char]'f', [char]'i', [char]'l', [char]'e'
+      )
+      $PrivateOffset = Add-TestString @(
+        3, (ConvertTo-TestPackedNumber 49), [char]'\', [char]'f', [char]'i', [char]'l', [char]'e'
+      )
+      $ShellOffset = Add-TestString @(
+        2, [uint16](37 -bor (37 -shl 8)), [char]'\', [char]'t', [char]'o', [char]'o', [char]'l', [char]'.', [char]'d', [char]'l', [char]'l'
+      )
+      $LanguageOffset = Add-TestString @(1, (ConvertTo-TestPackedNumber 62))
+      $StringBytes = [byte[]]::new($Strings.Count * 2)
+      [Buffer]::BlockCopy($Strings.ToArray(), 0, $StringBytes, 0, $StringBytes.Length)
+      $State = [pscustomobject]@{
+        StringsBlock = $StringBytes
+        VersionInfo  = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3' }
+      }
+
+      [pscustomobject]@{
+        Plugin   = Get-NSISSymbolicString -State $State -RelativeOffset $PluginOffset
+        Register = Get-NSISSymbolicString -State $State -RelativeOffset $RegisterOffset
+        Private  = Get-NSISSymbolicString -State $State -RelativeOffset $PrivateOffset
+        Shell    = Get-NSISSymbolicString -State $State -RelativeOffset $ShellOffset
+        Language = Get-NSISSymbolicString -State $State -RelativeOffset $LanguageOffset
+      }
+    }
+
+    $Result.Plugin | Should -Be '$PLUGINSDIR\plugin.dll'
+    $Result.Register | Should -Be '$R1\file'
+    $Result.Private | Should -Be '$_17_\file'
+    $Result.Shell | Should -Be '$SYSDIR\tool.dll'
+    $Result.Language | Should -Be '$(LSTR_62)'
+  }
+
+  It 'Should reconstruct and safely project 7-Zip-style SetOutPath prefixes' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      [pscustomobject]@{
+        InstallRoot = Get-NSISReducedArchivePath -SourcePath 'app.exe' -OutputPrefix '$INSTDIR'
+        Nested      = Get-NSISReducedArchivePath -SourcePath 'tool.exe' -OutputPrefix '$INSTDIR\bin'
+        Plugin      = Get-NSISReducedArchivePath -SourcePath '$PLUGINSDIR\System.dll' -OutputPrefix '$INSTDIR\bin'
+        OutDir      = Resolve-NSISArchiveOutputPrefix -Path '$OUTDIR\child' -CurrentPrefix '$INSTDIR\bin' -SavedPrefix '$INSTDIR'
+        SavedOutDir = Resolve-NSISArchiveOutputPrefix -Path '$_OUTDIR\restored' -CurrentPrefix '$TEMP' -SavedPrefix '$INSTDIR\saved'
+        Drive       = ConvertTo-NSISExtractionRelativePath -Path 'C:\unsafe\payload.exe' -DataOffset 1
+        Traversal   = ConvertTo-NSISExtractionRelativePath -Path '..\payload.exe' -DataOffset 2
+      }
+    }
+
+    $Result.InstallRoot | Should -Be 'app.exe'
+    $Result.Nested | Should -Be 'bin\tool.exe'
+    $Result.Plugin | Should -Be '$PLUGINSDIR\System.dll'
+    $Result.OutDir | Should -Be '$INSTDIR\bin\child'
+    $Result.SavedOutDir | Should -Be '$INSTDIR\saved\restored'
+    $Result.Drive | Should -Be 'payload.exe'
+    $Result.Traversal | Should -Be '_\payload.exe'
+  }
+
   It 'Should keep NSIS blocks as byte arrays for fast entry parsing' {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
@@ -1109,6 +1183,9 @@ Describe 'NSIS parser' {
 
       $Extracted.Count | Should -BeGreaterThan 1
       $Extracted.Name | Should -Contain 'alist-desktop.exe'
+      $RelativePaths = @($Extracted | ForEach-Object { [IO.Path]::GetRelativePath($ExpandedPath, $_.FullName) })
+      $RelativePaths | Should -Contain '$PLUGINSDIR\System.dll'
+      $RelativePaths | Should -Contain 'alist-desktop.exe'
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -1134,9 +1211,12 @@ Describe 'NSIS parser' {
 
     try {
       $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'bongo-cat.exe' -MaximumExpandedBytes 33554432 -CollisionAction Rename)
+      $Asset = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'assets\models\gamepad\resources\cover.png' -MaximumExpandedBytes 1048576 -CollisionAction Rename)
 
       $Extracted | Should -HaveCount 1
       $Extracted[0].VersionInfo.FileVersion | Should -Be '1.1.0'
+      $Asset | Should -HaveCount 1
+      [IO.Path]::GetRelativePath($ExpandedPath, $Asset[0].FullName) | Should -Be 'assets\models\gamepad\resources\cover.png'
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -1272,17 +1352,21 @@ Describe 'NSIS parser' {
     try {
       $Header = & $Module { param($Path) Get-NSISHeaderData -Path $Path } $Fixture
       $Info = Get-NSISInfo -Path $Fixture
-      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'Exr-IO.8bi' -MaximumExpandedBytes 16777216 -CollisionAction Rename)
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'Exr-IO.8bi' -MaximumExpandedBytes 33554432 -CollisionAction Rename)
 
       $Header.Compression | Should -Be 'BZip2'
       $Header.IsSolid | Should -BeTrue
       $Info.DisplayName | Should -Be '3d-io Exr-IO 2.06.00'
       $Info.DisplayVersion | Should -Be '2.06.00'
-      # The installer contains x86 and x64 plug-ins with the same logical
-      # filename. Rename collision handling must preserve both payloads.
-      $Extracted | Should -HaveCount 2
-      $Extracted.Name | Should -Contain 'Exr-IO.8bi'
-      $Extracted.Name | Should -Contain 'Exr-IO (1).8bi'
+      # The two physical architecture payloads are referenced through four
+      # compiled destinations. Preserve the $R1 collision plus the two private
+      # output aliases exactly as a 7-Zip-style NSIS catalog exposes them.
+      $Extracted | Should -HaveCount 4
+      $RelativePaths = @($Extracted | ForEach-Object { [IO.Path]::GetRelativePath($ExpandedPath, $_.FullName) })
+      $RelativePaths | Should -Contain '$R1\Exr-IO.8bi'
+      $RelativePaths | Should -Contain '$R1\Exr-IO (1).8bi'
+      $RelativePaths | Should -Contain '$_17_\Exr-IO.8bi'
+      $RelativePaths | Should -Contain '$_18_\Exr-IO.8bi'
       $Hashes = @($Extracted | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash })
       $Hashes | Should -Contain 'D773AFBCC6061FD75D2B15B54F6294FC85A219C57E11E454B6B97B27CA5C7F27'
       $Hashes | Should -Contain 'D6BACFCE8458406844683CFCCA32D8446B0995A0FBF21052CDE89ED61A935F9D'
@@ -1310,6 +1394,7 @@ Describe 'NSIS parser' {
       $Info.ProductCode | Should -Be 'libjpeg-turbo64 3.2.0'
       $Extracted | Should -HaveCount 1
       $Extracted[0].Length | Should -Be 185856
+      [IO.Path]::GetRelativePath($ExpandedPath, $Extracted[0].FullName) | Should -Be 'bin\cjpeg.exe'
       (Get-FileHash -LiteralPath $Extracted[0].FullName -Algorithm SHA256).Hash | Should -Be '97C382C511F6D597E97141F4064C8E67ED64617D1D51793C1DF183004E21BF0F'
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
