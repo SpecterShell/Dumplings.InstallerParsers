@@ -12,16 +12,6 @@ function Assert-InstallerInfrastructureLoaded {
   }
 }
 
-function Import-BinaryPatternSearch {
-  <#
-  .SYNOPSIS
-    Load the shared installer infrastructure
-  .NOTES
-    Retained for compatibility with callers of the former standalone matcher.
-  #>
-  Assert-InstallerInfrastructureLoaded
-}
-
 function New-BoundedReadStream {
   <#
   .SYNOPSIS
@@ -87,6 +77,42 @@ function Read-BinaryInteger {
     [switch]$Signed
   )
   $Bytes = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Size
+  if (($Endian -eq 'BigEndian') -eq [BitConverter]::IsLittleEndian) { [Array]::Reverse($Bytes) }
+  switch ($Size) {
+    1 { if ($Signed) { return [sbyte]$Bytes[0] }; return [byte]$Bytes[0] }
+    2 { if ($Signed) { return [BitConverter]::ToInt16($Bytes, 0) }; return [BitConverter]::ToUInt16($Bytes, 0) }
+    4 { if ($Signed) { return [BitConverter]::ToInt32($Bytes, 0) }; return [BitConverter]::ToUInt32($Bytes, 0) }
+    8 { if ($Signed) { return [BitConverter]::ToInt64($Bytes, 0) }; return [BitConverter]::ToUInt64($Bytes, 0) }
+  }
+}
+
+function Read-BinarySequentialInteger {
+  <#
+  .SYNOPSIS
+    Consume one integer from the current position of a sequential stream.
+  .PARAMETER Stream
+    Caller-owned stream. The function advances it by Size bytes and does not dispose it.
+  .PARAMETER Size
+    Integer width in bytes.
+  .PARAMETER Endian
+    Byte order used by the encoded integer.
+  .PARAMETER Signed
+    Interpret the value as signed.
+  #>
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateSet(1, 2, 4, 8)][int]$Size,
+    [ValidateSet('LittleEndian', 'BigEndian')][string]$Endian = 'LittleEndian',
+    [switch]$Signed
+  )
+
+  $Bytes = [byte[]]::new($Size)
+  $Read = 0
+  while ($Read -lt $Size) {
+    $Count = $Stream.Read($Bytes, $Read, $Size - $Read)
+    if ($Count -le 0) { throw 'Unexpected end of stream while reading an integer.' }
+    $Read += $Count
+  }
   if (($Endian -eq 'BigEndian') -eq [BitConverter]::IsLittleEndian) { [Array]::Reverse($Bytes) }
   switch ($Size) {
     1 { if ($Signed) { return [sbyte]$Bytes[0] }; return [byte]$Bytes[0] }
@@ -229,68 +255,6 @@ function Test-BinarySequence {
   )
   Assert-InstallerInfrastructureLoaded
   return [Dumplings.InstallerInfrastructure.BinaryIO]::SequenceEqual($Left, $Right)
-}
-
-function Resolve-InstallerFileSystemPath {
-  <#
-  .SYNOPSIS
-    Resolve a filesystem path against PowerShell's current provider location
-  .PARAMETER Path
-    Existing or prospective filesystem path to resolve.
-  .PARAMETER AllowNonexistent
-    Allow the final path component to be absent, as required for extraction destinations.
-  .PARAMETER PathType
-    Optional existing-item type constraint.
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
-    [switch]$AllowNonexistent,
-    [ValidateSet('Any', 'Leaf', 'Container')][string]$PathType = 'Any'
-  )
-
-  process {
-    if ([string]::IsNullOrWhiteSpace($Path)) { throw 'The filesystem path is empty.' }
-
-    if ($AllowNonexistent) {
-      $Provider = $null
-      $Drive = $null
-      $ResolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
-        $Path, [ref]$Provider, [ref]$Drive)
-      if ($Provider.Name -ne 'FileSystem') { throw "The path is not in the FileSystem provider: $Path" }
-    } else {
-      $Item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-      if ($Item.PSProvider.Name -ne 'FileSystem') { throw "The path is not in the FileSystem provider: $Path" }
-      $ResolvedPath = $Item.FullName
-      if ($PathType -eq 'Leaf' -and -not $Item.PSIsContainer) { return $ResolvedPath }
-      if ($PathType -eq 'Container' -and $Item.PSIsContainer) { return $ResolvedPath }
-      if ($PathType -ne 'Any') { throw "The path is not a $($PathType.ToLowerInvariant()) filesystem item: $Path" }
-    }
-
-    return [IO.Path]::GetFullPath($ResolvedPath)
-  }
-}
-
-function Resolve-SafeExtractionPath {
-  <#
-  .SYNOPSIS
-    Resolve a relative payload path without allowing extraction-root escape
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Mandatory)][string]$DestinationPath,
-    [Parameter(Mandatory)][string]$RelativePath
-  )
-  if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath.IndexOf([char]0) -ge 0) { throw 'The payload path is empty or invalid.' }
-  $Normalized = $RelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar).Replace('\', [IO.Path]::DirectorySeparatorChar)
-  if ([IO.Path]::IsPathRooted($Normalized) -or $Normalized -match '^[A-Za-z]:') { throw "The payload path is rooted: $RelativePath" }
-  # Resolve with PowerShell semantics before using System.IO. The process-wide
-  # .NET current directory can differ from the runspace's current location.
-  $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
-  $Root = $ResolvedDestinationPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-  $Output = [IO.Path]::GetFullPath([IO.Path]::Combine($Root, $Normalized.TrimStart([IO.Path]::DirectorySeparatorChar)))
-  if (-not $Output.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) { throw "The payload path escapes the destination: $RelativePath" }
-  return $Output
 }
 
 function Read-InstallerCollisionAction {
@@ -469,4 +433,4 @@ function Resolve-UniqueInstallerFile {
   throw "Multiple files matched the $Description pattern: $Pattern"
 }
 
-Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Resolve-InstallerFileSystemPath, Resolve-SafeExtractionPath, Read-InstallerCollisionAction, Resolve-InstallerExtractionTarget, Test-ExtractionPattern, Resolve-UniqueInstallerFile
+Export-ModuleMember -Function New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Read-BinarySequentialInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Read-InstallerCollisionAction, Resolve-InstallerExtractionTarget, Test-ExtractionPattern, Resolve-UniqueInstallerFile

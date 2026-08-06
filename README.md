@@ -72,21 +72,21 @@ PackageModule (Apache-2.0)
       v
 InstallerParsers
   Cli.ps1 (GPL-3.0-or-later)
-      +-- shared MIT runtime/binary/archive/PE helpers
-      `-- one format parser loaded for the requested action
+      +-- Libraries/Infrastructure (shared MIT mechanics)
+      `-- Libraries/Installers (one family loaded per action)
 ```
 
 The CLI loads shared infrastructure before the selected parser:
 
 1. `Runtime.psm1` loads pinned assemblies and auditable C# helpers once per process.
 2. `Binary.psm1` provides bounded reads, ranges, pattern search, CRC, and stream copying.
-3. `Compression.psm1` provides bounded streaming decoders.
-4. `Archive.psm1` provides safe archive entry access and extraction.
+3. `FileSystem.psm1` resolves PowerShell filesystem paths and rejects extraction-root escapes.
+4. `Archive.psm1` provides bounded compression, archive entry access, and extraction.
 5. `PE.psm1` resolves PE headers, sections, resources, overlays, and metadata.
-6. `RegistryAssociations.psm1` interprets explicit protocol and file-extension registry writes.
+6. `InstallerEvidence.psm1` evaluates bounded conditions and interprets explicit protocol and file-extension registry writes.
 7. The selected format module constructs its canonical identity, ARP, and diagnostic result properties directly.
 
-The shared MIT files remain file-level MIT exceptions in PackageModule and are kept byte-identical so either submodule remains independently consumable. Format-specific code stays in its parser module.
+Shared MIT files remain file-level MIT exceptions in PackageModule. Full mirrored files stay byte-identical; the two shared filesystem helper function bodies also stay identical even though PackageModule's filesystem module contains additional task utilities. Format-specific code stays in its parser module.
 
 ## Parser Contract
 
@@ -106,7 +106,7 @@ Detailed binary layouts and parser workflows live in the Dumplings [`analyze-win
 
 ## Development
 
-Add or change format behavior in the corresponding module under `Libraries`. Mechanical operations that are useful to more than one parser belong in shared MIT infrastructure and must be mirrored into PackageModule.
+Add or change format behavior under `Libraries/Installers`. Mechanical operations that are useful to more than one parser belong in `Libraries/Infrastructure` and must be mirrored into PackageModule.
 
 When adding a CLI action:
 
@@ -145,8 +145,8 @@ Licensing is file-specific:
 
 | Files | License |
 | --- | --- |
-| `Cli.ps1`, `NSIS.psm1`, `Inno.psm1`, `QtInstallerFramework.psm1`, and `SetupFactory.psm1` | [GPL-3.0-or-later](LICENSE) |
-| `AdvancedInstaller.psm1` | [GPL-2.0](LICENSE.GPL2) |
-| `Runtime.psm1`, `Binary.psm1`, `Compression.psm1`, `Archive.psm1`, `PE.psm1`, `RegistryAssociations.psm1`, and shared infrastructure sources | MIT, as marked in each file |
+| `Cli.ps1`, `Libraries/Installers/{NSIS,NSISFormat,NSISSimulation,Inno,QtInstallerFramework,SetupFactory}.psm1` | [GPL-3.0-or-later](LICENSE) |
+| `Libraries/Installers/AdvancedInstaller.psm1` | [GPL-2.0](LICENSE.GPL2) |
+| `Libraries/Infrastructure/{Runtime,Binary,FileSystem,Archive,PE,InstallerEvidence}.psm1` and shared infrastructure sources | MIT, as marked in each file |
 
 Third-party format references, included assemblies, and source-derived components are documented in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Preserve file headers and license boundaries when moving or reusing code.

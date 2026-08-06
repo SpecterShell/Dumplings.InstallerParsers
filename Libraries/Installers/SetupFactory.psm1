@@ -120,7 +120,7 @@ function Expand-SetupFactoryCompressedBytes {
       # Setup Factory 7 can use PKWARE implode. Load the small bounded decoder only when its
       # dictionary/literal property pair is structurally valid.
       if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-        $DecoderSource = Join-Path $PSScriptRoot '..\Assets\PkwareBlast.cs'
+  $DecoderSource = Join-Path $PSScriptRoot '..\..\Assets\PkwareBlast.cs'
         if (-not (Test-Path -LiteralPath $DecoderSource)) { throw "The PKWARE decoder source is missing: $DecoderSource" }
         Add-Type -Path $DecoderSource
       }

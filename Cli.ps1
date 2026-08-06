@@ -44,23 +44,25 @@ $ProgressPreference = 'SilentlyContinue'
 
 try {
   $LibraryPath = Join-Path $PSScriptRoot 'Libraries'
+  $InfrastructurePath = Join-Path $LibraryPath 'Infrastructure'
+  $InstallerPath = Join-Path $LibraryPath 'Installers'
   # Parser modules share these independently consumable MIT-licensed primitives.
-  Import-Module (Join-Path $LibraryPath 'Runtime.psm1') -Force
-  Import-Module (Join-Path $LibraryPath 'Binary.psm1') -Force
-  Import-Module (Join-Path $LibraryPath 'Compression.psm1') -Force
-  Import-Module (Join-Path $LibraryPath 'Archive.psm1') -Force
-  Import-Module (Join-Path $LibraryPath 'PE.psm1') -Force
-  Import-Module (Join-Path $LibraryPath 'RegistryAssociations.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'Runtime.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'Binary.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'FileSystem.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'Archive.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'PE.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'InstallerEvidence.psm1') -Force
   $Result = switch ($Action) {
     'NSIS.GetInfo' {
-      Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
       $Arguments = @{ Path = $Path }
       if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
       if (-not [string]::IsNullOrWhiteSpace($Scope)) { $Arguments.Scope = $Scope }
       Get-NSISInfo @Arguments
     }
     'NSIS.Expand' {
-      Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
       $ExpandArguments = @{
         Path            = $Path
         CollisionAction = $CollisionAction
@@ -71,23 +73,23 @@ try {
       @(Expand-NSISInstaller @ExpandArguments).ForEach({ $_.FullName })
     }
     'NSIS.GetElectronBuilderInfo' {
-      Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
       Get-ElectronBuilderNSISInfo -Path $Path
     }
     'NSIS.GetInstallerSwitchInfo' {
-      Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
       Get-NSISInstallerSwitchInfo -Path $Path
     }
     'NSIS.TestElectronBuilder' {
-      Import-Module (Join-Path $LibraryPath 'NSIS.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
       Test-ElectronBuilder -Path $Path
     }
     'Inno.GetInfo' {
-      Import-Module (Join-Path $LibraryPath 'Inno.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'Inno.psm1') -Force
       Get-InnoInfo -Path $Path
     }
     'Inno.Expand' {
-      Import-Module (Join-Path $LibraryPath 'Inno.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'Inno.psm1') -Force
       $ExpandArguments = @{
         Path            = $Path
         Name            = [string]::IsNullOrWhiteSpace($Name) ? '*' : $Name
@@ -100,11 +102,11 @@ try {
       @(Expand-InnoInstaller @ExpandArguments).ForEach({ $_.FullName })
     }
     'AdvancedInstaller.GetInfo' {
-      Import-Module (Join-Path $LibraryPath 'AdvancedInstaller.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'AdvancedInstaller.psm1') -Force
       Get-AdvancedInstallerInfo -Path $Path
     }
     'AdvancedInstaller.Expand' {
-      Import-Module (Join-Path $LibraryPath 'AdvancedInstaller.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'AdvancedInstaller.psm1') -Force
       $ExpandArguments = @{
         Path            = $Path
         CollisionAction = $CollisionAction
@@ -115,15 +117,15 @@ try {
       Expand-AdvancedInstaller @ExpandArguments
     }
     'QtInstallerFramework.GetInfo' {
-      Import-Module (Join-Path $LibraryPath 'QtInstallerFramework.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'QtInstallerFramework.psm1') -Force
       Get-QtInstallerFrameworkInfo -Path $Path
     }
     'SetupFactory.GetInfo' {
-      Import-Module (Join-Path $LibraryPath 'SetupFactory.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'SetupFactory.psm1') -Force
       Get-SetupFactoryInfo -Path $Path
     }
     'SetupFactory.Expand' {
-      Import-Module (Join-Path $LibraryPath 'SetupFactory.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'SetupFactory.psm1') -Force
       $ExpandArguments = @{
         Path            = $Path
         Name            = [string]::IsNullOrWhiteSpace($Name) ? '*' : $Name
@@ -134,7 +136,7 @@ try {
       @(Expand-SetupFactoryInstaller @ExpandArguments).ForEach({ $_.FullName })
     }
     'QtInstallerFramework.Expand' {
-      Import-Module (Join-Path $LibraryPath 'QtInstallerFramework.psm1') -Force
+      Import-Module (Join-Path $InstallerPath 'QtInstallerFramework.psm1') -Force
       $ExpandArguments = @{
         Path            = $Path
         CollisionAction = $CollisionAction

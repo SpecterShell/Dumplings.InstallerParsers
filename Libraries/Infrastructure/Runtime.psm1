@@ -45,7 +45,7 @@ function Import-InstallerInfrastructure {
     # Recheck after entering the critical section because another runspace may have loaded the
     # process-wide types while this caller was waiting.
     if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerInfrastructure.BinaryIO').Type) { return }
-    $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets'
+    $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets'
     $SourceRoot = Join-Path -Path $AssetRoot -ChildPath 'Source' -AdditionalChildPath 'InstallerInfrastructure'
     if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
       # InstallerParsers retains the original independently consumable layout.
@@ -61,11 +61,19 @@ function Import-InstallerManagedAssembly {
   <#
   .SYNOPSIS
     Load a pinned managed assembly from the submodule asset directory once
+  .PARAMETER Name
+    File name of the managed assembly below the asset root.
+  .PARAMETER TypeName
+    Fully qualified type used to detect whether the assembly is already loaded.
+  .PARAMETER AssetRoot
+    Optional explicit asset directory. Cross-submodule callers should supply this because the
+    globally visible mirrored loader may belong to either independently consumable submodule.
   #>
   [OutputType([System.Reflection.Assembly])]
   param (
     [Parameter(Mandatory)][string]$Name,
-    [Parameter(Mandatory)][string]$TypeName
+    [Parameter(Mandatory)][string]$TypeName,
+    [string]$AssetRoot
   )
 
   $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
@@ -74,11 +82,15 @@ function Import-InstallerManagedAssembly {
   Use-InstallerRuntimeLoadLock {
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
-    $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets'
-    $AssemblyPath = Join-Path -Path $AssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName
+    $ResolvedAssetRoot = if ([string]::IsNullOrWhiteSpace($AssetRoot)) {
+      Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets'
+    } else {
+      [IO.Path]::GetFullPath($AssetRoot)
+    }
+    $AssemblyPath = Join-Path -Path $ResolvedAssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName
     if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) {
       # InstallerParsers retains the original independently consumable layout.
-      $AssemblyPath = Join-Path -Path $AssetRoot -ChildPath $AssemblyName
+      $AssemblyPath = Join-Path -Path $ResolvedAssetRoot -ChildPath $AssemblyName
     }
     if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) { throw "The managed dependency is missing: $AssemblyPath" }
     Add-Type -Path $AssemblyPath -PassThru -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Assembly

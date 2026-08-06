@@ -58,50 +58,15 @@ $INNO_FILE_LOCATION_ENTRY_SIZE = 74
 $INNO_VERSION5_HEADER_FIXED_SIZE_5310 = 188
 $INNO_VERSION5_HEADER_FIXED_SIZE_5500 = 189
 
-function Get-Assembly {
-  <#
-  .SYNOPSIS
-    Get a managed compression assembly used for static installer parsing
-  .PARAMETER Name
-    The assembly file name under Modules\InstallerParsers\Assets
-  #>
-  [OutputType([System.IO.FileInfo])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The assembly file name under Modules\InstallerParsers\Assets')]
-    [string]$Name
-  )
-
-  $AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\Assets'
-  if (Test-Path -Path ($Path = Join-Path -Path $AssetsPath -ChildPath $Name)) {
-    return Get-Item -Path $Path -Force
-  } else {
-    throw "The $Name assembly could not be found"
-  }
-}
-
-function Import-Assembly {
-  <#
-  .SYNOPSIS
-    Load the managed compression assemblies used for Inno Setup parsing
-  #>
-
-  Import-InstallerArchiveDependency
-}
-
-Import-Assembly
+Import-InstallerArchiveDependency
 
 function Import-InnoCallTransform {
   <#
   .SYNOPSIS
     Load the source-backed Inno CALL/JMP byte transform once
   #>
-  if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.InnoCallTransform').Type) { return }
-
-  $SourcePath = Join-Path $PSScriptRoot '..\Assets\InnoCallTransform.cs'
-  if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
-    throw "The Inno Setup CALL/JMP transform source is missing: $SourcePath"
-  }
-  Add-Type -Path $SourcePath -ErrorAction Stop
+  $SourcePath = Join-Path $PSScriptRoot '..\..\Assets\InnoCallTransform.cs'
+  $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.InnoCallTransform'
 }
 
 function Get-InstallerCrc32 {

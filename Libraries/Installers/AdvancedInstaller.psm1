@@ -43,7 +43,7 @@ function Get-AdvancedInstallerAssembly {
     [string]$Name
   )
 
-  $AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\Assets'
+$AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Assets'
   if (Test-Path -Path ($Path = Join-Path -Path $AssetsPath -ChildPath $Name)) {
     return Get-Item -Path $Path -Force
   } else {
@@ -69,7 +69,10 @@ function Import-AdvancedInstallerMsiModule {
   #>
 
   if (-not (Get-Command -Name 'Read-ProductVersionFromMsi' -ErrorAction SilentlyContinue)) {
-    Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..\..\PackageModule\Libraries\MSI.psm1') -Force
+    # The GPL parser consumes the Apache-licensed MSI reader through this narrow bridge. Global
+    # import lets its family-specific table projections resolve the generic MSI query helpers,
+    # without loading PackageModule's same-named Advanced Installer facade into this process.
+    Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..\..\..\PackageModule\Libraries\Installers\MSI.psm1') -Force -Global
   }
 }
 

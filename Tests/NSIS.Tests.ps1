@@ -1,9 +1,10 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
   $LibraryPath = Join-Path $PSScriptRoot '..\Libraries'
-  foreach ($ModuleName in @('Runtime', 'Binary', 'Compression', 'Archive', 'PE', 'RegistryAssociations', 'NSIS')) {
-    Import-Module (Join-Path $LibraryPath "$ModuleName.psm1") -Force
+  foreach ($ModuleName in @('Runtime', 'Binary', 'Archive', 'PE', 'InstallerEvidence')) {
+    Import-Module (Join-Path $LibraryPath "Infrastructure\$ModuleName.psm1") -Force
   }
+  Import-Module (Join-Path $LibraryPath 'Installers\NSIS.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\Main'
 
@@ -1539,4 +1540,3 @@ Describe 'NSIS parser' {
     $Info.Publisher | Should -Be '北京火山引擎科技有限公司'
   }
 }
-

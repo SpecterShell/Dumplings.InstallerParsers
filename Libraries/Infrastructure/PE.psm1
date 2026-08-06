@@ -137,7 +137,7 @@ function Get-PELayout {
     [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream
   )
   process {
-    Import-BinaryPatternSearch
+    Import-InstallerInfrastructure
     $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
     try {
       $NativeLayout = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadLayout($ReaderInput.Stream, $true)
@@ -191,7 +191,7 @@ function Get-PEResourceInfo {
     [ValidateRange(1, 100000)][int]$MaximumResources = 10000
   )
   process {
-    Import-BinaryPatternSearch
+    Import-InstallerInfrastructure
     $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
     try {
       $NativeLayout = if ($Layout) {
@@ -470,7 +470,7 @@ function Get-PEImportInternal {
     Read regular or delay-import DLL names through the shared PE reader
   #>
   param ([string]$Path, [IO.Stream]$Stream, [switch]$Delay)
-  Import-BinaryPatternSearch
+  Import-InstallerInfrastructure
   $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
   try {
     $Layout = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadLayout($ReaderInput.Stream, $true); if (-not $Layout) { return }
@@ -507,7 +507,7 @@ function Get-PEClrHeader {
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory, ParameterSetName = 'Path')][string]$Path, [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream)
   process {
-    Import-BinaryPatternSearch; $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
+    Import-InstallerInfrastructure; $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
     try {
       $Layout = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadLayout($ReaderInput.Stream, $true); if (-not $Layout) { return $null }
       $Header = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadClrHeader($ReaderInput.Stream, $Layout, $true); if (-not $Header) { return $null }
@@ -529,7 +529,7 @@ function Get-PEManagedTargetFramework {
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory, ParameterSetName = 'Path')][string]$Path, [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream)
   process {
-    Import-BinaryPatternSearch; $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
+    Import-InstallerInfrastructure; $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
     try {
       $Layout = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadLayout($ReaderInput.Stream, $true); if (-not $Layout) { return $null }
       $Framework = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadManagedTargetFramework($ReaderInput.Stream, $Layout, $true); if (-not $Framework) { return $null }
