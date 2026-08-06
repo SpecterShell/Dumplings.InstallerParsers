@@ -2860,6 +2860,10 @@ function Initialize-NSISState {
   if (-not $LanguageTable) { $LanguageTable = $LanguageTables | Select-Object -First 1 }
   $Entries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -IsNsisBi $HeaderData.IsNsisBi
   $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock -Entries $Entries -IsNsisBi $HeaderData.IsNsisBi
+  # Account-sensitive NSIS plug-ins observe the installer's process token. Read
+  # the PE manifest once so requireAdministrator installers can take the same
+  # deterministic elevated branch without consulting the parser host's token.
+  $RequestedExecutionLevel = try { Get-PERequestedExecutionLevel -Path $HeaderData.Path } catch { $null }
   $VersionInfo | Add-Member -NotePropertyName FirstHeaderFlags -NotePropertyValue $HeaderData.FirstHeaderFlags
   $VersionInfo | Add-Member -NotePropertyName HasLongDataBlockOffsets -NotePropertyValue $HeaderData.HasLongDataBlockOffsets
   $VersionInfo | Add-Member -NotePropertyName HasLargeFileSource -NotePropertyValue $HeaderData.HasLargeFileSource
@@ -2900,7 +2904,7 @@ function Initialize-NSISState {
       TargetScope                        = $Scope
       HasScopeRuntimeCheck               = $false
       SupportedScopes                    = [string[]]@()
-      RequestedExecutionLevel            = $null
+      RequestedExecutionLevel            = $RequestedExecutionLevel
       IsTauri                            = $false
       TauriInstallerMode                 = $null
       TauriEvidence                      = [string[]]@()
@@ -3314,6 +3318,49 @@ function Invoke-NSISSystemPluginCall {
     }
   }
   if ($Command -match '(?i)\)[a-z0-9&*]+\.s(?:\s|$)') { $State.Stack.Add('') }
+  return $true
+}
+
+function Invoke-NSISUserInfoPluginCall {
+  <#
+  .SYNOPSIS
+    Simulate deterministic outputs from the standard NSIS UserInfo plug-in
+  .DESCRIPTION
+    UserInfo reads the process token and pushes its result onto the NSIS stack.
+    A requireAdministrator PE necessarily runs with an administrator token once
+    its code starts, so GetAccountType deterministically returns Admin. Account
+    membership under asInvoker or highestAvailable remains runtime-dependent;
+    those calls retain the simulator's previous no-op behavior rather than
+    being derived from the parser host or a requested manifest scope.
+  .PARAMETER State
+    The mutable NSIS execution state whose stack receives the plug-in result
+  .PARAMETER FunctionName
+    The UserInfo.dll export invoked by EW_REGISTERDLL
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The exported UserInfo plug-in function')]
+    [string]$FunctionName
+  )
+
+  if ($FunctionName -ieq 'GetName' -and $State.Metadata.RequestedExecutionLevel -eq 'requireAdministrator') {
+    # The caller normally uses GetName only to establish that UserInfo can read
+    # the token. Return a stable, nonempty symbolic value so scripts that test
+    # the result follow the supported Windows path without leaking the parser
+    # host's actual account name.
+    $State.Stack.Add('<current-user>')
+    return $true
+  }
+
+  if ($FunctionName -notin @('GetAccountType', 'GetOriginalAccountType')) { return $false }
+  if ($State.Metadata.RequestedExecutionLevel -ne 'requireAdministrator') { return $false }
+
+  # NSIS calls the plug-in only after Windows has granted the requested
+  # elevated token. Rejecting UAC means installer code never executes.
+  $State.Stack.Add('Admin')
   return $true
 }
 
@@ -3832,12 +3879,15 @@ function Invoke-NSISEntry {
     }
     $Script:NSIS_OPCODE_REGISTER_DLL {
       # Plug-in calls are encoded as EW_REGISTERDLL even though no COM
-      # registration occurs. Resolve only the deterministic System operations
-      # needed by architecture macros; all other plug-ins remain no-ops.
+      # registration occurs. Resolve deterministic System architecture calls
+      # and UserInfo token checks; all other plug-ins remain no-ops.
       $LibraryPath = Get-NSISString -State $State -RelativeOffset $Values[1]
       $FunctionName = Get-NSISString -State $State -RelativeOffset $Values[2]
-      if ([IO.Path]::GetFileName($LibraryPath) -ieq 'System.dll') {
+      $LibraryName = [IO.Path]::GetFileName($LibraryPath)
+      if ($LibraryName -ieq 'System.dll') {
         $null = Invoke-NSISSystemPluginCall -State $State -FunctionName $FunctionName
+      } elseif ($LibraryName -ieq 'UserInfo.dll') {
+        $null = Invoke-NSISUserInfoPluginCall -State $State -FunctionName $FunctionName
       }
       return $Script:NSIS_CONTINUE_RESULT
     }
@@ -4460,7 +4510,7 @@ function Get-NSISTauriInstallerInfo {
     }
 
     $IsTauri = $Markers.Count -eq 3
-    $RequestedExecutionLevel = if ($IsTauri) { Get-PERequestedExecutionLevel -Path $State.Path } else { $null }
+    $RequestedExecutionLevel = if ($IsTauri) { $State.Metadata.RequestedExecutionLevel } else { $null }
     $State | Add-Member -NotePropertyName TauriTemplateEvidence -NotePropertyValue ([pscustomobject]@{
         IsTauri                 = $IsTauri
         Markers                 = [string[]]$Markers.ToArray()
@@ -4559,7 +4609,9 @@ function Complete-NSISMetadata {
   $TauriInfo = Get-NSISTauriInstallerInfo -State $State
   $State.Metadata.IsTauri = $TauriInfo.IsTauri
   $State.Metadata.TauriInstallerMode = $TauriInfo.InstallerMode
-  $State.Metadata.RequestedExecutionLevel = $TauriInfo.RequestedExecutionLevel
+  if ($TauriInfo.IsTauri) {
+    $State.Metadata.RequestedExecutionLevel = $TauriInfo.RequestedExecutionLevel
+  }
   $State.Metadata.TauriEvidence = [string[]]$TauriInfo.Evidence
   if ($TauriInfo.IsTauri) {
     if ($TauriInfo.InstallerMode -eq 'currentUser' -and @($State.Metadata.SupportedScopes).Count -eq 0) {

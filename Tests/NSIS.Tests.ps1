@@ -955,6 +955,29 @@ Describe 'NSIS parser' {
     $Info.Notices | Should -BeNullOrEmpty
   }
 
+  It 'Should follow the elevated UserInfo branch in the Fluent Bit CPack installer' {
+    $Fixture = Get-InstallerFixture -Name 'fluent-bit-5.1.0-win64.exe' `
+      -Url 'https://packages.fluentbit.io/windows/fluent-bit-5.1.0-win64.exe' `
+      -Sha256 'F929A7C3D3C886035135B9DD15FE42615D0259AF8CDED0370C02DDAEC41C17B1'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64
+    $RequestedUserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+
+    $Info.RequestedExecutionLevel | Should -Be 'requireAdministrator'
+    $Info.SupportedScopes | Should -Be @('machine')
+    $Info.Scope | Should -Be 'machine'
+    $Info.ProductCode | Should -Be 'fluent-bit'
+    $Info.DisplayName | Should -Be 'fluent-bit'
+    $Info.DisplayVersion | Should -Be '5.1.0'
+    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\fluent-bit'
+    @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
+    $Info.Warnings | Should -BeNullOrEmpty
+
+    $RequestedUserInfo.Scope | Should -Be 'machine'
+    @($RequestedUserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
+    $RequestedUserInfo.Warnings | Should -Contain "The requested 'user' scope did not resolve to matching uninstall registry evidence; the parser observed 'machine' scope instead."
+  }
+
   It 'Should resolve architecture-specific ARP identities from the BitComet installer' {
     $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
 
