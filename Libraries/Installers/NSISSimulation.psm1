@@ -1234,6 +1234,7 @@ function Get-NSISSections {
     $Sections.Add([pscustomobject]@{
         NameOffset = [System.BitConverter]::ToInt32($SectionBlock, $Offset + $Script:NSIS_SECTION_OFFSET_NAME)
         CodeOffset = [System.BitConverter]::ToInt32($SectionBlock, $Offset + $Script:NSIS_SECTION_OFFSET_CODE)
+        CodeSize   = [System.BitConverter]::ToInt32($SectionBlock, $Offset + $Script:NSIS_SECTION_OFFSET_CODE_SIZE)
       })
   }
 
@@ -1817,11 +1818,10 @@ function Get-NSISScopeSelectionStart {
     Locate a compiled NSIS function that selects one installation scope
   .DESCRIPTION
     NSIS MultiUser templates compile their scope setters to a mode assignment
-    followed by SetShellVarContext. Drizin/NsisMultiUser uses AllUsers while
-    current electron-builder uses the shorter all value; both use CurrentUser
-    for per-user mode. This structural pair is stronger evidence than switch
-    text and lets the simulator enter the selected function without modeling
-    UAC UI.
+    followed by SetShellVarContext. Some Tauri-derived templates instead compare
+    an already-selected mode with AllUsers immediately before changing context.
+    These structural pairs are stronger evidence than switch text and let the
+    simulator enter the selected branch without modeling UAC UI.
   .PARAMETER State
     The mutable NSIS execution state containing normalized command entries
   .PARAMETER Scope
@@ -1877,7 +1877,98 @@ function Get-NSISScopeSelectionStart {
     return $Index
   }
 
+  # Custom Tauri templates can select the mode earlier, then guard the machine
+  # context with `StrCmp $MultiUser.InstallMode AllUsers 0 <user-branch>`. Accept
+  # only an equality fall-through directly into the matching context opcode;
+  # this avoids treating dormant uninstaller or unrelated mode strings as an
+  # installer scope selector.
+  for ($Index = 1; $Index -lt $State.Entries.Count; $Index++) {
+    $ContextEntry = $State.Entries[$Index]
+    if ($ContextEntry.Opcode -ne $Script:NSIS_OPCODE_SET_FLAG -or
+      $ContextEntry.Values[1] -ne $Script:NSIS_EXEC_FLAG_SHELL_VAR_CONTEXT) { continue }
+    if ((Get-NSISInt -State $State -RelativeOffset $ContextEntry.Values[2]) -ne $ExpectedContext) { continue }
+
+    # A section can contain a similar comparison for updater or payload logic.
+    # NSIS records each section's exact command range, so exclude those records
+    # and accept only initialization callbacks or helper functions here.
+    $IsSectionInstruction = $false
+    foreach ($Section in $State.Sections) {
+      if ($Section.CodeOffset -lt 0 -or $Section.CodeSize -le 0) { continue }
+      $SectionEnd = [long]$Section.CodeOffset + $Section.CodeSize
+      if ($Index - 1 -ge $Section.CodeOffset -and $Index - 1 -lt $SectionEnd) {
+        $IsSectionInstruction = $true
+        break
+      }
+    }
+    if ($IsSectionInstruction) { continue }
+
+    $Comparison = $State.Entries[$Index - 1]
+    if ($Comparison.Opcode -ne $Script:NSIS_OPCODE_STR_CMP -or $Comparison.Values[3] -ne 0) { continue }
+    $Left = Get-NSISString -State $State -RelativeOffset $Comparison.Values[1]
+    $Right = Get-NSISString -State $State -RelativeOffset $Comparison.Values[2]
+    if ($ModeNames -ccontains $Left -or $ModeNames -ccontains $Right) { return $Index - 1 }
+  }
+
   return -1
+}
+
+function Initialize-NSISScopeSelectionInput {
+  <#
+  .SYNOPSIS
+    Seed a requested mode variable for an equality-guarded scope branch
+  .DESCRIPTION
+    Some custom Tauri installers parse /AllUsers before entering a branch that
+    compares $MultiUser.InstallMode with AllUsers. Static simulation enters that
+    branch directly, so it must reproduce the already-parsed mode value first.
+    This helper accepts only a direct variable-versus-literal comparison whose
+    equality path falls through to the matching SetShellVarContext instruction.
+  .PARAMETER State
+    The mutable NSIS execution state containing normalized command entries
+  .PARAMETER Position
+    The zero-based command index returned by Get-NSISScopeSelectionStart
+  .PARAMETER Scope
+    The requested user or machine installation scope
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The mutable NSIS execution state')]
+    [pscustomobject]$State,
+
+    [Parameter(Mandatory, HelpMessage = 'The zero-based scope-selector command index')]
+    [int]$Position,
+
+    [Parameter(Mandatory, HelpMessage = 'The requested installation scope')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
+  )
+
+  if ($Position -lt 0 -or $Position + 1 -ge $State.Entries.Count) { return }
+
+  $Comparison = $State.Entries[$Position]
+  $ContextEntry = $State.Entries[$Position + 1]
+  $ExpectedContext = if ($Scope -eq 'machine') { 1 } else { 0 }
+  if ($Comparison.Opcode -ne $Script:NSIS_OPCODE_STR_CMP -or $Comparison.Values[3] -ne 0 -or
+    $ContextEntry.Opcode -ne $Script:NSIS_OPCODE_SET_FLAG -or
+    $ContextEntry.Values[1] -ne $Script:NSIS_EXEC_FLAG_SHELL_VAR_CONTEXT -or
+    (Get-NSISInt -State $State -RelativeOffset $ContextEntry.Values[2]) -ne $ExpectedContext) { return }
+
+  $ModeNames = if ($Scope -eq 'machine') { [string[]]@('AllUsers', 'all') } else { [string[]]@('CurrentUser') }
+  foreach ($VariableOperand in 1, 2) {
+    $LiteralOperand = if ($VariableOperand -eq 1) { 2 } else { 1 }
+    $LiteralValue = Get-NSISString -State $State -RelativeOffset $Comparison.Values[$LiteralOperand]
+    if ($ModeNames -cnotcontains $LiteralValue) { continue }
+
+    # Require the other operand to consist of one direct variable value. This
+    # prevents seeding variables referenced only as part of a larger string.
+    $VariableIndexes = @(Get-NSISStringVariableIndex -State $State -RelativeOffset $Comparison.Values[$VariableOperand])
+    if ($VariableIndexes.Count -ne 1) { continue }
+    $VariableValue = Get-NSISVariableValue -State $State -Index $VariableIndexes[0]
+    $ResolvedOperand = Get-NSISString -State $State -RelativeOffset $Comparison.Values[$VariableOperand]
+    if ($ResolvedOperand -cne $VariableValue) { continue }
+
+    Set-NSISVariableValue -State $State -Index $VariableIndexes[0] -Value $LiteralValue
+    return
+  }
 }
 
 function Initialize-NSISTargetRegistryState {
@@ -2936,8 +3027,7 @@ function Get-NSISTauriInstallerInfo {
   $InstallerMode = $null
   if ($Template.IsTauri) {
     $SupportedScopes = @($State.Metadata.SupportedScopes)
-    if ($SupportedScopes -contains 'user' -and $SupportedScopes -contains 'machine' -and
-      $Template.RequestedExecutionLevel -eq 'highestAvailable') {
+    if ($SupportedScopes -contains 'user' -and $SupportedScopes -contains 'machine') {
       $InstallerMode = 'both'
     } elseif ($State.Metadata.Scope -eq 'user' -and $Template.RequestedExecutionLevel -eq 'asInvoker') {
       $InstallerMode = 'currentUser'
@@ -3242,6 +3332,7 @@ function Invoke-NSISStaticSimulation {
       # mirrors the deterministic MultiUser macro branch without emulating UAC,
       # account privilege checks, dialogs, or command-line parsing.
       Initialize-NSISTargetRegistryState -State $State
+      Initialize-NSISScopeSelectionInput -State $State -Position $ScopeSelectionStart -Scope $Scope
       try {
         $null = Invoke-NSISCodeSegment -State $State -Position $ScopeSelectionStart
       } catch {

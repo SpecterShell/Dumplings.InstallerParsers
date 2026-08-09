@@ -1163,6 +1163,31 @@ Describe 'NSIS parser' {
     $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\Clash Verge'
   }
 
+  It 'Should resolve the equality-guarded machine scope in the TranslatorX Tauri installer' {
+    $Fixture = Get-InstallerFixture -Name 'TranslatorX_26.1.1_x64-setup.exe' `
+      -Url 'https://github.com/pgiralt/translatorx-releases/releases/download/v26.1.1/TranslatorX_26.1.1_x64-setup.exe' `
+      -Sha256 'FC1AA93FA0C746AE28E0AD8DDAEBADF1968FBB6A305470140AE8542460968EF4'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    foreach ($Info in @($UserInfo, $MachineInfo)) {
+      $Info.IsTauri | Should -BeTrue
+      $Info.TauriInstallerMode | Should -Be 'both'
+      $Info.SupportedScopes | Should -Be @('user', 'machine')
+      $Info.ProductCode | Should -Be 'TranslatorX'
+      $Info.Warnings | Should -BeNullOrEmpty
+    }
+
+    $UserInfo.Scope | Should -Be 'user'
+    $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\TranslatorX'
+    @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKCU')
+
+    $MachineInfo.Scope | Should -Be 'machine'
+    $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\TranslatorX'
+    @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
+  }
+
   It 'Should classify standard Tauri command-line switches by purpose' {
     $Fixture = Get-InstallerFixture -Name 'Yaak_2026.4.0_x64-setup.exe' -Url 'https://github.com/mountain-loop/yaak/releases/download/v2026.4.0/Yaak_2026.4.0_x64-setup.exe' -Sha256 '026DC0753F4880313B93BBFF848A9CD09A114F87111AAAEF5E4E698C52C8B561'
     $Info = Get-NSISInstallerSwitchInfo -Path $Fixture

@@ -5,7 +5,7 @@
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 $InfrastructurePath = Join-Path $PSScriptRoot '..\Infrastructure'
-foreach ($Name in 'Runtime', 'Binary', 'Archive', 'PE', 'InstallerEvidence') {
+foreach ($Name in 'Runtime', 'Binary', 'FileSystem', 'Archive', 'PE', 'InstallerEvidence') {
   Import-Module (Join-Path $InfrastructurePath "$Name.psm1") -Force -Global
 }
 

@@ -55,6 +55,9 @@ $INNO_FILE_ENTRY_STRINGS = 10
 $INNO_FILE_ENTRY_OPTIONS_SIZE = 4
 $INNO_FILE_ENTRY_FIXED_SIZE = 43
 $INNO_FILE_LOCATION_ENTRY_SIZE = 74
+$INNO_VERSION5_HEADER_FIXED_SIZE_5303 = 188
+$INNO_VERSION5_HEADER_FIXED_SIZE_5306 = 192
+$INNO_VERSION5_HEADER_FIXED_SIZE_5309 = 196
 $INNO_VERSION5_HEADER_FIXED_SIZE_5310 = 188
 $INNO_VERSION5_HEADER_FIXED_SIZE_5500 = 189
 
@@ -222,7 +225,7 @@ function Get-InnoLayout {
     [bool]$UnicodeVariant
   )
 
-  if ($VersionNumber -lt 5310) { throw "Unsupported Inno Setup version: $VersionNumber" }
+  if ($VersionNumber -lt 5303) { throw "Unsupported Inno Setup version: $VersionNumber" }
 
   # The setup signature is the serialization contract. These transitions match
   # SetupHeaderStrings in the corresponding official Shared.Struct.pas records.
@@ -240,8 +243,12 @@ function Get-InnoLayout {
     28
   } elseif ($VersionNumber -ge 5500) {
     27
-  } else {
+  } elseif ($VersionNumber -ge 5310) {
     26
+  } elseif ($VersionNumber -ge 5308) {
+    25
+  } else {
+    24
   }
 
   # Fixed offsets are relative to the packed header tail after serialized
@@ -266,8 +273,12 @@ function Get-InnoLayout {
     # 5.5.7 replaced WizardImageBackColor (Longint) with the one-byte
     # WizardImageAlphaFormat enum, moving the remaining packed fields by 3.
     135 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } else {
+  } elseif ($VersionNumber -ge 5309) {
     138 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
+  } else {
+    # Inno 5.3.3-5.3.8 stores an MD5 password digest, making the privilege and
+    # following enum fields four bytes earlier than the SHA-1-based 5.3.9 layout.
+    134 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
   }
 
   $HasPrivilegeOverrides = $VersionNumber -ge 6000
@@ -275,23 +286,37 @@ function Get-InnoLayout {
     149
   } elseif ($VersionNumber -ge 5507 -and $VersionNumber -lt 6000) {
     139 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } elseif ($VersionNumber -lt 6000) {
+  } elseif ($VersionNumber -ge 5309 -and $VersionNumber -lt 6000) {
     142 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
+  } elseif ($VersionNumber -lt 6000) {
+    138 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
   } else {
     $null
   }
 
   $FileLocationStartOffsetSize = $VersionNumber -ge 6502 ? 8 : 4
-  $FileLocationDigestSize = $VersionNumber -ge 6400 ? 32 : 20
+  $FileLocationDigestSize = if ($VersionNumber -ge 6400) { 32 } elseif ($VersionNumber -ge 5309) { 20 } else { 16 }
   $FileLocationUsesLegacyFlags = $VersionNumber -lt 6403
   $FileLocationHasSign = $VersionNumber -ge 6300 -and $VersionNumber -lt 6403
   $FileLocationEntrySize = 8 + $FileLocationStartOffsetSize + 24 + $FileLocationDigestSize + 8 + 8 +
   ($FileLocationUsesLegacyFlags ? 2 : 1) + ($FileLocationHasSign ? 1 : 0)
 
+  # Before 5.3.10, Uninstallable is encoded in the packed TSetupHeaderOption
+  # set. CreateUninstallRegKey moved from that set to header string 24 in 5.3.8.
+  $LegacyHeaderOptionsOffset = if ($VersionNumber -ge 5310) {
+    $null
+  } elseif ($VersionNumber -ge 5309) {
+    158 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
+  } elseif ($VersionNumber -ge 5306) {
+    154 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
+  } else {
+    150 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
+  }
+
   return [pscustomobject]@{
     VersionNumber                            = $VersionNumber
     HeaderStringCount                        = $HeaderStringCount
-    HeaderAnsiStringCount                    = 4
+    HeaderAnsiStringCount                    = $VersionNumber -ge 5310 ? 4 : 5
     UsesInt64BlockHeader                     = $VersionNumber -ge 6700
     StringEncoding                           = if ($VersionNumber -ge 6000 -or $UnicodeVariant) { 'Unicode' } else { 'Ansi' }
     HasEncryptionHeader                      = $VersionNumber -ge 6500
@@ -303,13 +328,20 @@ function Get-InnoLayout {
     ArchitecturesAllowedOffset               = $PackedArchitectureOffset
     ArchitecturesInstallIn64BitModeOffset    = if ($null -ne $PackedArchitectureOffset) { $PackedArchitectureOffset + 1 } else { $null }
     PackedArchitecturesIncludeArm64          = $VersionNumber -ge 6000
+    LegacyHeaderOptionsOffset                = $LegacyHeaderOptionsOffset
+    LegacyHeaderOptionsSize                  = $null -ne $LegacyHeaderOptionsOffset ? 6 : 0
+    LegacyCreateUninstallRegKeyOptionBit     = $VersionNumber -lt 5308 ? 15 : $null
+    LegacyUninstallableOptionBit             = $VersionNumber -lt 5310 ? 1 : $null
     FileEntryStringCount                     = $VersionNumber -ge 6500 ? 15 : 10
     FileEntryAnsiStringCount                 = $VersionNumber -ge 6500 ? 1 : 0
     FileEntryHasVerification                 = $VersionNumber -ge 6500
     # Inno 5.5 shortens the serialized version constraints to 16 bytes. The
     # 5.3 family and Unicode 6.x+ layouts use a 20-byte pair instead.
     FileEntryVersionDataSize                 = $VersionNumber -ge 6000 -or $VersionNumber -lt 5500 ? 20 : 16
-    FileEntryTrailingSize                    = $VersionNumber -ge 6000 ? 0 : 4
+    # Inno 5.3 stores the full 20-byte version pair and has no compatibility
+    # padding after FileType. Inno 5.5 shortens that pair to 16 bytes while the
+    # serialized record retains four bytes before the next entry.
+    FileEntryTrailingSize                    = $VersionNumber -ge 6000 -or $VersionNumber -lt 5500 ? 0 : 4
     # Packed Pascal sets occupy enough bytes for their highest declared bit.
     # Inno 6.5 adds four file options (five bytes total); 6.7 reserves through
     # bit 56 so later additions retain an eight-byte serialized field.
@@ -318,11 +350,12 @@ function Get-InnoLayout {
     FileEntryOptionsSize                     = $VersionNumber -ge 6700 ? 8 : ($VersionNumber -ge 6500 ? 5 : 4)
     FileEntryHasBitness                      = $VersionNumber -ge 7000
     FileLocationStartOffsetSize              = $FileLocationStartOffsetSize
-    FileLocationDigestAlgorithm              = $VersionNumber -ge 6400 ? 'SHA256' : 'SHA1'
+    FileLocationDigestAlgorithm              = if ($VersionNumber -ge 6400) { 'SHA256' } elseif ($VersionNumber -ge 5309) { 'SHA1' } else { 'MD5' }
     FileLocationDigestSize                   = $FileLocationDigestSize
     FileLocationUsesLegacyFlags              = $FileLocationUsesLegacyFlags
     FileLocationHasSign                      = $FileLocationHasSign
     FileLocationEntrySize                    = $FileLocationEntrySize
+    UsesLegacyCallInstructionTransform       = $VersionNumber -lt 5309
   }
 }
 
@@ -343,6 +376,12 @@ function Get-InnoVersion5HeaderFixedSize {
     return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5500
   } elseif ($VersionNumber -ge 5310) {
     return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5310
+  } elseif ($VersionNumber -ge 5309) {
+    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5309
+  } elseif ($VersionNumber -ge 5306) {
+    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5306
+  } elseif ($VersionNumber -ge 5303) {
+    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5303
   } else {
     throw "Unsupported ANSI Inno Setup 5.x header layout: $VersionNumber"
   }
@@ -1253,6 +1292,8 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     Determine whether Inno Setup should create its own Apps & Features registry entry
   .PARAMETER HeaderValues
     The parsed Inno Setup header strings
+  .PARAMETER HeaderFixedData
+    Fixed-header option evidence used by Inno Setup versions before 5.3.10
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1261,16 +1302,44 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     [string[]]$HeaderValues,
 
     [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
-    [int]$VersionNumber
+    [int]$VersionNumber,
+
+    [Parameter(HelpMessage = 'Fixed-header option evidence used by Inno Setup versions before 5.3.10')]
+    [AllowNull()]
+    [pscustomobject]$HeaderFixedData
   )
 
   $CreateUninstallRegKey = if ($HeaderValues.Count -gt 24) { $HeaderValues[24] } else { $null }
   $Uninstallable = if ($HeaderValues.Count -gt 25) { $HeaderValues[25] } else { $null }
 
   # Inno writes an ARP entry only when the uninstall registry key is created
-  # and an uninstaller is registered. Both directives default to "yes".
-  $CreateUninstallRegKeyInfo = Get-InnoBooleanDirectiveInfo -Value $CreateUninstallRegKey -Default $true
-  $UninstallableInfo = Get-InnoBooleanDirectiveInfo -Value $Uninstallable -Default $true
+  # and an uninstaller is registered. In 5.3.8 and 5.3.10 respectively, these
+  # values moved from option bits to expression-capable serialized strings.
+  $CreateUninstallRegKeyInfo = if ($VersionNumber -lt 5308) {
+    if ($null -ne $HeaderFixedData -and $null -ne $HeaderFixedData.LegacyCreateUninstallRegKey) {
+      [pscustomobject]@{ Value = [bool]$HeaderFixedData.LegacyCreateUninstallRegKey; IsResolved = $true; IsDefault = $false; IsDynamic = $false }
+    } else {
+      [pscustomobject]@{ Value = $null; IsResolved = $false; IsDefault = $false; IsDynamic = $false }
+    }
+  } else {
+    Get-InnoBooleanDirectiveInfo -Value $CreateUninstallRegKey -Default $true
+  }
+  $UninstallableInfo = if ($VersionNumber -lt 5310) {
+    if ($null -ne $HeaderFixedData -and $null -ne $HeaderFixedData.LegacyUninstallable) {
+      [pscustomobject]@{ Value = [bool]$HeaderFixedData.LegacyUninstallable; IsResolved = $true; IsDefault = $false; IsDynamic = $false }
+    } else {
+      [pscustomobject]@{ Value = $null; IsResolved = $false; IsDefault = $false; IsDynamic = $false }
+    }
+  } else {
+    Get-InnoBooleanDirectiveInfo -Value $Uninstallable -Default $true
+  }
+
+  if ($VersionNumber -lt 5308 -and $CreateUninstallRegKeyInfo.IsResolved) {
+    $CreateUninstallRegKey = $CreateUninstallRegKeyInfo.Value ? 'yes' : 'no'
+  }
+  if ($VersionNumber -lt 5310 -and $UninstallableInfo.IsResolved) {
+    $Uninstallable = $UninstallableInfo.Value ? 'yes' : 'no'
+  }
   $WritesAppsAndFeaturesEntry = if (
     ($CreateUninstallRegKeyInfo.IsResolved -and -not $CreateUninstallRegKeyInfo.Value) -or
     ($UninstallableInfo.IsResolved -and -not $UninstallableInfo.Value)
@@ -1291,7 +1360,7 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     CreateUninstallRegKeyResolved = $CreateUninstallRegKeyInfo.IsResolved
     UninstallableResolved         = $UninstallableInfo.IsResolved
     IsResolved                    = $null -ne $WritesAppsAndFeaturesEntry
-    IsKnown                       = $VersionNumber -ge 5310 -or $HeaderValues.Count -gt 24
+    IsKnown                       = $CreateUninstallRegKeyInfo.IsResolved -and $UninstallableInfo.IsResolved
   }
 }
 
@@ -1384,6 +1453,9 @@ function Read-InnoHeaderFixedData {
       $Layout.ArchitecturesAllowedOffset
       $Layout.ArchitecturesInstallIn64BitModeOffset
       $Layout.CompressMethodOffset
+      if ($null -ne $Layout.LegacyHeaderOptionsOffset) {
+        $Layout.LegacyHeaderOptionsOffset + $Layout.LegacyHeaderOptionsSize - 1
+      }
     ) | Where-Object { $null -ne $_ }
     $LastRequiredOffset = ($RequiredOffsets | Measure-Object -Maximum).Maximum
     if ($null -eq $LastRequiredOffset -or $FixedTailOffset + $LastRequiredOffset -ge $Reader.BaseStream.Length) {
@@ -1430,6 +1502,24 @@ function Read-InnoHeaderFixedData {
       default { throw "The Inno Setup compression method is invalid: $CompressMethodValue" }
     }
 
+    $LegacyCreateUninstallRegKey = $null
+    $LegacyUninstallable = $null
+    if ($null -ne $Layout.LegacyHeaderOptionsOffset) {
+      # Packed Pascal sets use ordinal-numbered bits in little-endian byte order.
+      # Read the complete historical set before testing the two ARP-related bits.
+      $Reader.BaseStream.Seek($FixedTailOffset + $Layout.LegacyHeaderOptionsOffset, 'Begin') | Out-Null
+      $HeaderOptions = $Reader.ReadBytes($Layout.LegacyHeaderOptionsSize)
+      if ($HeaderOptions.Length -ne $Layout.LegacyHeaderOptionsSize) { throw 'The Inno Setup header options are truncated' }
+      if ($null -ne $Layout.LegacyCreateUninstallRegKeyOptionBit) {
+        $Bit = [int]$Layout.LegacyCreateUninstallRegKeyOptionBit
+        $LegacyCreateUninstallRegKey = [bool]($HeaderOptions[$Bit -shr 3] -band (1 -shl ($Bit % 8)))
+      }
+      if ($null -ne $Layout.LegacyUninstallableOptionBit) {
+        $Bit = [int]$Layout.LegacyUninstallableOptionBit
+        $LegacyUninstallable = [bool]($HeaderOptions[$Bit -shr 3] -band (1 -shl ($Bit % 8)))
+      }
+    }
+
     return [pscustomobject]@{
       PrivilegesRequired                 = $PrivilegesRequired
       PrivilegesRequiredOverridesAllowed = $Overrides
@@ -1439,6 +1529,8 @@ function Read-InnoHeaderFixedData {
       ArchitecturesInstallIn64BitModeSet = $ArchitecturesInstallIn64BitModeSet
       CompressMethod                     = $CompressMethod
       CompressMethodValue                = $CompressMethodValue
+      LegacyCreateUninstallRegKey        = $LegacyCreateUninstallRegKey
+      LegacyUninstallable                = $LegacyUninstallable
     }
   } finally {
     $Reader.Close()
@@ -1785,7 +1877,7 @@ function Get-InnoInfo {
     $HeaderValues = Read-InnoHeaderStrings -Bytes $HeaderBytes -Layout $Layout
     $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBytes -Layout $Layout
     $HeaderArchitectureData = Get-InnoHeaderArchitectureData -HeaderValues $HeaderValues -PEInfo $PEInfo -HeaderFixedData $HeaderFixedData -Layout $Layout
-    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -VersionNumber $VersionNumber
+    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -VersionNumber $VersionNumber -HeaderFixedData $HeaderFixedData
     $Warnings = [System.Collections.Generic.List[string]]::new()
     foreach ($Warning in $HeaderArchitectureData.Warnings) { $Warnings.Add($Warning) }
     if ($HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Files') {
@@ -1943,6 +2035,7 @@ function Get-InnoInfo {
         FileLocationStartOffsetSize   = $Layout.FileLocationStartOffsetSize
         FixedHeaderArchitectureFormat = $Layout.ArchitecturesEncoding
         UsesInt64BlockHeader          = $Layout.UsesInt64BlockHeader
+        UsesLegacyCallTransform       = $Layout.UsesLegacyCallInstructionTransform
         OffsetTableVersion            = $OffsetTable.Version
       }
     }
@@ -2843,6 +2936,7 @@ function Read-InnoFileLocation {
       ChunkCompressedSize = $ChunkCompressedSize
       DigestAlgorithm     = $Layout.FileLocationDigestAlgorithm
       Digest              = $Digest
+      Md5                  = $Layout.FileLocationDigestAlgorithm -eq 'MD5' ? $Digest : $null
       Sha1                = $Layout.FileLocationDigestAlgorithm -eq 'SHA1' ? $Digest : $null
       Sha256              = $Layout.FileLocationDigestAlgorithm -eq 'SHA256' ? $Digest : $null
       TimeStamp           = $TimeStamp
@@ -3124,6 +3218,8 @@ function Write-InnoFilePayload {
     Compression framing or bounded decoder selected from validated format metadata.
   .PARAMETER OutputPath
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER LegacyCallInstructionTransform
+    Use the pre-5.3.9 CALL/JMP transform selected by the setup-data signature.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
@@ -3131,7 +3227,8 @@ function Write-InnoFilePayload {
     [Parameter(Mandatory)][long]$Offset1,
     [Parameter(Mandatory)][pscustomobject]$Location,
     [Parameter(Mandatory)][string]$CompressionMethod,
-    [Parameter(Mandatory)][string]$OutputPath
+    [Parameter(Mandatory)][string]$OutputPath,
+    [switch]$LegacyCallInstructionTransform
   )
 
   if ($Location.Flags.ChunkEncrypted) { throw 'Encrypted Inno Setup file chunks require the setup password and are not supported' }
@@ -3185,9 +3282,12 @@ function Write-InnoFilePayload {
 
     $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
     $OutputStream = [System.IO.File]::Open($TemporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    $HashAlgorithm = $Location.DigestAlgorithm -eq 'SHA256' ?
-    [System.Security.Cryptography.HashAlgorithmName]::SHA256 :
-    [System.Security.Cryptography.HashAlgorithmName]::SHA1
+    $HashAlgorithm = switch ($Location.DigestAlgorithm) {
+      'MD5' { [System.Security.Cryptography.HashAlgorithmName]::MD5 }
+      'SHA1' { [System.Security.Cryptography.HashAlgorithmName]::SHA1 }
+      'SHA256' { [System.Security.Cryptography.HashAlgorithmName]::SHA256 }
+      default { throw "Unsupported Inno Setup file digest algorithm: $($Location.DigestAlgorithm)" }
+    }
     $Hash = [System.Security.Cryptography.IncrementalHash]::CreateHash($HashAlgorithm)
 
     # Inno applies the CALL/JMP transform to exact 64 KiB blocks. Delegate that
@@ -3195,8 +3295,13 @@ function Write-InnoFilePayload {
     # files keep the pooled copy loop and never materialize the full payload.
     if ($Location.Flags.CallInstructionOptimized) {
       Import-InnoCallTransform
-      [Dumplings.InstallerParsers.InnoCallTransform]::Decode(
-        $PayloadStream, $OutputStream, [long]$Location.OriginalSize, $Hash)
+      if ($LegacyCallInstructionTransform) {
+        [Dumplings.InstallerParsers.InnoCallTransform]::DecodeLegacy(
+          $PayloadStream, $OutputStream, [long]$Location.OriginalSize, $Hash)
+      } else {
+        [Dumplings.InstallerParsers.InnoCallTransform]::Decode(
+          $PayloadStream, $OutputStream, [long]$Location.OriginalSize, $Hash)
+      }
     } else {
       $Remaining = [long]$Location.OriginalSize
       while ($Remaining -gt 0) {
@@ -3573,7 +3678,8 @@ function Expand-InnoInstaller {
         $File = Get-Item -LiteralPath $Target.Path -Force
       } else {
         $File = Write-InnoFilePayload -Path $InstallerPath -Offset1 $OffsetTable.Offset1 -Location $Location `
-          -CompressionMethod $HeaderFixedData.CompressMethod -OutputPath $Target.Path
+          -CompressionMethod $HeaderFixedData.CompressMethod -OutputPath $Target.Path `
+          -LegacyCallInstructionTransform:$Layout.UsesLegacyCallInstructionTransform
         $LocationOutput[$Entry.LocationEntry] = $File.FullName
       }
       $ExpandedBytes += $File.Length

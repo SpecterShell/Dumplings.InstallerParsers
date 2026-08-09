@@ -1,7 +1,7 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
   $LibraryPath = Join-Path $PSScriptRoot '..\Libraries'
-  foreach ($ModuleName in @('Runtime', 'Binary', 'Archive', 'PE', 'InstallerEvidence')) {
+  foreach ($ModuleName in @('Runtime', 'Binary', 'FileSystem', 'Archive', 'PE', 'InstallerEvidence')) {
     Import-Module (Join-Path $LibraryPath "Infrastructure\$ModuleName.psm1") -Force
   }
   Import-Module (Join-Path $LibraryPath 'Installers\Inno.psm1') -Force
@@ -16,10 +16,19 @@ BeforeAll {
       [Parameter(Mandatory)]
       [string]$Url,
 
+      [string]$Sha256,
+
       [switch]$UseSourceForgeMetaRefresh
     )
 
-    Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -UseSourceForgeMetaRefresh:$UseSourceForgeMetaRefresh
+    $Arguments = @{
+      Directory                 = $Script:FixtureDirectory
+      Name                      = $Name
+      Uri                       = $Url
+      UseSourceForgeMetaRefresh = $UseSourceForgeMetaRefresh
+    }
+    if ($Sha256) { $Arguments.Sha256 = $Sha256 }
+    Get-DumplingsTestFixture @Arguments
   }
 }
 
@@ -62,7 +71,8 @@ Describe 'Inno parser' {
   It 'Should use source-backed header layouts at every supported format transition' {
     InModuleScope Inno {
       $Cases = @(
-        @{ Version = 5310; Strings = 26; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
+        @{ Version = 5303; Strings = 24; Privilege = 134; Override = $null; Architecture = 138; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 0; FileOptions = 4; FileBitness = $false; LocationSize = 70; Digest = 'MD5'; StartSize = 4 }
+        @{ Version = 5310; Strings = 26; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 20; FileTrailing = 0; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
         @{ Version = 5500; Strings = 27; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 16; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
         @{ Version = 5506; Strings = 28; Privilege = 138; Override = $null; Architecture = 142; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 16; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
         @{ Version = 5507; Strings = 28; Privilege = 135; Override = $null; Architecture = 139; Int64 = $false; FileStrings = 10; FileAnsiStrings = 0; FileVersionData = 16; FileTrailing = 4; FileOptions = 4; FileBitness = $false; LocationSize = 74; Digest = 'SHA1'; StartSize = 4 }
@@ -99,6 +109,22 @@ Describe 'Inno parser' {
       $AnsiLayout = Get-InnoLayout -VersionNumber 5500 -UnicodeVariant $false
       $AnsiLayout.PrivilegesRequiredOffset | Should -Be 170
       $AnsiLayout.ArchitecturesAllowedOffset | Should -Be 174
+
+      $Layout5303 = Get-InnoLayout -VersionNumber 5303 -UnicodeVariant $true
+      $Layout5303.HeaderAnsiStringCount | Should -Be 5
+      $Layout5303.LegacyHeaderOptionsOffset | Should -Be 150
+      $Layout5303.LegacyCreateUninstallRegKeyOptionBit | Should -Be 15
+      $Layout5303.LegacyUninstallableOptionBit | Should -Be 1
+      $Layout5303.UsesLegacyCallInstructionTransform | Should -BeTrue
+
+      $Layout5308 = Get-InnoLayout -VersionNumber 5308 -UnicodeVariant $true
+      $Layout5308.HeaderStringCount | Should -Be 25
+      $Layout5308.LegacyCreateUninstallRegKeyOptionBit | Should -BeNullOrEmpty
+      $Layout5308.LegacyUninstallableOptionBit | Should -Be 1
+
+      $Layout5309 = Get-InnoLayout -VersionNumber 5309 -UnicodeVariant $true
+      $Layout5309.FileLocationDigestAlgorithm | Should -Be 'SHA1'
+      $Layout5309.UsesLegacyCallInstructionTransform | Should -BeFalse
     }
   }
 
@@ -110,7 +136,9 @@ Describe 'Inno parser' {
           [byte]$Privilege,
           [byte]$Override,
           [byte]$Allowed,
-          [byte]$Install64
+          [byte]$Install64,
+          [byte]$Compression = 4,
+          [byte[]]$HeaderOptions = @()
         )
 
         $StringBytes = [byte[]]::new(($Layout.HeaderStringCount + $Layout.HeaderAnsiStringCount) * 4)
@@ -120,13 +148,19 @@ Describe 'Inno parser' {
           $Layout.ArchitecturesAllowedOffset
           $Layout.ArchitecturesInstallIn64BitModeOffset
           $Layout.CompressMethodOffset
+          if ($null -ne $Layout.LegacyHeaderOptionsOffset) {
+            $Layout.LegacyHeaderOptionsOffset + $Layout.LegacyHeaderOptionsSize - 1
+          }
         ) | Where-Object { $null -ne $_ }
         $Tail = [byte[]]::new((($Offsets | Measure-Object -Maximum).Maximum) + 1)
         $Tail[$Layout.PrivilegesRequiredOffset] = $Privilege
         if ($null -ne $Layout.PrivilegesRequiredOverridesAllowedOffset) { $Tail[$Layout.PrivilegesRequiredOverridesAllowedOffset] = $Override }
         if ($null -ne $Layout.ArchitecturesAllowedOffset) { $Tail[$Layout.ArchitecturesAllowedOffset] = $Allowed }
         if ($null -ne $Layout.ArchitecturesInstallIn64BitModeOffset) { $Tail[$Layout.ArchitecturesInstallIn64BitModeOffset] = $Install64 }
-        $Tail[$Layout.CompressMethodOffset] = 4
+        $Tail[$Layout.CompressMethodOffset] = $Compression
+        if ($null -ne $Layout.LegacyHeaderOptionsOffset -and $HeaderOptions.Count -gt 0) {
+          $HeaderOptions.CopyTo($Tail, $Layout.LegacyHeaderOptionsOffset)
+        }
         return [byte[]]($StringBytes + $Tail)
       }
 
@@ -154,6 +188,20 @@ Describe 'Inno parser' {
       $Version6Fixed.CompressMethod | Should -Be 'Lzma2'
       $Version6Architecture.SupportedArchitectures | Should -Be @('arm64')
       $Version6Architecture.InstallIn64BitMode | Should -BeTrue
+
+      $Version5303Layout = Get-InnoLayout -VersionNumber 5303 -UnicodeVariant $true
+      $Version5303Bytes = New-TestInnoHeader -Layout $Version5303Layout -Privilege 2 -Override 0 -Allowed 0 -Install64 0 `
+        -Compression 3 -HeaderOptions ([byte[]](0x02, 0x80, 0, 0, 0, 0))
+      $Version5303Fixed = Read-InnoHeaderFixedData -Bytes $Version5303Bytes -Layout $Version5303Layout
+      $Version5303Values = [string[]]::new(29)
+      for ($Index = 0; $Index -lt $Version5303Values.Count; $Index++) { $Version5303Values[$Index] = '' }
+      $Version5303Arp = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $Version5303Values -VersionNumber 5303 -HeaderFixedData $Version5303Fixed
+
+      $Version5303Fixed.PrivilegesRequired | Should -Be 'admin'
+      $Version5303Fixed.CompressMethod | Should -Be 'Lzma'
+      $Version5303Fixed.LegacyCreateUninstallRegKey | Should -BeTrue
+      $Version5303Fixed.LegacyUninstallable | Should -BeTrue
+      $Version5303Arp.WritesAppsAndFeaturesEntry | Should -BeTrue
     }
   }
 
@@ -199,6 +247,17 @@ Describe 'Inno parser' {
 
       $Output | Should -BeNullOrEmpty
       $Bytes | Should -Be ([byte[]](0xE8, 0x00, 0x00, 0x00, 0x00, 0x90))
+    }
+  }
+
+  It 'Should use the source-backed pre-5.3.9 CALL transform without changing the sign-extension byte' {
+    InModuleScope Inno {
+      Import-InnoCallTransform
+      $Bytes = [byte[]](0xE8, 0x00, 0x00, 0x00, 0x00, 0x90)
+
+      [Dumplings.InstallerParsers.InnoCallTransform]::DecodeLegacy($Bytes, $Bytes.Length, 0)
+
+      $Bytes | Should -Be ([byte[]](0xE8, 0xFB, 0xFF, 0xFF, 0x00, 0x90))
     }
   }
 
@@ -322,6 +381,64 @@ Describe 'Inno parser' {
     $Info.ParserVersionInfo.FileLocationDigestAlgorithm | Should -Be 'SHA256'
     $Info.ParserVersionInfo.FileLocationStartOffsetSize | Should -Be 4
     Test-InnoAppsAndFeaturesEntry -Path $Fixture | Should -BeTrue
+  }
+
+  It 'Should parse Inno 5.3.3 Unicode metadata from <Name>' -ForEach @(
+    @{
+      Name                   = 'WingGateway-1.1.2.exe'
+      Url                    = 'https://www.wftpserver.com/download/WingGateway_Setup.exe'
+      Sha256                 = 'F867D26C4957FDF0C95E6F4E843386434DC94F8DC4BE8B426D8BBEE1E940B2E1'
+      ProductCode            = '{1F5A1D86-7CAF-43D9-B8E4-572D0CA73208}_is1'
+      DisplayName            = 'Wing Gateway 1.1.2'
+      DisplayVersion         = '1.1.2'
+      DefaultInstallLocation = '%ProgramFiles(x86)%\Wing Gateway'
+    }
+    @{
+      Name                   = 'WingFtpServer-8.2.1.exe'
+      Url                    = 'https://www.wftpserver.com/download/WingFtpServer.exe'
+      Sha256                 = '65C2BF03E18FCCDDA959171F9E99DAC78F32FF94B2D0447CBF2189C2FA50682F'
+      ProductCode            = '{DF494ADD-CA7F-445C-9D04-3F0CA3B8F20F}_is1'
+      DisplayName            = 'Wing FTP Server 8.2.1'
+      DisplayVersion         = '8.2.1'
+      DefaultInstallLocation = '%ProgramFiles(x86)%\Wing FTP Server'
+    }
+  ) {
+    $Fixture = Get-InstallerFixture -Name $Name -Url $Url -Sha256 $Sha256
+    $Info = Get-InnoInfo -Path $Fixture
+
+    $Info.Signature | Should -Be 'Inno Setup Setup Data (5.3.3) (u)'
+    $Info.ProductCode | Should -Be $ProductCode
+    $Info.DisplayName | Should -Be $DisplayName
+    $Info.DisplayVersion | Should -Be $DisplayVersion
+    $Info.Publisher | Should -Be 'Wing FTP Software, Inc.'
+    $Info.Scope | Should -Be 'machine'
+    $Info.DefaultInstallLocation | Should -Be $DefaultInstallLocation
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.PrivilegesRequired | Should -Be 'admin'
+    $Info.ParserVersionInfo.HeaderStringCount | Should -Be 24
+    $Info.ParserVersionInfo.HeaderAnsiStringCount | Should -Be 5
+    $Info.ParserVersionInfo.FileLocationDigestAlgorithm | Should -Be 'MD5'
+    $Info.ParserVersionInfo.FileLocationEntrySize | Should -Be 70
+    $Info.ParserVersionInfo.UsesLegacyCallTransform | Should -BeTrue
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should extract and verify an Inno 5.3.3 payload with legacy MD5 records' {
+    $Fixture = Get-InstallerFixture -Name 'WingGateway-1.1.2.exe' `
+      -Url 'https://www.wftpserver.com/download/WingGateway_Setup.exe' `
+      -Sha256 'F867D26C4957FDF0C95E6F4E843386434DC94F8DC4BE8B426D8BBEE1E940B2E1'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'wing-gateway-expanded'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Extracted = @(Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'WingGateway.exe' -CollisionAction Rename)
+
+      $Extracted | Should -HaveCount 1
+      $Extracted[0] | Should -BeOfType ([System.IO.FileInfo])
+      $Extracted[0].Length | Should -Be 6676816
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 
   It 'Should parse the official Inno Setup 7 layout without inventing dynamic ARP metadata' {
