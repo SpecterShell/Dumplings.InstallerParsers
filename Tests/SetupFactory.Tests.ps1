@@ -33,7 +33,7 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
 
   It 'decodes the official zlib blast PKWARE test vector with an output limit' {
     if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-      Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\PkwareBlast.cs')
+      Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\SetupFactory\PkwareBlast.cs')
     }
     $Compressed = [byte[]](0x00, 0x04, 0x82, 0x24, 0x25, 0x8F, 0x80, 0x7F)
     $Decoded = [Dumplings.InstallerParsers.PkwareBlast]::Decode($Compressed, 13)
@@ -43,7 +43,7 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
 
   It 'rejects a truncated PKWARE stream without hanging' {
     if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-      Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\PkwareBlast.cs')
+      Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\SetupFactory\PkwareBlast.cs')
     }
     { [Dumplings.InstallerParsers.PkwareBlast]::Decode([byte[]](0, 4, 0), 1024) } | Should -Throw '*end marker*'
   }

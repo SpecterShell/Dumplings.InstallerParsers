@@ -1,18 +1,24 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
-# Format sources: https://github.com/jrsoftware/issrc, https://github.com/jrathlev/InnoUnpacker-Windows-GUI, and https://github.com/russellbanks/Komac
+# Format sources: https://github.com/jrsoftware/issrc, https://github.com/jrathlev/InnoUnpacker-Windows-GUI, https://github.com/Wack0/IFPSTools.NET, and https://github.com/russellbanks/Komac
 #
 # Binary structure consumed by this parser:
 #
-#   PE/.rsrc/RCDATA/#11111 -> offset table (44-byte v1 or 64-byte v2)
-#     magic[12], version@+0C, Offset0/Offset1, CRC32 at the table tail
-#   Offset0 -> setup signature[64] -> optional encryption header
-#     -> [stored-size][compressed flag][CRC32 + <=4096-byte chunks]*
-#     -> setup header and version-dependent tables
-#   Offset1 -> file locations -> 7A 6C 62 1A ("zlb" 1A) payload blocks
+#   PE loader
+#   +-- legacy: [abs 0x30] "Inno" + table pointer/complement
+#   |            `-- S02/S04/S05/S06/S07 table -> Offset0/Offset1
+#   `-- modern: .rsrc/RCDATA/#11111 -> 44-byte v1 or 64-byte v2 table
 #
-# Offset-table values become absolute file offsets after resource decoding.
-# Integer fields are little-endian; compressed metadata is stored or raw LZMA.
-# Every declared range, chunk CRC, decompressed size, and table count is bounded.
+#   Offset0 -> setup signature[64] -> optional encryption header
+#     -> legacy or chunk-framed metadata -> catalogued record tables
+#   Offset1 != 0 -> embedded 7A 6C 62 1A ("zlb" 1A) payload blocks
+#   Offset1 == 0 -> Setup-N[letter].bin external slices
+#     +-- 69 64 73 6B 61 33 32 1A + uint32 size (structures < 6.5.2)
+#     `-- 69 64 73 6B 62 33 32 1A + int64 size  (structures >= 6.5.2)
+#
+# InnoFormatCatalog.psd1 maps exact edition/signature/character-mode/loader
+# combinations to immutable loader, framing, record, payload, checksum, and
+# CALL-transform routes. Integers are little-endian. Every range, count, chunk,
+# checksum, decompressed size, and extraction destination is bounded.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -24,51 +30,332 @@ $ErrorActionPreference = 'Stop'
 $INNO_SETUP_ID_SIZE = 64
 $INNO_SETUP_LDR_OFFSET_TABLE_RESOURCE = 11111
 $INNO_RT_RCDATA = 10
-$INNO_SIGNATURE_PATTERN = '^Inno Setup Setup Data \(([^)]+)\)(?: \(([uU])\))?$'
+$INNO_SIGNATURE_PATTERN = '^(?<Prefix>Inno Setup Setup Data|My Inno Setup Extensions Setup Data) \((?<Version>[^)]+)\)(?: \((?<Unicode>[uU])\))?(?<Suffix>.*)$'
 $INNO_OFFSET_TABLE_ID = [System.Text.Encoding]::ASCII.GetString([byte[]](0x72, 0x44, 0x6C, 0x50, 0x74, 0x53, 0xCD, 0xE6, 0xD7, 0x7B, 0x0B, 0x2A))
-$INNO_OFFSET_TABLE_VERSION_1_SIZE = 44
-$INNO_OFFSET_TABLE_VERSION_2_SIZE = 64
+$INNO_LEGACY_LOADER_HEADER_OFFSET = 0x30
+$INNO_LEGACY_LOADER_HEADER_ID = 0x6F6E6E49
+$INNO_LEGACY_OFFSET_TABLE_IDS = @{
+  'rDlPtS02' = 'legacy-s02'
+  'rDlPtS04' = 'legacy-s04'
+  'rDlPtS05' = 'legacy-s05'
+  'rDlPtS06' = 'legacy-s06'
+  'rDlPtS07' = 'legacy-s07'
+}
 $INNO_ENCRYPTION_HEADER_SIZE_6500 = 49
 $INNO_MAX_CHUNK_SIZE = 4096
 $INNO_MAX_DECOMPRESSED_BLOCK_SIZE = 1073741824
 $INNO_MAX_ENTRY_STRING_SIZE = 1048576
 $INNO_MAX_FILE_ENTRY_PATH_SCAN = 16384
 $INNO_PAYLOAD_BUFFER_SIZE = 1048576
+$INNO_MAX_COMPILED_CODE_SIZE = 16777216
+$INNO_MAX_PASCAL_SCRIPT_ENTITY_COUNT = 262144
+$INNO_MAX_PASCAL_SCRIPT_DISASSEMBLY_INPUT_SIZE = 1048576
+$INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS = 4194304
 $INNO_LEAD_BYTES_SIZE = 32
 $INNO_CHUNK_MAGIC = [System.Text.Encoding]::ASCII.GetString([byte[]](0x7A, 0x6C, 0x62, 0x1A))
-$INNO_VERSION_5_HEADER_COUNT_FIELDS = 16
-$INNO_LANGUAGE_ENTRY_STRINGS = 6
-$INNO_LANGUAGE_ENTRY_ANSI_STRINGS = 4
-$INNO_LANGUAGE_ENTRY_FIXED_SIZE = 25
-$INNO_CUSTOM_MESSAGE_ENTRY_STRINGS = 2
-$INNO_CUSTOM_MESSAGE_ENTRY_FIXED_SIZE = 4
-$INNO_PERMISSION_ENTRY_ANSI_STRINGS = 1
-$INNO_TYPE_ENTRY_STRINGS = 4
-$INNO_TYPE_ENTRY_FIXED_SIZE = 33
-$INNO_COMPONENT_ENTRY_STRINGS = 5
-$INNO_COMPONENT_ENTRY_FIXED_SIZE = 42
-$INNO_TASK_ENTRY_STRINGS = 6
-$INNO_TASK_ENTRY_FIXED_SIZE = 26
-$INNO_DIRECTORY_ENTRY_STRINGS = 7
-$INNO_DIRECTORY_ENTRY_FIXED_SIZE = 27
-$INNO_FILE_ENTRY_STRINGS = 10
-$INNO_FILE_ENTRY_OPTIONS_SIZE = 4
-$INNO_FILE_ENTRY_FIXED_SIZE = 43
-$INNO_FILE_LOCATION_ENTRY_SIZE = 74
-$INNO_VERSION5_HEADER_FIXED_SIZE_5303 = 188
-$INNO_VERSION5_HEADER_FIXED_SIZE_5306 = 192
-$INNO_VERSION5_HEADER_FIXED_SIZE_5309 = 196
-$INNO_VERSION5_HEADER_FIXED_SIZE_5310 = 188
-$INNO_VERSION5_HEADER_FIXED_SIZE_5500 = 189
-
+$INNO_DISK_SLICE_ID_LEGACY = [byte[]](0x69, 0x64, 0x73, 0x6B, 0x61, 0x33, 0x32, 0x1A) # "idska32" + SUB
+$INNO_DISK_SLICE_ID_6502 = [byte[]](0x69, 0x64, 0x73, 0x6B, 0x62, 0x33, 0x32, 0x1A)   # "idskb32" + SUB
 Import-InstallerArchiveDependency
+
+$Script:InnoFormatCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'InnoFormatCatalog.psd1') -SkipLimitCheck
+$Script:InnoPascalScriptAssetManifest = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot '..\..\Assets\IFPSLibAssets.psd1')
+
+function Import-InnoPascalScriptDependency {
+  <#
+  .SYNOPSIS
+    Load the pinned IFPSLib dependency chain used for compiled Pascal Script analysis.
+  .DESCRIPTION
+    IFPSLib is loaded only after the caller has validated the bounded IFPS header. The
+    dependency remains inside the process-isolated GPL parser and is never loaded by
+    PackageModule directly.
+  #>
+  $AssetRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\Assets')).Path
+  $AssemblyRoot = Join-Path $AssetRoot 'Assemblies'
+  foreach ($Asset in $Script:InnoPascalScriptAssetManifest.Assemblies) {
+    $AssetPath = Join-Path $AssemblyRoot $Asset.Name
+    if (-not (Test-Path -LiteralPath $AssetPath -PathType Leaf)) { throw "The pinned IFPS dependency is missing: $AssetPath" }
+    $ActualHash = (Get-FileHash -LiteralPath $AssetPath -Algorithm SHA256).Hash
+    if ($ActualHash -cne $Asset.Sha256) {
+      throw "The pinned IFPS dependency '$($Asset.Name)' failed its SHA-256 integrity check."
+    }
+    $Assembly = Import-InstallerManagedAssembly -Name $Asset.Name -TypeName $Asset.TypeName
+    if ($Assembly.GetName().Version.ToString() -cne $Asset.Version) {
+      throw "The loaded IFPS dependency '$($Asset.Name)' has version '$($Assembly.GetName().Version)', expected '$($Asset.Version)'."
+    }
+  }
+}
+
+# Loader variants differ only in field positions, integer widths, and CRC
+# coverage. These route records keep those source-backed differences out of
+# parser-time version branches.
+$Script:InnoResourceOffsetTableRoutes = @{
+  1 = [pscustomobject]@{ Route = 'resource-v1'; MinimumSize = 44; CrcOffset = 40; CrcLength = 40; IntegerSize = 4; Signed = $false; TotalSizeOffset = 16; Offset0Offset = 32; Offset1Offset = 36 }
+  2 = [pscustomobject]@{ Route = 'resource-v2'; MinimumSize = 64; CrcOffset = 60; CrcLength = 60; IntegerSize = 8; Signed = $true; TotalSizeOffset = 16; Offset0Offset = 40; Offset1Offset = 48 }
+}
+$Script:InnoLegacyOffsetTableRoutes = @{
+  'legacy-s02' = [pscustomobject]@{ MinimumSize = 44; CrcOffset = $null; CrcLength = 0; TotalSizeOffset = 12; Offset0Offset = 36; Offset1Offset = 40 }
+  'legacy-s04' = [pscustomobject]@{ MinimumSize = 40; CrcOffset = $null; CrcLength = 0; TotalSizeOffset = 12; Offset0Offset = 32; Offset1Offset = 36 }
+  'legacy-s05' = [pscustomobject]@{ MinimumSize = 40; CrcOffset = $null; CrcLength = 0; TotalSizeOffset = 12; Offset0Offset = 32; Offset1Offset = 36 }
+  'legacy-s06' = [pscustomobject]@{ MinimumSize = 44; CrcOffset = 40; CrcLength = 40; TotalSizeOffset = 12; Offset0Offset = 32; Offset1Offset = 36 }
+  'legacy-s07' = [pscustomobject]@{ MinimumSize = 40; CrcOffset = 36; CrcLength = 36; TotalSizeOffset = 12; Offset0Offset = 28; Offset1Offset = 32 }
+}
+$Script:InnoPayloadRouteDescriptors = @{
+  'legacy-adler'              = [pscustomobject]@{ AlwaysCompressed = $true; CompressionFromLocation = $true }
+  'chunked-always-compressed' = [pscustomobject]@{ AlwaysCompressed = $true; CompressionFromLocation = $false }
+  'chunked-legacy'            = [pscustomobject]@{ AlwaysCompressed = $false; CompressionFromLocation = $false }
+  'chunked-modern'            = [pscustomobject]@{ AlwaysCompressed = $false; CompressionFromLocation = $false }
+}
+
+function Copy-InnoCatalogMap {
+  <#
+  .SYNOPSIS
+    Copy a catalog dictionary into an independently mutable ordered dictionary.
+  .PARAMETER InputObject
+    Catalog dictionary whose scalar and array values are copied.
+  #>
+  [OutputType([System.Collections.Specialized.OrderedDictionary])]
+  param ([Parameter(Mandatory)][System.Collections.IDictionary]$InputObject)
+
+  $Result = [ordered]@{}
+  foreach ($Key in $InputObject.Keys) {
+    $Value = $InputObject[$Key]
+    $Result[$Key] = if ($Value -is [array]) { @($Value) } else { $Value }
+  }
+  return $Result
+}
+
+function Test-InnoCatalogDelta {
+  <#
+  .SYNOPSIS
+    Test whether one declarative catalog delta applies to a format row.
+  .PARAMETER Delta
+    Delta containing optional version, edition, and character-mode selectors.
+  .PARAMETER Format
+    Exact catalog format row being resolved.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Delta,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Format
+  )
+
+  $Version = [int]$Format.InternalStructureVersion
+  if ($Delta.Contains('MinimumVersion') -and $Version -lt [int]$Delta.MinimumVersion) { return $false }
+  if ($Delta.Contains('MaximumVersion') -and $Version -gt [int]$Delta.MaximumVersion) { return $false }
+  if ($Delta.Contains('CharacterMode') -and $Format.CharacterMode -cne $Delta.CharacterMode) { return $false }
+  if ($Delta.Contains('EditionId') -and $Format.EditionId -cne $Delta.EditionId) { return $false }
+  return $true
+}
+
+function Resolve-InnoCatalogFormat {
+  <#
+  .SYNOPSIS
+    Resolve one exact catalog row into a complete parser layout.
+  .DESCRIPTION
+    Applies ordered record deltas once at module runtime and projects named
+    count, header-field, and file-entry schemas. Parsing functions consume the
+    resolved properties and do not make version-threshold layout decisions.
+  .PARAMETER Format
+    Exact format row from InnoFormatCatalog.psd1.
+  .PARAMETER LayoutResolution
+    Evidence describing exact, ambiguous, or validated-nearest selection.
+  .PARAMETER CandidateIds
+    Exact format IDs that shared the observed signature and loader family.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Format,
+    [string]$LayoutResolution = 'Exact',
+    [string[]]$CandidateIds = @([string]$Format.Id)
+  )
+
+  $Resolved = Copy-InnoCatalogMap -InputObject $Format
+  foreach ($DeltaGroupName in 'RouteDeltas', 'HeaderContentDeltas', 'RecordDeltas', 'RecordFamilyDeltas', 'HeaderFixedDeltas') {
+    foreach ($Delta in $Script:InnoFormatCatalog[$DeltaGroupName]) {
+      if (-not (Test-InnoCatalogDelta -Delta $Delta -Format $Format)) { continue }
+      foreach ($Key in $Delta.Set.Keys) { $Resolved[$Key] = $Delta.Set[$Key] }
+    }
+  }
+
+  # Inno 5.3.3 and later place SlicesPerDisk immediately before the two
+  # one-byte uninstall-log and directory-warning enums. Inno 4.x has two
+  # additional enums in that interval, so its exact offsets remain catalogued.
+  if ($null -eq $Resolved.SlicesPerDiskOffset -and
+    $null -ne $Resolved.PrivilegesRequiredOffset -and
+    [int]$Resolved.PrivilegesRequiredOffset -ge 6) {
+    $Resolved.SlicesPerDiskOffset = [int]$Resolved.PrivilegesRequiredOffset - 6
+    $Resolved.SlicesPerDiskDefault = $null
+    $Resolved.SupportsExternalDiskSlices = $true
+  }
+
+  $Resolved.VersionNumber = if ([int]$Format.InternalStructureVersion -ge 700000) { 7000 } else { [int]$Format.InternalStructureVersion }
+  $Resolved.Edition = [string]$Script:InnoFormatCatalog.Editions[$Format.EditionId]
+  $Resolved.StringEncoding = [string]$Format.CharacterMode
+  $Resolved.HeaderCountNames = [string[]]@($Script:InnoFormatCatalog.HeaderCountSchemas[$Format.HeaderCountSchema])
+  $Resolved.HeaderFields = [pscustomobject](Copy-InnoCatalogMap -InputObject $Script:InnoFormatCatalog.HeaderFieldSchemas[$Format.HeaderFieldSchema])
+  $Resolved.FileEntryFields = [string[]]@($Script:InnoFormatCatalog.FileEntrySchemas[$Format.FileEntrySchema])
+  if ($null -ne $Resolved.CompiledCodeStringIndex -and [int]$Resolved.CompiledCodeStringIndex -lt 0) {
+    $Resolved.CompiledCodeStringIndex = [int]$Format.HeaderStringCount + [int]$Format.HeaderAnsiStringCount + [int]$Resolved.CompiledCodeStringIndex
+  }
+  $RecordFamilies = [ordered]@{}
+  foreach ($Family in 'Language', 'CustomMessage', 'Permission', 'Type', 'Component', 'Task', 'Dir', 'ISSigKey', 'Icon', 'Ini', 'Registry', 'Delete', 'Run') {
+    $SchemaProperty = "${Family}RecordSchema"
+    $SchemaId = [string]$Resolved[$SchemaProperty]
+    if ([string]::IsNullOrWhiteSpace($SchemaId) -or -not $Script:InnoFormatCatalog.RecordFamilySchemas.Contains($SchemaId)) {
+      throw "Inno catalog format '$($Format.Id)' does not resolve a $Family record schema"
+    }
+    $Schema = Copy-InnoCatalogMap -InputObject $Script:InnoFormatCatalog.RecordFamilySchemas[$SchemaId]
+    $Schema.Id = $SchemaId
+    $Schema.CountField = switch ($Family) {
+      'Language' { 'NumLanguageEntries' }
+      'CustomMessage' { 'NumCustomMessageEntries' }
+      'Permission' { 'NumPermissionEntries' }
+      'Type' { 'NumTypeEntries' }
+      'Component' { 'NumComponentEntries' }
+      'Task' { 'NumTaskEntries' }
+      'Dir' { 'NumDirEntries' }
+      'ISSigKey' { 'NumISSigKeyEntries' }
+      'Icon' { 'NumIconEntries' }
+      'Ini' { 'NumIniEntries' }
+      'Registry' { 'NumRegistryEntries' }
+      'Delete' { $null }
+      'Run' { $null }
+    }
+    # ANSI editions serialize both the nominal String and AnsiString fields
+    # with the active ANSI code page. Unicode editions retain the split.
+    if ($Format.CharacterMode -eq 'Ansi') {
+      $Schema.AnsiFields = [string[]]@($Schema.Fields) + [string[]]@($Schema.AnsiFields)
+      $Schema.Fields = [string[]]@()
+    } else {
+      $Schema.Fields = [string[]]@($Schema.Fields)
+      $Schema.AnsiFields = [string[]]@($Schema.AnsiFields)
+    }
+    $RecordFamilies[$Family] = [pscustomobject]$Schema
+  }
+  $Resolved.RecordFamilies = [pscustomobject]$RecordFamilies
+  $Resolved.FileLocationFlagNames = [string[]]@($Script:InnoFormatCatalog.FileLocationFlagSchemas[$Resolved.FileLocationFlagSchema])
+  $Resolved.FileLocationFlagSize = [int][Math]::Ceiling($Resolved.FileLocationFlagNames.Count / 8)
+  $Resolved.EncryptionHeaderSize = $Resolved.HasEncryptionHeader ? $Script:INNO_ENCRYPTION_HEADER_SIZE_6500 : 0
+  $Resolved.FileLocationDigestAlgorithm = [string]$Format.ChecksumRoute
+  $Resolved.FileLocationDigestSize = switch ($Format.ChecksumRoute) {
+    'Adler32' { 4 }
+    'CRC32' { 4 }
+    'MD5' { 16 }
+    'SHA1' { 20 }
+    'SHA256' { 32 }
+    default { throw "Unsupported Inno file-location checksum route: $($Format.ChecksumRoute)" }
+  }
+  $Resolved.FileLocationEntrySize = if ($Format.FileLocationSchema -eq 'location-adler') {
+    41
+  } else {
+    8 + [int]$Resolved.FileLocationStartOffsetSize + 24 + [int]$Resolved.FileLocationDigestSize + 8 + 8 +
+    $Resolved.FileLocationFlagSize + ($Resolved.FileLocationHasSign ? 1 : 0)
+  }
+  $Resolved.UsesLegacyCallInstructionTransform = $Format.CallTransformRoute -ne 'relative24-v3'
+  $Resolved.LayoutResolution = $LayoutResolution
+  $Resolved.CandidateIds = [string[]]@($CandidateIds)
+  $Resolved.SupportStatus = $Format.Supported ? 'Supported' : 'Unsupported'
+  return [pscustomobject]$Resolved
+}
+
+function Copy-InnoResolvedCatalogFormat {
+  <#
+  .SYNOPSIS
+    Clone one pre-resolved Inno catalog descriptor for a parser operation.
+  .DESCRIPTION
+    Catalog descriptors are resolved once when the module is imported. Each
+    parse receives its own top-level object so fallback validation can update
+    LayoutResolution without changing the shared descriptor or another parse.
+  .PARAMETER Format
+    Immutable module-scoped descriptor to clone.
+  .PARAMETER LayoutResolution
+    Selection evidence for this parse.
+  .PARAMETER CandidateIds
+    Catalog rows considered for the observed signature.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$Format,
+    [Parameter(Mandatory)][string]$LayoutResolution,
+    [Parameter(Mandatory)][string[]]$CandidateIds
+  )
+
+  $Copy = [ordered]@{}
+  foreach ($Property in $Format.PSObject.Properties) {
+    $Value = $Property.Value
+    $Copy[$Property.Name] = if ($Value -is [array]) {
+      @($Value)
+    } elseif ($Value -is [System.Collections.IDictionary]) {
+      Copy-InnoCatalogMap -InputObject $Value
+    } elseif ($Value -is [pscustomobject]) {
+      $Nested = [ordered]@{}
+      foreach ($NestedProperty in $Value.PSObject.Properties) { $Nested[$NestedProperty.Name] = $NestedProperty.Value }
+      [pscustomobject]$Nested
+    } else {
+      $Value
+    }
+  }
+  $Copy.LayoutResolution = $LayoutResolution
+  $Copy.CandidateIds = [string[]]@($CandidateIds)
+  return [pscustomobject]$Copy
+}
+
+# Resolve all schema deltas once. Runtime parsing selects and clones these
+# descriptors rather than rebuilding layouts or branching on version numbers.
+$Script:InnoResolvedFormats = [ordered]@{}
+foreach ($CatalogFormat in $Script:InnoFormatCatalog.Formats) {
+  $Script:InnoResolvedFormats[$CatalogFormat.Id] = Resolve-InnoCatalogFormat -Format $CatalogFormat
+}
+
+function Test-InnoResToolsEdition {
+  <#
+  .SYNOPSIS
+    Detect the ResTools Inno fork from bounded Delphi PACKAGEINFO metadata.
+  .PARAMETER Path
+    Installer PE path; the file is read as data and is never loaded as code.
+  #>
+  [OutputType([bool])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $Resource = Get-PEResourceInfo -Path $Path -MaximumResources 4096 |
+    Where-Object { $_.TypeId -eq $Script:INNO_RT_RCDATA -and $_.Name -eq 'PACKAGEINFO' } |
+    Select-Object -First 1
+  if (-not $Resource -or $Resource.Size -lt 12 -or $Resource.Size -gt 1048576) { return $false }
+
+  $Bytes = Read-PEResourceData -Resource $Resource -MaximumBytes 1048576
+  $RequiresCount = [BitConverter]::ToInt32($Bytes, 4)
+  if ($RequiresCount -lt 0 -or $RequiresCount -gt 65535) { return $false }
+  $Cursor = 8
+  for ($Index = 0; $Index -lt $RequiresCount; $Index++) {
+    if ($Cursor + 2 -gt $Bytes.Length) { return $false }
+    $End = $Cursor + 1
+    while ($End -lt $Bytes.Length -and $Bytes[$End] -ne 0) { $End++ }
+    if ($End -ge $Bytes.Length) { return $false }
+    $Cursor = $End + 1
+  }
+  if ($Cursor + 4 -gt $Bytes.Length) { return $false }
+  $ContainsCount = [BitConverter]::ToInt32($Bytes, $Cursor)
+  if ($ContainsCount -lt 0 -or $ContainsCount -gt 65535) { return $false }
+  $Cursor += 4
+  for ($Index = 0; $Index -lt $ContainsCount; $Index++) {
+    if ($Cursor + 3 -gt $Bytes.Length) { return $false }
+    $NameStart = $Cursor + 2
+    $End = $NameStart
+    while ($End -lt $Bytes.Length -and $Bytes[$End] -ne 0) { $End++ }
+    if ($End -ge $Bytes.Length) { return $false }
+    $UnitName = [Text.Encoding]::ASCII.GetString($Bytes, $NameStart, $End - $NameStart)
+    if ($UnitName.StartsWith('SetupLdr_D2009', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    $Cursor = $End + 1
+  }
+  return $false
+}
 
 function Import-InnoCallTransform {
   <#
   .SYNOPSIS
     Load the source-backed Inno CALL/JMP byte transform once
   #>
-  $SourcePath = Join-Path $PSScriptRoot '..\..\Assets\InnoCallTransform.cs'
+  $SourcePath = Join-Path $PSScriptRoot '..\..\Assets\Source\Inno\InnoCallTransform.cs'
   $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.InnoCallTransform'
 }
 
@@ -118,6 +405,32 @@ function Get-InnoResourceBytes {
   return , (Read-PEResourceData -Resource $Resource -MaximumBytes 1048576)
 }
 
+function Read-InnoOffsetTableInteger {
+  <#
+  .SYNOPSIS
+    Read one little-endian integer from a loader-table byte range.
+  .PARAMETER Bytes
+    Complete loader-table bytes.
+  .PARAMETER Offset
+    Table-relative field offset.
+  .PARAMETER Size
+    Integer width in bytes.
+  .PARAMETER Signed
+    Interpret an eight-byte field as signed, matching modern Inno records.
+  #>
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][int]$Offset,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$Size,
+    [switch]$Signed
+  )
+
+  if ($Offset -lt 0 -or $Offset -gt $Bytes.Length - $Size) { throw 'The Inno Setup offset-table integer is outside the record' }
+  if ($Size -eq 4) { return [BitConverter]::ToUInt32($Bytes, $Offset) }
+  if ($Signed) { return [BitConverter]::ToInt64($Bytes, $Offset) }
+  return [BitConverter]::ToUInt64($Bytes, $Offset)
+}
+
 function Get-InnoOffsetTable {
   <#
   .SYNOPSIS
@@ -131,46 +444,72 @@ function Get-InnoOffsetTable {
     [string]$Path
   )
 
-  $InstallerLength = (Get-Item -Path $Path -Force).Length
-  $Bytes = Get-InnoResourceBytes -Path $Path -Id $Script:INNO_SETUP_LDR_OFFSET_TABLE_RESOURCE
-  if ($Bytes.Length -lt 16) { throw 'The Inno Setup offset table is truncated' }
-  $Identifier = [System.Text.Encoding]::ASCII.GetString($Bytes, 0, 12)
-  if ($Identifier -ne $Script:INNO_OFFSET_TABLE_ID) { throw 'The Inno Setup offset table identifier is invalid' }
+  $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $InstallerLength = (Get-Item -LiteralPath $InstallerPath -Force).Length
+  $Bytes = $null
+  try { $Bytes = Get-InnoResourceBytes -Path $InstallerPath -Id $Script:INNO_SETUP_LDR_OFFSET_TABLE_RESOURCE } catch { }
 
-  $Version = [System.BitConverter]::ToUInt32($Bytes, 12)
+  if ($Bytes) {
+    if ($Bytes.Length -lt 16) { throw 'The Inno Setup resource offset table is truncated' }
+    $Identifier = [Text.Encoding]::ASCII.GetString($Bytes, 0, 12)
+    if ($Identifier -ne $Script:INNO_OFFSET_TABLE_ID) { throw 'The Inno Setup resource offset table identifier is invalid' }
+    $Version = [BitConverter]::ToUInt32($Bytes, 12)
 
-  # Offset-table v1 uses 32-bit offsets and a 44-byte record; v2 widens the
-  # persisted sizes/offsets to 64 bits and moves the CRC to byte 60.
-  switch ($Version) {
-    1 {
-      if ($Bytes.Length -lt $Script:INNO_OFFSET_TABLE_VERSION_1_SIZE) { throw 'The Inno Setup offset table is truncated' }
-      $StoredCrc = [System.BitConverter]::ToUInt32($Bytes, 40)
-      $ExpectedCrc = Get-BinaryCrc32 -Bytes $Bytes -Offset 0 -Count 40
-      if ($StoredCrc -ne $ExpectedCrc) { throw 'The Inno Setup offset table CRC is invalid' }
-
-      $Result = [pscustomobject]@{
-        Version   = $Version
-        TotalSize = [System.BitConverter]::ToUInt32($Bytes, 16)
-        Offset0   = [System.BitConverter]::ToUInt32($Bytes, 32)
-        Offset1   = [System.BitConverter]::ToUInt32($Bytes, 36)
-      }
-      break
+    # Resource v1 stores 32-bit offsets. Resource v2 widens persisted sizes and
+    # offsets to 64 bits; both records protect every preceding byte with CRC32.
+    $Route = $Script:InnoResourceOffsetTableRoutes[[int]$Version]
+    if (-not $Route) { throw "Unsupported Inno Setup resource offset table version: $Version" }
+    if ($Bytes.Length -lt $Route.MinimumSize) { throw 'The Inno Setup resource offset table is truncated' }
+    if ([BitConverter]::ToUInt32($Bytes, $Route.CrcOffset) -ne (Get-BinaryCrc32 -Bytes $Bytes -Offset 0 -Count $Route.CrcLength)) {
+      throw 'The Inno Setup resource offset table CRC is invalid'
     }
-    2 {
-      if ($Bytes.Length -lt $Script:INNO_OFFSET_TABLE_VERSION_2_SIZE) { throw 'The Inno Setup offset table is truncated' }
-      $StoredCrc = [System.BitConverter]::ToUInt32($Bytes, 60)
-      $ExpectedCrc = Get-BinaryCrc32 -Bytes $Bytes -Offset 0 -Count 60
-      if ($StoredCrc -ne $ExpectedCrc) { throw 'The Inno Setup offset table CRC is invalid' }
-
-      $Result = [pscustomobject]@{
-        Version   = $Version
-        TotalSize = [System.BitConverter]::ToInt64($Bytes, 16)
-        Offset0   = [System.BitConverter]::ToInt64($Bytes, 40)
-        Offset1   = [System.BitConverter]::ToInt64($Bytes, 48)
-      }
-      break
+    $Result = [pscustomobject]@{
+      Version     = [int]$Version
+      LoaderRoute = $Route.Route
+      TotalSize   = Read-InnoOffsetTableInteger -Bytes $Bytes -Offset $Route.TotalSizeOffset -Size $Route.IntegerSize -Signed:$Route.Signed
+      Offset0     = Read-InnoOffsetTableInteger -Bytes $Bytes -Offset $Route.Offset0Offset -Size $Route.IntegerSize -Signed:$Route.Signed
+      Offset1     = Read-InnoOffsetTableInteger -Bytes $Bytes -Offset $Route.Offset1Offset -Size $Route.IntegerSize -Signed:$Route.Signed
     }
-    default { throw "Unsupported Inno Setup offset table version: $Version" }
+  } else {
+    # Loaders before 5.1.2 store an ID and complemented offset-table pointer at
+    # absolute file offset 0x30. The table's 12-byte magic selects S02-S07.
+    $Stream = [IO.File]::Open($InstallerPath, 'Open', 'Read', 'ReadWrite')
+    try {
+      if ($Stream.Length -lt $Script:INNO_LEGACY_LOADER_HEADER_OFFSET + 12) {
+        throw 'The file does not contain an Inno Setup loader header'
+      }
+      $Header = Read-BinaryBytes -Stream $Stream -Offset $Script:INNO_LEGACY_LOADER_HEADER_OFFSET -Count 12
+      $HeaderId = [BitConverter]::ToUInt32($Header, 0)
+      $TableOffset = [BitConverter]::ToUInt32($Header, 4)
+      $Complement = [BitConverter]::ToUInt32($Header, 8)
+      if ($HeaderId -ne $Script:INNO_LEGACY_LOADER_HEADER_ID -or $Complement -ne ((-bnot $TableOffset) -band 0xFFFFFFFFL)) {
+        throw 'The file does not contain a valid legacy Inno Setup loader pointer'
+      }
+      if ($TableOffset -gt $Stream.Length - 40) { throw 'The legacy Inno Setup offset table is outside the installer' }
+      $Bytes = Read-BinaryBytes -Stream $Stream -Offset $TableOffset -Count ([int][Math]::Min(64, $Stream.Length - $TableOffset))
+    } finally { $Stream.Dispose() }
+
+    $IdentifierPrefix = [Text.Encoding]::ASCII.GetString($Bytes, 0, 8)
+    $LoaderRoute = $Script:INNO_LEGACY_OFFSET_TABLE_IDS[$IdentifierPrefix]
+    if (-not $LoaderRoute) { throw 'The legacy Inno Setup offset table identifier is unsupported' }
+    $ExpectedTail = [byte[]](0x87, 0x65, 0x56, 0x78)
+    if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$Bytes[8..11], $ExpectedTail)) {
+      throw 'The legacy Inno Setup offset table identifier is invalid'
+    }
+
+    $Route = $Script:InnoLegacyOffsetTableRoutes[$LoaderRoute]
+    if (-not $Route -or $Bytes.Length -lt $Route.MinimumSize) { throw 'The legacy Inno Setup offset table is truncated' }
+    if ($null -ne $Route.CrcOffset -and
+      [BitConverter]::ToUInt32($Bytes, $Route.CrcOffset) -ne (Get-BinaryCrc32 -Bytes $Bytes -Offset 0 -Count $Route.CrcLength)) {
+      throw "The legacy Inno Setup $LoaderRoute offset table CRC is invalid"
+    }
+    $Result = [pscustomobject]@{
+      Version     = 0
+      LoaderRoute = $LoaderRoute
+      TotalSize   = Read-InnoOffsetTableInteger -Bytes $Bytes -Offset $Route.TotalSizeOffset -Size 4
+      Offset0     = Read-InnoOffsetTableInteger -Bytes $Bytes -Offset $Route.Offset0Offset -Size 4
+      Offset1     = Read-InnoOffsetTableInteger -Bytes $Bytes -Offset $Route.Offset1Offset -Size 4
+    }
   }
 
   # TotalSize is the compiler-recorded minimum setup.exe size. Authenticode data
@@ -207,185 +546,222 @@ function Get-InnoVersionNumber {
   return ([int]$Match.Groups[1].Value * 1000) + ([int]$Match.Groups[2].Value * 100) + [int]$Match.Groups[3].Value
 }
 
-function Get-InnoLayout {
+function Get-InnoSignatureInfo {
   <#
   .SYNOPSIS
-    Get the header layout information for a supported Inno Setup version
-  .PARAMETER VersionNumber
-    The numeric Inno Setup version
-  .PARAMETER UnicodeVariant
-    Indicates whether the setup signature uses the Unicode Inno Setup format
+    Read and classify the 64-byte Inno setup-data signature.
+  .PARAMETER Path
+    Installer path used for bounded signature and optional ResTools metadata reads.
+  .PARAMETER OffsetTable
+    Validated loader offsets identifying the setup-data and loader family.
   #>
   [OutputType([pscustomobject])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
-    [int]$VersionNumber,
-
-    [Parameter(Mandatory, HelpMessage = 'Indicates whether the setup signature uses the Unicode Inno Setup format')]
-    [bool]$UnicodeVariant
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$OffsetTable
   )
 
-  if ($VersionNumber -lt 5303) { throw "Unsupported Inno Setup version: $VersionNumber" }
+  $Stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+  try {
+    $Bytes = Read-BinaryBytes -Stream $Stream -Offset $OffsetTable.Offset0 -Count $Script:INNO_SETUP_ID_SIZE
+  } finally { $Stream.Dispose() }
+  $Signature = [Text.Encoding]::ASCII.GetString($Bytes).Trim([char]0)
+  $Match = [regex]::Match($Signature, $Script:INNO_SIGNATURE_PATTERN)
+  if (-not $Match.Success) { throw 'The file is not a recognized Inno Setup installer' }
 
-  # The setup signature is the serialization contract. These transitions match
-  # SetupHeaderStrings in the corresponding official Shared.Struct.pas records.
-  $HeaderStringCount = if ($VersionNumber -ge 6700) {
-    39
-  } elseif ($VersionNumber -ge 6500) {
-    34
-  } elseif ($VersionNumber -ge 6402) {
-    33
-  } elseif ($VersionNumber -ge 6300) {
-    32
-  } elseif ($VersionNumber -ge 6000) {
-    30
-  } elseif ($VersionNumber -ge 5506) {
-    28
-  } elseif ($VersionNumber -ge 5500) {
-    27
-  } elseif ($VersionNumber -ge 5310) {
-    26
-  } elseif ($VersionNumber -ge 5308) {
-    25
+  $VersionText = $Match.Groups['Version'].Value
+  $VersionNumber = Get-InnoVersionNumber -Version $VersionText
+  $IsISX = $Match.Groups['Suffix'].Value.IndexOf('with ISX', [StringComparison]::OrdinalIgnoreCase) -ge 0
+  $CharacterMode = if ($Match.Groups['Unicode'].Success -or $VersionNumber -ge 6300) { 'Unicode' } else { 'Ansi' }
+  $EditionId = if ($IsISX) {
+    'isx'
+  } elseif ($Match.Groups['Prefix'].Value -eq 'My Inno Setup Extensions Setup Data') {
+    'myinno'
+  } elseif (Test-InnoResToolsEdition -Path $Path) {
+    'restools'
   } else {
-    24
+    'official'
   }
 
-  # Fixed offsets are relative to the packed header tail after serialized
-  # strings. They must not be inferred from the compiler executable version.
-  $PrivilegesRequiredOffset = if ($VersionNumber -ge 7000) {
-    143
-  } elseif ($VersionNumber -ge 6700) {
-    139
-  } elseif ($VersionNumber -ge 6601) {
-    129
-  } elseif ($VersionNumber -ge 6600) {
-    128
-  } elseif ($VersionNumber -ge 6502) {
-    120
-  } elseif ($VersionNumber -ge 6500) {
-    112
-  } elseif ($VersionNumber -ge 6400) {
-    156
-  } elseif ($VersionNumber -ge 6000) {
-    144
-  } elseif ($VersionNumber -ge 5507) {
-    # 5.5.7 replaced WizardImageBackColor (Longint) with the one-byte
-    # WizardImageAlphaFormat enum, moving the remaining packed fields by 3.
-    135 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } elseif ($VersionNumber -ge 5309) {
-    138 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } else {
-    # Inno 5.3.3-5.3.8 stores an MD5 password digest, making the privilege and
-    # following enum fields four bytes earlier than the SHA-1-based 5.3.9 layout.
-    134 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  }
-
-  $HasPrivilegeOverrides = $VersionNumber -ge 6000
-  $PackedArchitectureOffset = if ($VersionNumber -ge 6000 -and $VersionNumber -lt 6300) {
-    149
-  } elseif ($VersionNumber -ge 5507 -and $VersionNumber -lt 6000) {
-    139 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } elseif ($VersionNumber -ge 5309 -and $VersionNumber -lt 6000) {
-    142 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } elseif ($VersionNumber -lt 6000) {
-    138 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } else {
-    $null
-  }
-
-  $FileLocationStartOffsetSize = $VersionNumber -ge 6502 ? 8 : 4
-  $FileLocationDigestSize = if ($VersionNumber -ge 6400) { 32 } elseif ($VersionNumber -ge 5309) { 20 } else { 16 }
-  $FileLocationUsesLegacyFlags = $VersionNumber -lt 6403
-  $FileLocationHasSign = $VersionNumber -ge 6300 -and $VersionNumber -lt 6403
-  $FileLocationEntrySize = 8 + $FileLocationStartOffsetSize + 24 + $FileLocationDigestSize + 8 + 8 +
-  ($FileLocationUsesLegacyFlags ? 2 : 1) + ($FileLocationHasSign ? 1 : 0)
-
-  # Before 5.3.10, Uninstallable is encoded in the packed TSetupHeaderOption
-  # set. CreateUninstallRegKey moved from that set to header string 24 in 5.3.8.
-  $LegacyHeaderOptionsOffset = if ($VersionNumber -ge 5310) {
-    $null
-  } elseif ($VersionNumber -ge 5309) {
-    158 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } elseif ($VersionNumber -ge 5306) {
-    154 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  } else {
-    150 + ($UnicodeVariant ? 0 : $Script:INNO_LEAD_BYTES_SIZE)
-  }
-
-  return [pscustomobject]@{
-    VersionNumber                            = $VersionNumber
-    HeaderStringCount                        = $HeaderStringCount
-    HeaderAnsiStringCount                    = $VersionNumber -ge 5310 ? 4 : 5
-    UsesInt64BlockHeader                     = $VersionNumber -ge 6700
-    StringEncoding                           = if ($VersionNumber -ge 6000 -or $UnicodeVariant) { 'Unicode' } else { 'Ansi' }
-    HasEncryptionHeader                      = $VersionNumber -ge 6500
-    EncryptionHeaderSize                     = if ($VersionNumber -ge 6500) { $Script:INNO_ENCRYPTION_HEADER_SIZE_6500 } else { 0 }
-    PrivilegesRequiredOffset                 = $PrivilegesRequiredOffset
-    PrivilegesRequiredOverridesAllowedOffset = if ($HasPrivilegeOverrides) { $PrivilegesRequiredOffset + 1 } else { $null }
-    CompressMethodOffset                     = $PrivilegesRequiredOffset + ($HasPrivilegeOverrides ? 4 : 3)
-    ArchitecturesEncoding                    = if ($VersionNumber -ge 6300) { 'Expression' } else { 'PackedSet' }
-    ArchitecturesAllowedOffset               = $PackedArchitectureOffset
-    ArchitecturesInstallIn64BitModeOffset    = if ($null -ne $PackedArchitectureOffset) { $PackedArchitectureOffset + 1 } else { $null }
-    PackedArchitecturesIncludeArm64          = $VersionNumber -ge 6000
-    LegacyHeaderOptionsOffset                = $LegacyHeaderOptionsOffset
-    LegacyHeaderOptionsSize                  = $null -ne $LegacyHeaderOptionsOffset ? 6 : 0
-    LegacyCreateUninstallRegKeyOptionBit     = $VersionNumber -lt 5308 ? 15 : $null
-    LegacyUninstallableOptionBit             = $VersionNumber -lt 5310 ? 1 : $null
-    FileEntryStringCount                     = $VersionNumber -ge 6500 ? 15 : 10
-    FileEntryAnsiStringCount                 = $VersionNumber -ge 6500 ? 1 : 0
-    FileEntryHasVerification                 = $VersionNumber -ge 6500
-    # Inno 5.5 shortens the serialized version constraints to 16 bytes. The
-    # 5.3 family and Unicode 6.x+ layouts use a 20-byte pair instead.
-    FileEntryVersionDataSize                 = $VersionNumber -ge 6000 -or $VersionNumber -lt 5500 ? 20 : 16
-    # Inno 5.3 stores the full 20-byte version pair and has no compatibility
-    # padding after FileType. Inno 5.5 shortens that pair to 16 bytes while the
-    # serialized record retains four bytes before the next entry.
-    FileEntryTrailingSize                    = $VersionNumber -ge 6000 -or $VersionNumber -lt 5500 ? 0 : 4
-    # Packed Pascal sets occupy enough bytes for their highest declared bit.
-    # Inno 6.5 adds four file options (five bytes total); 6.7 reserves through
-    # bit 56 so later additions retain an eight-byte serialized field.
-    # Inno's packed entry serializer writes four option bytes through 6.4,
-    # five in the 6.5/6.6 layouts, and eight after the 6.7 option expansion.
-    FileEntryOptionsSize                     = $VersionNumber -ge 6700 ? 8 : ($VersionNumber -ge 6500 ? 5 : 4)
-    FileEntryHasBitness                      = $VersionNumber -ge 7000
-    FileLocationStartOffsetSize              = $FileLocationStartOffsetSize
-    FileLocationDigestAlgorithm              = if ($VersionNumber -ge 6400) { 'SHA256' } elseif ($VersionNumber -ge 5309) { 'SHA1' } else { 'MD5' }
-    FileLocationDigestSize                   = $FileLocationDigestSize
-    FileLocationUsesLegacyFlags              = $FileLocationUsesLegacyFlags
-    FileLocationHasSign                      = $FileLocationHasSign
-    FileLocationEntrySize                    = $FileLocationEntrySize
-    UsesLegacyCallInstructionTransform       = $VersionNumber -lt 5309
+  [pscustomobject]@{
+    Signature     = $Signature
+    VersionText   = $VersionText
+    VersionNumber = $VersionNumber
+    EditionId     = $EditionId
+    Edition       = [string]$Script:InnoFormatCatalog.Editions[$EditionId]
+    CharacterMode = $CharacterMode
+    IsISX         = $IsISX
   }
 }
 
-function Get-InnoVersion5HeaderFixedSize {
+function Get-InnoLayout {
   <#
   .SYNOPSIS
-    Get the fixed-size ANSI Inno Setup 5.x header tail size after the serialized strings
-  .PARAMETER VersionNumber
-    The numeric Inno Setup version
+    Select and resolve a catalogued Inno format layout.
+  .DESCRIPTION
+    Exact signatures are preferred. Unknown future signatures may select only
+    the nearest older row with the same edition, character mode, and loader
+    family; callers must validate all metadata boundaries before accepting that
+    provisional selection.
+  .PARAMETER SignatureInfo
+    Parsed setup-data signature and edition evidence.
+  .PARAMETER LoaderRoute
+    Loader family proven by the offset-table structure.
   #>
-  [OutputType([int])]
+  [OutputType([pscustomobject])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
-    [int]$VersionNumber
+    [Parameter(Mandatory)][pscustomobject]$SignatureInfo,
+    [Parameter(Mandatory)][string]$LoaderRoute
   )
 
-  if ($VersionNumber -ge 5500) {
-    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5500
-  } elseif ($VersionNumber -ge 5310) {
-    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5310
-  } elseif ($VersionNumber -ge 5309) {
-    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5309
-  } elseif ($VersionNumber -ge 5306) {
-    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5306
-  } elseif ($VersionNumber -ge 5303) {
-    return $Script:INNO_VERSION5_HEADER_FIXED_SIZE_5303
-  } else {
-    throw "Unsupported ANSI Inno Setup 5.x header layout: $VersionNumber"
+  if ($SignatureInfo.IsISX) {
+    return [pscustomobject]@{
+      Id                       = 'isx-unsupported'
+      InternalStructureVersion = $SignatureInfo.VersionNumber
+      VersionNumber            = $SignatureInfo.VersionNumber
+      Signature                = $SignatureInfo.Signature
+      EditionId                = 'isx'
+      Edition                  = $Script:InnoFormatCatalog.Editions.isx
+      CharacterMode            = $SignatureInfo.CharacterMode
+      LoaderRoute              = $LoaderRoute
+      LayoutResolution         = 'UnsupportedEdition'
+      SupportStatus            = 'Unsupported'
+      CandidateIds             = [string[]]@()
+    }
+  }
+
+  $Exact = @($Script:InnoFormatCatalog.Formats | Where-Object {
+      $_.Signature -ceq $SignatureInfo.Signature -and
+      $_.EditionId -ceq $SignatureInfo.EditionId -and
+      $_.CharacterMode -ceq $SignatureInfo.CharacterMode -and
+      $_.LoaderRoute -ceq $LoaderRoute
+    })
+  if ($Exact.Count -gt 0) {
+    # Several innounp StructList rows are aliases: their Pascal structure units
+    # differ only in version constants while retaining one setup-data signature.
+    # innounp selects the first matching structure, so use the lowest catalog
+    # structure as the canonical route and retain every alias ID as evidence.
+    $Selected = $Exact | Sort-Object InternalStructureVersion | Select-Object -First 1
+    $Resolution = $Exact.Count -eq 1 ? 'Exact' : 'ExactSignatureAlias'
+    return Copy-InnoResolvedCatalogFormat -Format $Script:InnoResolvedFormats[$Selected.Id] `
+      -LayoutResolution $Resolution -CandidateIds @($Exact.Id)
+  }
+
+  $Candidates = @($Script:InnoFormatCatalog.Formats | Where-Object {
+      $_.EditionId -ceq $SignatureInfo.EditionId -and
+      $_.CharacterMode -ceq $SignatureInfo.CharacterMode -and
+      $_.LoaderRoute -ceq $LoaderRoute -and
+      (if ([int]$_.InternalStructureVersion -ge 700000) { 7000 } else { [int]$_.InternalStructureVersion }) -le $SignatureInfo.VersionNumber
+    } | Sort-Object InternalStructureVersion -Descending)
+  if ($Candidates.Count -eq 0) {
+    throw "No Inno format descriptor matches edition '$($SignatureInfo.Edition)', mode '$($SignatureInfo.CharacterMode)', and loader '$LoaderRoute'."
+  }
+
+  return Copy-InnoResolvedCatalogFormat -Format $Script:InnoResolvedFormats[$Candidates[0].Id] `
+    -LayoutResolution 'NearestOlderPendingValidation' -CandidateIds @($Candidates[0].Id)
+}
+
+function Get-InnoAnalysisContext {
+  <#
+  .SYNOPSIS
+    Parse the shared Inno loader and setup-header context once.
+  .PARAMETER Path
+    Resolved or relative path to the Inno Setup installer.
+  .OUTPUTS
+    Internal path, PE, offset-table, signature, catalog layout, and parsed-header evidence.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $OffsetTable = Get-InnoOffsetTable -Path $InstallerPath
+  $SignatureInfo = Get-InnoSignatureInfo -Path $InstallerPath -OffsetTable $OffsetTable
+  $Layout = Get-InnoLayout -SignatureInfo $SignatureInfo -LoaderRoute $OffsetTable.LoaderRoute
+  if ($Layout.SupportStatus -ne 'Supported') {
+    throw "The Inno Setup edition '$($Layout.Edition)' is identified but its record layout is unsupported."
+  }
+  $ParsedLayout = Resolve-InnoParsedLayout -Path $InstallerPath -OffsetTable $OffsetTable -Layout $Layout
+
+  return [pscustomobject][ordered]@{
+    Path          = $InstallerPath
+    PEInfo        = Get-InnoPEInfo -Path $InstallerPath
+    OffsetTable   = $OffsetTable
+    SignatureInfo = $SignatureInfo
+    Layout        = $ParsedLayout.Layout
+    ParsedLayout  = $ParsedLayout
   }
 }
+
+function Get-InnoFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify the Inno edition and select its catalogued binary-layout routes.
+  .DESCRIPTION
+    Reads only the PE loader table and the 64-byte setup-data signature. The
+    result describes which loader, metadata, record, payload, checksum, and
+    executable-transform routes the full parser will use. An ISX signature is
+    returned as a structured unsupported format rather than being mistaken for
+    official Inno Setup.
+  .PARAMETER Path
+    Path to an Inno Setup installer. The file is opened for bounded static reads
+    and is never loaded or executed.
+  .OUTPUTS
+    PSCustomObject containing edition, character mode, structure version,
+    selected route IDs, layout resolution, candidate IDs, and support status.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
+    [string]$Path
+  )
+
+  process {
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $OffsetTable = Get-InnoOffsetTable -Path $InstallerPath
+    $SignatureInfo = Get-InnoSignatureInfo -Path $InstallerPath -OffsetTable $OffsetTable
+    $Layout = Get-InnoLayout -SignatureInfo $SignatureInfo -LoaderRoute $OffsetTable.LoaderRoute
+    $Warnings = [Collections.Generic.List[string]]::new()
+    if ($Layout.SupportStatus -eq 'Unsupported') {
+      $Warnings.Add("The Inno edition '$($Layout.Edition)' is identified, but no trustworthy record specification is available.")
+    } elseif ($Layout.LayoutResolution -eq 'NearestOlderPendingValidation') {
+      $Warnings.Add('The signature is newer than the catalogued layout. Full parsing must validate every count, range, record boundary, checksum, and stream boundary before accepting the fallback.')
+    } elseif ($Layout.LayoutResolution -eq 'ExactSignatureAlias') {
+      $Warnings.Add('Multiple catalog rows share this byte-equivalent setup-data signature. The source-defined canonical structure was selected and all alias IDs are reported.')
+    }
+
+    $GetLayoutValue = {
+      param([string]$Name)
+      $Property = $Layout.PSObject.Properties[$Name]
+      if ($Property) { return $Property.Value }
+      return $null
+    }
+
+    [pscustomobject]@{
+      Path                     = $InstallerPath
+      InstallerType            = 'inno'
+      Signature                = $SignatureInfo.Signature
+      SignatureVersion         = $SignatureInfo.VersionText
+      CatalogFormatId          = & $GetLayoutValue 'Id'
+      InternalStructureVersion = & $GetLayoutValue 'InternalStructureVersion'
+      EditionId                = $SignatureInfo.EditionId
+      Edition                  = $SignatureInfo.Edition
+      CharacterMode            = $SignatureInfo.CharacterMode
+      LoaderRoute              = $OffsetTable.LoaderRoute
+      MetadataRoute            = & $GetLayoutValue 'MetadataRoute'
+      RecordSchemaRoute        = & $GetLayoutValue 'RecordSchemaRoute'
+      PayloadRoute             = & $GetLayoutValue 'PayloadRoute'
+      CompressionCapabilities  = @((& $GetLayoutValue 'CompressionCapabilities') -split ',' | Where-Object { $_ })
+      ChecksumRoute            = & $GetLayoutValue 'ChecksumRoute'
+      CallTransformRoute       = & $GetLayoutValue 'CallTransformRoute'
+      LayoutResolution         = $Layout.LayoutResolution
+      CandidateIds             = [string[]]@($Layout.CandidateIds)
+      SupportStatus            = $Layout.SupportStatus
+      IsSupported              = $Layout.SupportStatus -eq 'Supported'
+      Warnings                 = $Warnings.ToArray()
+    }
+  }
+}
+
 
 function Get-InnoAnsiEncoding {
   <#
@@ -569,6 +945,9 @@ function Read-InnoCompressedBlock {
     The binary reader for the installer
   .PARAMETER BlockHeader
     The parsed block header metadata
+  .PARAMETER CompressionAlgorithm
+    Decompressor selected independently from the chunk framing. Inno 4.0.9
+    through 4.1.5 use this framing with zlib; later generations use LZMA.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -576,7 +955,10 @@ function Read-InnoCompressedBlock {
     [System.IO.BinaryReader]$Reader,
 
     [Parameter(Mandatory, HelpMessage = 'The parsed block header metadata')]
-    [pscustomobject]$BlockHeader
+    [pscustomobject]$BlockHeader,
+
+    [ValidateSet('Lzma', 'Zlib')]
+    [string]$CompressionAlgorithm = 'Lzma'
   )
 
   $Reader.BaseStream.Seek($BlockHeader.HeaderOffset + 4 + $BlockHeader.HeaderLength, 'Begin') | Out-Null
@@ -617,8 +999,18 @@ function Read-InnoCompressedBlock {
   }
   if ($WriteOffset -ne $RawBytes.Length) { throw 'The Inno Setup compressed block payload length is invalid' }
 
-  $BlockBytes = if ($BlockHeader.Compressed) {
+  $BlockBytes = if ($BlockHeader.Compressed -and $CompressionAlgorithm -eq 'Lzma') {
     , (Expand-InnoLzmaBytes -Bytes $RawBytes)
+  } elseif ($BlockHeader.Compressed) {
+    $InputStream = [IO.MemoryStream]::new($RawBytes, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $InputStream -Destination $Output -MaximumBytes $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE
+      , $Output.ToArray()
+    } finally {
+      $Output.Dispose()
+      $InputStream.Dispose()
+    }
   } else {
     , $RawBytes
   }
@@ -631,6 +1023,132 @@ function Read-InnoCompressedBlock {
     NextOffset   = $BlockHeader.HeaderOffset + 4 + $BlockHeader.HeaderLength + $BlockHeader.StoredSize
     Bytes        = $BlockBytes
   }
+}
+
+function Read-InnoLegacyCompressedBlock {
+  <#
+  .SYNOPSIS
+    Read the CRC-framed zlib/stored metadata block used through Inno 4.0.8.
+  .PARAMETER Reader
+    Installer reader. The function seeks to BlockOffset and leaves the reader at the next block.
+  .PARAMETER BlockOffset
+    Absolute file offset of the header CRC.
+  .PARAMETER MaximumBytes
+    Maximum accepted compressed and decompressed metadata size.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.BinaryReader]$Reader,
+    [Parameter(Mandatory)][long]$BlockOffset,
+    [ValidateRange(1, [int]::MaxValue)][int]$MaximumBytes = $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE
+  )
+
+  if ($BlockOffset -lt 0 -or $BlockOffset -gt $Reader.BaseStream.Length - 12) {
+    throw 'The legacy Inno metadata block header is outside the installer'
+  }
+  $Reader.BaseStream.Position = $BlockOffset
+  $StoredHeaderCrc = $Reader.ReadUInt32()
+  $Header = $Reader.ReadBytes(8)
+  if ($Header.Length -ne 8 -or $StoredHeaderCrc -ne (Get-BinaryCrc32 -Bytes $Header)) {
+    throw 'The legacy Inno metadata block header CRC is invalid'
+  }
+  $CompressedSize = [BitConverter]::ToInt32($Header, 0)
+  $UncompressedSize = [BitConverter]::ToInt32($Header, 4)
+  $Compressed = $CompressedSize -ne -1
+  $StoredDataSize = $Compressed ? $CompressedSize : $UncompressedSize
+  if ($StoredDataSize -le 0 -or $StoredDataSize -gt $MaximumBytes -or $UncompressedSize -le 0 -or $UncompressedSize -gt $MaximumBytes) {
+    throw 'The legacy Inno metadata block sizes are invalid'
+  }
+
+  # Legacy StoredDataSize excludes each four-byte chunk CRC. Reassemble the
+  # declared bytes while validating every <=4096-byte chunk independently.
+  $ChunkCount = [long][Math]::Ceiling($StoredDataSize / [double]$Script:INNO_MAX_CHUNK_SIZE)
+  $PhysicalSize = [long]$StoredDataSize + ($ChunkCount * 4)
+  if ($PhysicalSize -gt $Reader.BaseStream.Length - $Reader.BaseStream.Position) {
+    throw 'The legacy Inno metadata block is truncated'
+  }
+  $Raw = [byte[]]::new($StoredDataSize)
+  $WriteOffset = 0
+  while ($WriteOffset -lt $Raw.Length) {
+    $ChunkCrc = $Reader.ReadUInt32()
+    $ChunkLength = [Math]::Min($Script:INNO_MAX_CHUNK_SIZE, $Raw.Length - $WriteOffset)
+    $Read = $Reader.Read($Raw, $WriteOffset, $ChunkLength)
+    if ($Read -ne $ChunkLength) { throw 'The legacy Inno metadata chunk is truncated' }
+    if ($ChunkCrc -ne (Get-BinaryCrc32 -Bytes $Raw -Offset $WriteOffset -Count $ChunkLength)) {
+      throw 'The legacy Inno metadata chunk CRC is invalid'
+    }
+    $WriteOffset += $ChunkLength
+  }
+
+  $Bytes = if ($Compressed) {
+    $InputStream = [IO.MemoryStream]::new($Raw, $false)
+    $Output = [IO.MemoryStream]::new($UncompressedSize)
+    try {
+      $Expanded = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $InputStream -Destination $Output -MaximumBytes $MaximumBytes -UncompressedSize $UncompressedSize
+      if ($Expanded -ne $UncompressedSize) { throw 'The legacy Inno metadata decompressed size is invalid' }
+      , $Output.ToArray()
+    } finally { $Output.Dispose(); $InputStream.Dispose() }
+  } else {
+    , $Raw
+  }
+
+  [pscustomobject]@{
+    HeaderOffset     = $BlockOffset
+    HeaderLength     = 8
+    StoredSize       = $StoredDataSize
+    UncompressedSize = $UncompressedSize
+    Compressed       = $Compressed
+    NextOffset       = $BlockOffset + 12 + $PhysicalSize
+    Bytes            = $Bytes
+  }
+}
+
+$Script:InnoMetadataRouteHandlers = @{
+  'legacy-zlib32'  = {
+    param([IO.BinaryReader]$Reader, [long]$Offset)
+    Read-InnoLegacyCompressedBlock -Reader $Reader -BlockOffset $Offset
+  }
+  'chunked-zlib32' = {
+    param([IO.BinaryReader]$Reader, [long]$Offset)
+    $Header = Test-InnoCompressedBlockHeader -Reader $Reader -Offset $Offset -UsesInt64BlockHeader $false -FileLength $Reader.BaseStream.Length
+    if (-not $Header) { throw 'The Inno Setup zlib metadata block header is invalid' }
+    Read-InnoCompressedBlock -Reader $Reader -BlockHeader $Header -CompressionAlgorithm Zlib
+  }
+  'chunked32'      = {
+    param([IO.BinaryReader]$Reader, [long]$Offset)
+    $Header = Test-InnoCompressedBlockHeader -Reader $Reader -Offset $Offset -UsesInt64BlockHeader $false -FileLength $Reader.BaseStream.Length
+    if (-not $Header) { throw 'The Inno Setup 32-bit metadata block header is invalid' }
+    Read-InnoCompressedBlock -Reader $Reader -BlockHeader $Header
+  }
+  'chunked64'      = {
+    param([IO.BinaryReader]$Reader, [long]$Offset)
+    $Header = Test-InnoCompressedBlockHeader -Reader $Reader -Offset $Offset -UsesInt64BlockHeader $true -FileLength $Reader.BaseStream.Length
+    if (-not $Header) { throw 'The Inno Setup 64-bit metadata block header is invalid' }
+    Read-InnoCompressedBlock -Reader $Reader -BlockHeader $Header
+  }
+}
+
+function Read-InnoMetadataBlock {
+  <#
+  .SYNOPSIS
+    Dispatch one metadata block through the catalog-selected framing route.
+  .PARAMETER Reader
+    Installer reader; it is caller-owned and is not disposed.
+  .PARAMETER Offset
+    Absolute file offset of the framing header.
+  .PARAMETER Layout
+    Resolved catalog layout containing MetadataRoute.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.BinaryReader]$Reader,
+    [Parameter(Mandatory)][long]$Offset,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $Handler = $Script:InnoMetadataRouteHandlers[$Layout.MetadataRoute]
+  if (-not $Handler) { throw "Unsupported Inno metadata framing route: $($Layout.MetadataRoute)" }
+  return & $Handler $Reader $Offset
 }
 
 function Read-InnoSetupEncryptionHeader {
@@ -741,9 +1259,7 @@ function Get-InnoHeaderBlockInfo {
       throw 'The Inno Setup metadata is fully encrypted and requires the setup password'
     }
 
-    $HeaderOffset = Test-InnoCompressedBlockHeader -Reader $Reader -Offset $EncryptionHeader.NextOffset -UsesInt64BlockHeader $Layout.UsesInt64BlockHeader -FileLength $FileStream.Length
-    if (-not $HeaderOffset) { throw 'The Inno Setup header block could not be located' }
-    $BlockInfo = Read-InnoCompressedBlock -Reader $Reader -BlockHeader $HeaderOffset
+    $BlockInfo = Read-InnoMetadataBlock -Reader $Reader -Offset $EncryptionHeader.NextOffset -Layout $Layout
     $BlockInfo | Add-Member -NotePropertyName EncryptionHeader -NotePropertyValue $EncryptionHeader
     return $BlockInfo
   } finally {
@@ -863,16 +1379,16 @@ function Read-InnoAnsiStrings {
   }
 }
 
-function Read-InnoHeaderStrings {
+function Read-InnoHeaderData {
   <#
   .SYNOPSIS
-    Decode the fixed-order header strings from an Inno Setup header stream
+    Decode the fixed-order header strings and preserve compiled Pascal Script bytes.
   .PARAMETER Bytes
     The decompressed header stream bytes
   .PARAMETER Layout
     The supported Inno header layout
   #>
-  [OutputType([string[]])]
+  [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The decompressed header stream bytes')]
     [byte[]]$Bytes,
@@ -886,26 +1402,55 @@ function Read-InnoHeaderStrings {
 
   try {
     $Values = [System.Collections.Generic.List[string]]::new()
+    $RawValues = [System.Collections.Generic.List[byte[]]]::new()
+
+    # TSetupHeader stores every variable-length string before its fixed tail.
+    # The catalog identifies CompiledCodeText explicitly because official
+    # versions before 4.0 do not contain that field at all.
+    function Read-HeaderStringGroup([int]$Count, [Text.Encoding]$Encoding) {
+      for ($Index = 0; $Index -lt $Count; $Index++) {
+        $Length = $Reader.ReadInt32()
+        $MaximumLength = $null -ne $Layout.CompiledCodeStringIndex -and $RawValues.Count -eq $Layout.CompiledCodeStringIndex ?
+        $INNO_MAX_COMPILED_CODE_SIZE : $INNO_MAX_ENTRY_STRING_SIZE
+        if ($Length -lt 0 -or $Length -gt $MaximumLength -or $Length -gt ($Stream.Length - $Stream.Position)) {
+          throw 'The Inno Setup header string length is invalid'
+        }
+        $RawValue = $Length -eq 0 ? [byte[]]::new(0) : $Reader.ReadBytes($Length)
+        $RawValues.Add($RawValue)
+        $Values.Add($Length -eq 0 ? '' : $Encoding.GetString($RawValue))
+      }
+    }
 
     switch ($Layout.StringEncoding) {
       'Unicode' {
-        foreach ($Value in (Read-InnoReaderStrings -Reader $Reader -Count $Layout.HeaderStringCount -Encoding ([System.Text.Encoding]::Unicode))) {
-          $Values.Add($Value)
-        }
-        foreach ($Value in (Read-InnoReaderStrings -Reader $Reader -Count $Layout.HeaderAnsiStringCount -Encoding (Get-InnoAnsiEncoding))) {
-          $Values.Add($Value)
-        }
+        Read-HeaderStringGroup -Count $Layout.HeaderStringCount -Encoding ([Text.Encoding]::Unicode)
+        Read-HeaderStringGroup -Count $Layout.HeaderAnsiStringCount -Encoding (Get-InnoAnsiEncoding)
       }
       'Ansi' {
         $AnsiCount = $Layout.HeaderStringCount + $Layout.HeaderAnsiStringCount
-        foreach ($Value in (Read-InnoReaderStrings -Reader $Reader -Count $AnsiCount -Encoding (Get-InnoAnsiEncoding))) {
-          $Values.Add($Value)
-        }
+        Read-HeaderStringGroup -Count $AnsiCount -Encoding (Get-InnoAnsiEncoding)
       }
       default { throw "Unsupported Inno Setup header string encoding: $($Layout.StringEncoding)" }
     }
 
-    return $Values.ToArray()
+    [byte[]]$CompiledCodeBytes = [byte[]]::new(0)
+    if ($null -eq $Layout.CompiledCodeStringIndex) {
+      # Keep a typed zero-length array. An empty array emitted by an if
+      # expression would otherwise disappear through PowerShell's pipeline.
+    } elseif ($Layout.CompiledCodeStringIndex -lt 0 -or $Layout.CompiledCodeStringIndex -ge $RawValues.Count) {
+      throw 'The Inno Setup CompiledCodeText field is outside the catalogued header string table.'
+    } else {
+      $CompiledCodeBytes = [byte[]]$RawValues[$Layout.CompiledCodeStringIndex]
+    }
+    if ($CompiledCodeBytes.LongLength -gt $INNO_MAX_COMPILED_CODE_SIZE) {
+      throw "The compiled Inno Pascal Script exceeds the $INNO_MAX_COMPILED_CODE_SIZE-byte analysis limit."
+    }
+
+    return [pscustomobject]@{
+      Values            = $Values.ToArray()
+      CompiledCodeBytes = $CompiledCodeBytes
+      FixedTailOffset   = $Reader.BaseStream.Position
+    }
   } finally {
     $Reader.Close()
     $Stream.Close()
@@ -964,6 +1509,25 @@ function Get-InnoHeaderArchitectureData {
   )
 
   $Warnings = [System.Collections.Generic.List[string]]::new()
+
+  if ($Layout.ArchitecturesEncoding -eq 'None') {
+    # Historical compilers predate architecture directives. Their x86 loader
+    # can run on supported 32-bit emulation environments, but the metadata does
+    # not prove a 64-bit install mode.
+    return [pscustomobject]@{
+      ArchitecturesAllowed                     = $null
+      ArchitecturesInstallIn64BitMode          = $null
+      EffectiveArchitecturesAllowed            = $null
+      EffectiveArchitecturesInstallIn64BitMode = $null
+      SupportedArchitectures                   = @('x86', 'x64', 'arm64')
+      UnsupportedArchitectures                 = @()
+      InstallIn64BitMode                       = $false
+      PackedArchitecturesAllowed               = $null
+      PackedArchitecturesInstallIn64BitMode    = $null
+      IsKnown                                  = $true
+      Warnings                                 = [string[]]@()
+    }
+  }
 
   if ($Layout.ArchitecturesEncoding -eq 'PackedSet') {
     # Pre-6.3 records serialize TSetupProcessorArchitectures as a one-byte set.
@@ -1301,8 +1865,8 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     [AllowEmptyString()]
     [string[]]$HeaderValues,
 
-    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
-    [int]$VersionNumber,
+    [Parameter(Mandatory, HelpMessage = 'The catalogued Inno Setup layout')]
+    [pscustomobject]$Layout,
 
     [Parameter(HelpMessage = 'Fixed-header option evidence used by Inno Setup versions before 5.3.10')]
     [AllowNull()]
@@ -1315,7 +1879,7 @@ function Get-InnoAppsAndFeaturesEntryInfo {
   # Inno writes an ARP entry only when the uninstall registry key is created
   # and an uninstaller is registered. In 5.3.8 and 5.3.10 respectively, these
   # values moved from option bits to expression-capable serialized strings.
-  $CreateUninstallRegKeyInfo = if ($VersionNumber -lt 5308) {
+  $CreateUninstallRegKeyInfo = if ($null -ne $Layout.LegacyCreateUninstallRegKeyOptionBit) {
     if ($null -ne $HeaderFixedData -and $null -ne $HeaderFixedData.LegacyCreateUninstallRegKey) {
       [pscustomobject]@{ Value = [bool]$HeaderFixedData.LegacyCreateUninstallRegKey; IsResolved = $true; IsDefault = $false; IsDynamic = $false }
     } else {
@@ -1324,7 +1888,7 @@ function Get-InnoAppsAndFeaturesEntryInfo {
   } else {
     Get-InnoBooleanDirectiveInfo -Value $CreateUninstallRegKey -Default $true
   }
-  $UninstallableInfo = if ($VersionNumber -lt 5310) {
+  $UninstallableInfo = if ($null -ne $Layout.LegacyUninstallableOptionBit) {
     if ($null -ne $HeaderFixedData -and $null -ne $HeaderFixedData.LegacyUninstallable) {
       [pscustomobject]@{ Value = [bool]$HeaderFixedData.LegacyUninstallable; IsResolved = $true; IsDefault = $false; IsDynamic = $false }
     } else {
@@ -1334,10 +1898,10 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     Get-InnoBooleanDirectiveInfo -Value $Uninstallable -Default $true
   }
 
-  if ($VersionNumber -lt 5308 -and $CreateUninstallRegKeyInfo.IsResolved) {
+  if ($null -ne $Layout.LegacyCreateUninstallRegKeyOptionBit -and $CreateUninstallRegKeyInfo.IsResolved) {
     $CreateUninstallRegKey = $CreateUninstallRegKeyInfo.Value ? 'yes' : 'no'
   }
-  if ($VersionNumber -lt 5310 -and $UninstallableInfo.IsResolved) {
+  if ($null -ne $Layout.LegacyUninstallableOptionBit -and $UninstallableInfo.IsResolved) {
     $Uninstallable = $UninstallableInfo.Value ? 'yes' : 'no'
   }
   $WritesAppsAndFeaturesEntry = if (
@@ -1448,6 +2012,9 @@ function Read-InnoHeaderFixedData {
     # These offsets are relative to the fixed-tail start, not the beginning of
     # the decompressed block. Validate the furthest field before seeking.
     $RequiredOffsets = @(
+      if ($null -ne $Layout.SlicesPerDiskOffset) {
+        $Layout.SlicesPerDiskOffset + 3
+      }
       $Layout.PrivilegesRequiredOffset
       $Layout.PrivilegesRequiredOverridesAllowedOffset
       $Layout.ArchitecturesAllowedOffset
@@ -1458,20 +2025,24 @@ function Read-InnoHeaderFixedData {
       }
     ) | Where-Object { $null -ne $_ }
     $LastRequiredOffset = ($RequiredOffsets | Measure-Object -Maximum).Maximum
-    if ($null -eq $LastRequiredOffset -or $FixedTailOffset + $LastRequiredOffset -ge $Reader.BaseStream.Length) {
+    if ($null -ne $LastRequiredOffset -and $FixedTailOffset + $LastRequiredOffset -ge $Reader.BaseStream.Length) {
       throw 'The Inno Setup fixed header is truncated'
     }
 
     # Decode compiler enums and bitsets without evaluating script expressions;
     # unknown enum values remain explicit rather than receiving a guessed scope.
-    $Reader.BaseStream.Seek($FixedTailOffset + $Layout.PrivilegesRequiredOffset, 'Begin') | Out-Null
-    $PrivilegesRequiredValue = $Reader.ReadByte()
-    $PrivilegesRequired = switch ($PrivilegesRequiredValue) {
-      0 { 'none' }
-      1 { 'poweruser' }
-      2 { 'admin' }
-      3 { 'lowest' }
-      default { "unknown:$PrivilegesRequiredValue" }
+    $PrivilegesRequiredValue = $null
+    $PrivilegesRequired = $null
+    if ($null -ne $Layout.PrivilegesRequiredOffset) {
+      $Reader.BaseStream.Seek($FixedTailOffset + $Layout.PrivilegesRequiredOffset, 'Begin') | Out-Null
+      $PrivilegesRequiredValue = $Reader.ReadByte()
+      $PrivilegesRequired = switch ($PrivilegesRequiredValue) {
+        0 { 'none' }
+        1 { 'poweruser' }
+        2 { 'admin' }
+        3 { 'lowest' }
+        default { "unknown:$PrivilegesRequiredValue" }
+      }
     }
 
     $Overrides = @()
@@ -1491,15 +2062,32 @@ function Read-InnoHeaderFixedData {
       $ArchitecturesInstallIn64BitModeSet = $Reader.ReadByte()
     }
 
-    $Reader.BaseStream.Seek($FixedTailOffset + $Layout.CompressMethodOffset, 'Begin') | Out-Null
-    $CompressMethodValue = $Reader.ReadByte()
-    $CompressMethod = switch ($CompressMethodValue) {
-      0 { 'Stored' }
-      1 { 'Zlib' }
-      2 { 'BZip2' }
-      3 { 'Lzma' }
-      4 { 'Lzma2' }
-      default { throw "The Inno Setup compression method is invalid: $CompressMethodValue" }
+    $CompressMethodValue = $null
+    $CompressMethod = $null
+    if ($null -ne $Layout.CompressMethodOffset) {
+      $Reader.BaseStream.Seek($FixedTailOffset + $Layout.CompressMethodOffset, 'Begin') | Out-Null
+      $CompressMethodValue = $Reader.ReadByte()
+      $CompressMethod = switch ($CompressMethodValue) {
+        0 { 'Stored' }
+        1 { 'Zlib' }
+        2 { 'BZip2' }
+        3 { 'Lzma' }
+        4 { 'Lzma2' }
+        default { throw "The Inno Setup compression method is invalid: $CompressMethodValue" }
+      }
+    }
+
+    # Read the exact source-backed packed-header field. Inno 1.x-3.x did not
+    # serialize SlicesPerDisk and always used the catalogued default of one.
+    $SlicesPerDisk = $Layout.SlicesPerDiskDefault
+    if ($null -ne $Layout.SlicesPerDiskOffset) {
+      $Reader.BaseStream.Seek($FixedTailOffset + $Layout.SlicesPerDiskOffset, 'Begin') | Out-Null
+      $CandidateSlicesPerDisk = $Reader.ReadInt32()
+      if ($CandidateSlicesPerDisk -ge 1 -and $CandidateSlicesPerDisk -le 26) {
+        $SlicesPerDisk = $CandidateSlicesPerDisk
+      } else {
+        throw "The Inno Setup SlicesPerDisk value '$CandidateSlicesPerDisk' is outside the supported range 1..26"
+      }
     }
 
     $LegacyCreateUninstallRegKey = $null
@@ -1529,6 +2117,7 @@ function Read-InnoHeaderFixedData {
       ArchitecturesInstallIn64BitModeSet = $ArchitecturesInstallIn64BitModeSet
       CompressMethod                     = $CompressMethod
       CompressMethodValue                = $CompressMethodValue
+      SlicesPerDisk                      = $SlicesPerDisk
       LegacyCreateUninstallRegKey        = $LegacyCreateUninstallRegKey
       LegacyUninstallable                = $LegacyUninstallable
     }
@@ -1835,51 +2424,672 @@ function Test-InnoResolvedValue {
   return $true
 }
 
+function Assert-InnoCatalogLayout {
+  <#
+  .SYNOPSIS
+    Prove that a catalog layout consumes the file and location records coherently.
+  .PARAMETER Path
+    Installer path used to read the second metadata block once.
+  .PARAMETER HeaderBlockInfo
+    Validated first metadata block and exact following-block offset.
+  .PARAMETER Header
+    Parsed setup-header counts and first possible record offset.
+  .PARAMETER Layout
+    Exact, ambiguous, or nearest-older descriptor under validation.
+  #>
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$HeaderBlockInfo,
+    [Parameter(Mandatory)][pscustomobject]$Header,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $FileCount = [int]$Header.Counts.NumFileEntries
+  $LocationCount = [int]$Header.Counts.NumFileLocationEntries
+  if (($FileCount -eq 0) -ne ($LocationCount -eq 0)) {
+    throw 'The Inno catalog layout produced inconsistent file and location counts'
+  }
+  if ($FileCount -eq 0) { return }
+
+  # A fallback must prove every file-entry boundary and every location index,
+  # not just a plausible leading string/count prefix.
+  $FileEntries = @(Get-InnoFileEntries -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Count $FileCount `
+      -FileLocationCount $LocationCount -SearchOffset $Header.SearchOffset
+  )
+  $PostFileInfo = Get-InnoPostFileRecordInfo -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Counts $Header.Counts -FileEntries $FileEntries
+  if (-not $PostFileInfo.IsResolved -or $PostFileInfo.EndOffset -gt $HeaderBlockInfo.Bytes.LongLength) {
+    throw 'The Inno catalog layout did not consume the post-file metadata tables coherently'
+  }
+
+  $Stream = [IO.File]::OpenRead($Path)
+  $Reader = [IO.BinaryReader]::new($Stream)
+  try {
+    $LocationBlock = Read-InnoMetadataBlock -Reader $Reader -Offset $HeaderBlockInfo.NextOffset -Layout $Layout
+  } finally {
+    $Reader.Dispose()
+    $Stream.Dispose()
+  }
+  $ExpectedLength = [long]$LocationCount * $Layout.FileLocationEntrySize
+  if ($LocationBlock.Bytes.LongLength -ne $ExpectedLength) {
+    throw "The Inno catalog layout expected a $ExpectedLength-byte location table but found $($LocationBlock.Bytes.LongLength) bytes"
+  }
+  for ($Index = 0; $Index -lt $LocationCount; $Index++) {
+    $null = Read-InnoFileLocation -Bytes $LocationBlock.Bytes -Count $LocationCount -Index $Index -Layout $Layout
+  }
+}
+
+function Resolve-InnoParsedLayout {
+  <#
+  .SYNOPSIS
+    Parse the setup header and structurally validate a future-version fallback.
+  .DESCRIPTION
+    Exact layouts and source-defined signature aliases take one metadata pass.
+    A nearest-older future-version fallback must additionally validate its
+    file-entry chain and complete location table before exposing metadata.
+  .PARAMETER Path
+    Resolved installer path.
+  .PARAMETER OffsetTable
+    Validated loader offset table.
+  .PARAMETER Layout
+    Initial catalog selection from the setup-data signature.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$OffsetTable,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $HeaderBlockInfo = Get-InnoHeaderBlockInfo -Path $Path -Offset0 $OffsetTable.Offset0 -Layout $Layout
+  $HeaderData = Read-InnoHeaderData -Bytes $HeaderBlockInfo.Bytes -Layout $Layout
+  $ExtractionHeader = Get-InnoExtractionHeader -Bytes $HeaderBlockInfo.Bytes -Layout $Layout
+  if ($Layout.LayoutResolution -eq 'NearestOlderPendingValidation') {
+    Assert-InnoCatalogLayout -Path $Path -HeaderBlockInfo $HeaderBlockInfo -Header $ExtractionHeader -Layout $Layout
+    $Layout.LayoutResolution = 'ValidatedNearestOlder'
+  }
+  return [pscustomobject]@{
+    Layout            = $Layout
+    HeaderBlockInfo   = $HeaderBlockInfo
+    HeaderValues      = $HeaderData.Values
+    CompiledCodeBytes = $HeaderData.CompiledCodeBytes
+    ExtractionHeader  = $ExtractionHeader
+  }
+}
+
+function Read-InnoPascalScriptHeader {
+  <#
+  .SYNOPSIS
+    Validate the bounded IFPS header without decoding bytecode tables.
+  .PARAMETER Bytes
+    Raw CompiledCodeText bytes.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+
+  if ($Bytes.Length -eq 0) {
+    return [pscustomobject][ordered]@{
+      Present = $false; ByteLength = 0; FileVersion = $null; TypeCount = 0
+      FunctionCount = 0; GlobalVariableCount = 0; EntryPointIndex = $null
+      ImportSize = 0; AnalysisStatus = 'NotPresent'
+    }
+  }
+  if ($Bytes.Length -gt $INNO_MAX_COMPILED_CODE_SIZE) {
+    throw "The compiled Inno Pascal Script exceeds the $INNO_MAX_COMPILED_CODE_SIZE-byte analysis limit."
+  }
+  if ($Bytes.Length -lt 28 -or [Text.Encoding]::ASCII.GetString($Bytes, 0, 4) -cne 'IFPS') {
+    throw 'CompiledCodeText does not contain an IFPS program header.'
+  }
+
+  # The IFPS header is six signed little-endian Int32 fields after the magic.
+  # Validate counts before IFPSLib constructs any attacker-controlled lists.
+  $FileVersion = [BitConverter]::ToInt32($Bytes, 4)
+  $TypeCount = [BitConverter]::ToInt32($Bytes, 8)
+  $FunctionCount = [BitConverter]::ToInt32($Bytes, 12)
+  $VariableCount = [BitConverter]::ToInt32($Bytes, 16)
+  $EntryPointIndex = [BitConverter]::ToInt32($Bytes, 20)
+  $ImportSize = [BitConverter]::ToInt32($Bytes, 24)
+  if ($FileVersion -lt 12 -or $FileVersion -gt 23) { throw "Unsupported IFPS bytecode version: $FileVersion" }
+  foreach ($Count in @($TypeCount, $FunctionCount, $VariableCount)) {
+    if ($Count -lt 0 -or $Count -gt $INNO_MAX_PASCAL_SCRIPT_ENTITY_COUNT -or $Count -gt $Bytes.Length) {
+      throw 'The IFPS header contains an invalid entity count.'
+    }
+  }
+  if (([long]$TypeCount + $FunctionCount + $VariableCount) -gt $INNO_MAX_PASCAL_SCRIPT_ENTITY_COUNT) {
+    throw 'The IFPS header exceeds the aggregate entity-count limit.'
+  }
+  if ($EntryPointIndex -lt -1 -or $EntryPointIndex -ge $FunctionCount) { throw 'The IFPS entry-point index is invalid.' }
+  if ($ImportSize -lt 0 -or $ImportSize -gt ($Bytes.Length - 28)) { throw 'The IFPS import-table size is invalid.' }
+
+  return [pscustomobject][ordered]@{
+    Present             = $true
+    ByteLength          = $Bytes.Length
+    FileVersion         = $FileVersion
+    TypeCount           = $TypeCount
+    FunctionCount       = $FunctionCount
+    GlobalVariableCount = $VariableCount
+    EntryPointIndex     = $EntryPointIndex
+    ImportSize          = $ImportSize
+    AnalysisStatus      = 'AvailableOnRequest'
+  }
+}
+
+function Get-InnoPascalScriptVariableKey {
+  <#
+  .SYNOPSIS
+    Build a stable key for one IFPS variable operand.
+  .PARAMETER Operand
+    IFPSLib operand expected to refer directly to a variable.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][object]$Operand)
+
+  if ([string]$Operand.Type -cne 'Variable') { return $null }
+  return '{0}:{1}' -f $Operand.Variable.VarType, $Operand.Variable.Index
+}
+
+function Get-InnoPascalScriptOperandConstant {
+  <#
+  .SYNOPSIS
+    Resolve a JSON-safe immediate or a previously proven variable constant.
+  .PARAMETER Operand
+    IFPSLib operand to inspect.
+  .PARAMETER State
+    Straight-line variable state keyed by variable kind and index.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][object]$Operand,
+    [Parameter(Mandatory)][System.Collections.Generic.Dictionary[string, object]]$State
+  )
+
+  if ([string]$Operand.Type -ceq 'Variable') {
+    $Key = Get-InnoPascalScriptVariableKey -Operand $Operand
+    if ($Key -and $State.ContainsKey($Key)) {
+      return [pscustomobject]@{ Resolved = $true; Value = $State[$Key] }
+    }
+    return [pscustomobject]@{ Resolved = $false; Value = $null }
+  }
+  if ([string]$Operand.Type -cne 'Immediate') {
+    return [pscustomobject]@{ Resolved = $false; Value = $null }
+  }
+
+  $Value = $Operand.Immediate
+  if ($null -eq $Value -or $Value -is [string] -or $Value -is [char] -or $Value -is [bool] -or
+    $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or
+    $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64] -or
+    $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) {
+    return [pscustomobject]@{ Resolved = $true; Value = $Value }
+  }
+  if ($Value.GetType().IsEnum) {
+    return [pscustomobject]@{ Resolved = $true; Value = [string]$Value }
+  }
+  return [pscustomobject]@{ Resolved = $false; Value = $null }
+}
+
+function Get-InnoPascalScriptStaticReturnInfo {
+  <#
+  .SYNOPSIS
+    Prove a constant IFPS return value using bounded straight-line propagation.
+  .DESCRIPTION
+    The evaluator accepts assignments and primitive operations only. Calls,
+    branches, exception flow, pointers, indexed values, and unknown opcodes make
+    the result unresolved instead of being simulated.
+  .PARAMETER Function
+    IFPSLib script function to inspect.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][object]$Function)
+
+  if ($Function.GetType().FullName -cne 'IFPSLib.Emit.ScriptFunction' -or $null -eq $Function.ReturnArgument) {
+    return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'No script return value' }
+  }
+
+  $State = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+  foreach ($Instruction in $Function.Instructions) {
+    $Code = [string]$Instruction.OpCode.Code
+    switch ($Code) {
+      'Assign' {
+        $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+        if (-not $Destination) { return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Indirect assignment' } }
+        $Source = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $State
+        if ($Source.Resolved) { $State[$Destination] = $Source.Value } else { $State.Remove($Destination) }
+      }
+      { $_ -in @('Add', 'Sub', 'Mul', 'Div', 'Mod', 'Shl', 'Shr', 'And', 'Or', 'Xor') } {
+        $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+        $Right = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $State
+        if (-not $Destination -or -not $State.ContainsKey($Destination) -or -not $Right.Resolved) {
+          return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Nonconstant arithmetic' }
+        }
+        try {
+          $LeftValue = $State[$Destination]
+          $State[$Destination] = switch ($Code) {
+            'Add' { $LeftValue -is [string] -or $Right.Value -is [string] ? ([string]$LeftValue + [string]$Right.Value) : ($LeftValue + $Right.Value) }
+            'Sub' { $LeftValue - $Right.Value }
+            'Mul' { $LeftValue * $Right.Value }
+            'Div' { $LeftValue / $Right.Value }
+            'Mod' { $LeftValue % $Right.Value }
+            'Shl' { [long]$LeftValue -shl [int]$Right.Value }
+            'Shr' { [long]$LeftValue -shr [int]$Right.Value }
+            'And' { [long]$LeftValue -band [long]$Right.Value }
+            'Or' { [long]$LeftValue -bor [long]$Right.Value }
+            'Xor' { [long]$LeftValue -bxor [long]$Right.Value }
+          }
+        } catch {
+          return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Invalid constant arithmetic' }
+        }
+      }
+      { $_ -in @('Neg', 'Not', 'Inc', 'Dec', 'SetZ') } {
+        $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+        if (-not $Destination -or -not $State.ContainsKey($Destination)) {
+          return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Nonconstant unary operation' }
+        }
+        $State[$Destination] = switch ($Code) {
+          'Neg' { - $State[$Destination] }
+          'Not' { -bnot [long]$State[$Destination] }
+          'Inc' { $State[$Destination] + 1 }
+          'Dec' { $State[$Destination] - 1 }
+          'SetZ' { -not [bool]$State[$Destination] }
+        }
+      }
+      { $_ -in @('Push', 'PushVar', 'PushType', 'Pop', 'SetStackType', 'Nop', 'Ret') } { }
+      default {
+        return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = "Control flow or unsupported opcode: $Code" }
+      }
+    }
+  }
+
+  $ReturnKey = 'Argument:0'
+  if (-not $State.ContainsKey($ReturnKey)) {
+    return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Return variable is not constant' }
+  }
+  return [pscustomobject]@{ IsResolved = $true; Value = $State[$ReturnKey]; Reason = $null }
+}
+
+function Get-InnoPascalScriptEffectCategory {
+  <#
+  .SYNOPSIS
+    Classify manifest-relevant Inno runtime calls without executing them.
+  .PARAMETER Target
+    IFPS function or host-call name.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][string]$Target)
+
+  switch -Regex ($Target.ToUpperInvariant()) {
+    '^REG(?:WRITE|DELETE|CREATE)' { return 'RegistryWrite' }
+    '^REG(?:QUERY|KEYEXISTS|VALUEEXISTS)' { return 'RegistryRead' }
+    '^(?:EXEC|SHELLEXEC|EXECASORIGINALUSER|SHELLEXECASORIGINALUSER)' { return 'ProcessLaunch' }
+    '^(?:WIZARDSILENT|SUPPRESSIBLEMSGBOX|MSGBOX)' { return 'SilentInteraction' }
+    '^(?:ISADMIN|ISADMININSTALLMODE|ISPOWERUSERLOGGEDON|GETPREVIOUSPRIVILEGES)' { return 'ScopeOrElevation' }
+    '^(?:RESTARTREPLACE|FORCERESTART|NEEDSRESTART)' { return 'Restart' }
+    '^(?:DOWNLOADTEMPORARYFILE|DOWNLOADTEMPORARYFILESIZE|ISSIGVERIFY)' { return 'NetworkOrSignature' }
+    '^(?:DELAYDELETEFILE|DELETEFILE|DELTREE|RENAMEFILE|FILECOPY|FILESEARCH)' { return 'FileSystemWrite' }
+    default { return $null }
+  }
+}
+
+function Get-InnoPascalScriptConstantMap {
+  <#
+  .SYNOPSIS
+    Map header {code:Function} constants to statically proven string returns.
+  .DESCRIPTION
+    Only functions whose complete straight-line body resolves to one constant
+    return value are accepted. The map is limited to constants actually present
+    in the supplied header strings, including parameterized constant spellings.
+  .PARAMETER PascalScriptInfo
+    Detailed result from ConvertTo-InnoPascalScriptInfo.
+  .PARAMETER Values
+    Serialized setup-header values that may contain Pascal Script constants.
+  #>
+  [OutputType([System.Collections.IDictionary])]
+  param (
+    [AllowNull()][pscustomobject]$PascalScriptInfo,
+    [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Values
+  )
+
+  $Map = [ordered]@{}
+  if ($null -eq $PascalScriptInfo -or
+    $null -eq $PascalScriptInfo.PSObject.Properties['StaticReturnValues']) {
+    return $Map
+  }
+
+  $Returns = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Return in @($PascalScriptInfo.StaticReturnValues)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$Return.Function) -and $Return.Value -is [string]) {
+      $Returns[[string]$Return.Function] = [string]$Return.Value
+    }
+  }
+  if ($Returns.Count -eq 0) { return $Map }
+
+  foreach ($Value in $Values) {
+    if ([string]::IsNullOrEmpty($Value)) { continue }
+    foreach ($Match in [regex]::Matches($Value, '\{code:(?<Function>[^|}]+)(?:\|[^}]*)?\}', 'IgnoreCase,CultureInvariant')) {
+      $FunctionName = $Match.Groups['Function'].Value
+      if ($Returns.ContainsKey($FunctionName)) {
+        # Get-InnoStaticStringInfo expects map keys without the surrounding braces.
+        $Map[$Match.Value.Substring(1, $Match.Value.Length - 2)] = $Returns[$FunctionName]
+      }
+    }
+  }
+  return $Map
+}
+
+function ConvertTo-InnoPascalScriptInfo {
+  <#
+  .SYNOPSIS
+    Parse bounded IFPS bytecode into JSON-safe structural evidence.
+  .PARAMETER Bytes
+    Raw CompiledCodeText bytes. The caller retains ownership of the array.
+  .PARAMETER IncludeDisassembly
+    Include IFPSLib's textual instruction disassembly in the result.
+  .PARAMETER MaximumDisassemblyCharacters
+    Maximum characters retained from the optional disassembly.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
+    [switch]$IncludeDisassembly,
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = $INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS
+  )
+
+  $Header = Read-InnoPascalScriptHeader -Bytes $Bytes
+  if (-not $Header.Present) {
+    return [pscustomobject][ordered]@{
+      Present = $false; ByteLength = 0; FileVersion = $null; EntryPoint = $null
+      TypeCount = 0; FunctionCount = 0; ScriptFunctionCount = 0; ExternalFunctionCount = 0
+      GlobalVariableCount = 0; InstructionCount = 0; IndirectCallCount = 0
+      UnknownOpcodeCount = 0; UsesExtendedType = $false
+      ScriptFunctions = [string[]]@(); ExportedFunctions = [string[]]@()
+      ExternalFunctions = [pscustomobject[]]@(); DllImports = [pscustomobject[]]@()
+      Types = [pscustomobject[]]@(); GlobalVariables = [pscustomobject[]]@()
+      Functions = [pscustomobject[]]@(); StringConstants = [string[]]@()
+      RuntimeEffects = [pscustomobject[]]@(); StaticReturnValues = [pscustomobject[]]@()
+      Disassembly = $null; DisassemblyTruncated = $false; Warnings = [string[]]@()
+      Parser = 'IFPSTools.NET IFPSLib'; ParserVersion = $null
+    }
+  }
+  Import-InnoPascalScriptDependency
+  $PascalScript = [IFPSLib.Script]::Load($Bytes)
+  $ScriptFunctions = [Collections.Generic.List[string]]::new()
+  $ExportedFunctions = [Collections.Generic.List[string]]::new()
+  $ExternalFunctions = [Collections.Generic.List[pscustomobject]]::new()
+  $DllImports = [Collections.Generic.List[pscustomobject]]::new()
+  $TypeDetails = [Collections.Generic.List[pscustomobject]]::new()
+  $GlobalDetails = [Collections.Generic.List[pscustomobject]]::new()
+  $FunctionDetails = [Collections.Generic.List[pscustomobject]]::new()
+  $RuntimeEffects = [Collections.Generic.List[pscustomobject]]::new()
+  $StaticReturnValues = [Collections.Generic.List[pscustomobject]]::new()
+  $StringConstants = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $InstructionCount = 0
+  $IndirectCallCount = 0
+  $UnknownOpcodeCount = 0
+
+  for ($TypeIndex = 0; $TypeIndex -lt $PascalScript.Types.Count; $TypeIndex++) {
+    $Type = $PascalScript.Types[$TypeIndex]
+    $TypeDetails.Add([pscustomobject][ordered]@{
+        Index       = $TypeIndex
+        Name        = [string]$Type.Name
+        BaseType    = [string]$Type.BaseType
+        Exported    = [bool]$Type.Exported
+        Declaration = [string]$Type.ToString()
+        Attributes  = [string[]]@($Type.Attributes | ForEach-Object { [string]$_.ToString() })
+      })
+  }
+  for ($GlobalIndex = 0; $GlobalIndex -lt $PascalScript.GlobalVariables.Count; $GlobalIndex++) {
+    $Global = $PascalScript.GlobalVariables[$GlobalIndex]
+    $GlobalDetails.Add([pscustomobject][ordered]@{
+        Index    = $GlobalIndex
+        Name     = [string]$Global.Name
+        Type     = $null -ne $Global.Type ? [string]$Global.Type.Name : $null
+        Exported = [bool]$Global.Exported
+      })
+  }
+
+  for ($FunctionIndex = 0; $FunctionIndex -lt $PascalScript.Functions.Count; $FunctionIndex++) {
+    $Function = $PascalScript.Functions[$FunctionIndex]
+    $FunctionType = $Function.GetType().FullName
+    $FunctionKind = 'Unknown'
+    $FunctionInstructionCount = 0
+    $Calls = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $FunctionConstants = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $StaticReturnInfo = [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'External function' }
+    if ($FunctionType -ceq 'IFPSLib.Emit.ScriptFunction') {
+      $FunctionKind = 'Script'
+      $ScriptFunctions.Add([string]$Function.Name)
+      $FunctionInstructionCount = $Function.Instructions.Count
+      $InstructionCount += $FunctionInstructionCount
+      $StaticReturnInfo = Get-InnoPascalScriptStaticReturnInfo -Function $Function
+      if ($StaticReturnInfo.IsResolved) {
+        $StaticReturnValues.Add([pscustomobject]@{ Function = [string]$Function.Name; Value = $StaticReturnInfo.Value })
+      }
+
+      foreach ($Instruction in $Function.Instructions) {
+        $Code = [string]$Instruction.OpCode.Code
+        if ($Code.StartsWith('UNKNOWN', [StringComparison]::Ordinal)) { $UnknownOpcodeCount++ }
+        if ($Code -ceq 'CallVar') { $IndirectCallCount++ }
+        if ($Code -ceq 'Call' -and $Instruction.Operands.Count -gt 0) {
+          $Target = $Instruction.Operands[0].Immediate
+          $TargetName = $null -ne $Target ? [string]$Target.Name : $null
+          if (-not [string]::IsNullOrWhiteSpace($TargetName)) {
+            $null = $Calls.Add($TargetName)
+            $Category = Get-InnoPascalScriptEffectCategory -Target $TargetName
+            if ($Category) {
+              $RuntimeEffects.Add([pscustomobject][ordered]@{
+                  Function = [string]$Function.Name
+                  Offset   = [uint32]$Instruction.Offset
+                  Target   = $TargetName
+                  Category = $Category
+                })
+            }
+          }
+        }
+        foreach ($Operand in $Instruction.Operands) {
+          if ([string]$Operand.Type -ceq 'Immediate' -and $Operand.Immediate -is [string]) {
+            $null = $FunctionConstants.Add([string]$Operand.Immediate)
+            $null = $StringConstants.Add([string]$Operand.Immediate)
+          }
+        }
+      }
+    } elseif ($FunctionType -ceq 'IFPSLib.Emit.ExternalFunction') {
+      $FunctionKind = 'External'
+      $Declaration = $Function.Declaration
+      $DeclarationType = $Declaration.GetType().FullName
+      $Kind = switch ($DeclarationType) {
+        'IFPSLib.Emit.FDecl.DLL' { 'DLL' }
+        'IFPSLib.Emit.FDecl.Class' { 'Class' }
+        'IFPSLib.Emit.FDecl.COM' { 'COM' }
+        'IFPSLib.Emit.FDecl.Internal' { 'Internal' }
+        default { 'Unknown' }
+      }
+      $External = [pscustomobject][ordered]@{
+        Name                      = [string]$Function.Name
+        Kind                      = $Kind
+        Exported                  = [bool]$Function.Exported
+        Declaration               = [string]$Declaration.ToString()
+        DllName                   = $Kind -eq 'DLL' ? [string]$Declaration.DllName : $null
+        ProcedureName             = $Kind -eq 'DLL' ? [string]$Declaration.ProcedureName : $null
+        CallingConvention         = $Kind -in @('DLL', 'Class', 'COM') ? [string]$Declaration.CallingConvention : $null
+        DelayLoad                 = $Kind -eq 'DLL' ? [bool]$Declaration.DelayLoad : $false
+        LoadWithAlteredSearchPath = $Kind -eq 'DLL' ? [bool]$Declaration.LoadWithAlteredSearchPath : $false
+        ClassName                 = $Kind -eq 'Class' ? [string]$Declaration.ClassName : $null
+        MemberName                = $Kind -eq 'Class' ? [string]$Declaration.FunctionName : $null
+        VTableIndex               = $Kind -eq 'COM' ? [uint32]$Declaration.VTableIndex : $null
+      }
+      $ExternalFunctions.Add($External)
+      if ($Kind -eq 'DLL') { $DllImports.Add($External) }
+    }
+    if ($Function.Exported) { $ExportedFunctions.Add([string]$Function.Name) }
+
+    $ArgumentDetails = [Collections.Generic.List[pscustomobject]]::new()
+    if ($null -ne $Function.Arguments) {
+      for ($ArgumentIndex = 0; $ArgumentIndex -lt $Function.Arguments.Count; $ArgumentIndex++) {
+        $Argument = $Function.Arguments[$ArgumentIndex]
+        $ArgumentDetails.Add([pscustomobject][ordered]@{
+            Index     = $ArgumentIndex
+            Name      = [string]$Argument.Name
+            Direction = [string]$Argument.ArgumentType
+            Type      = $null -ne $Argument.Type ? [string]$Argument.Type.Name : $null
+          })
+      }
+    }
+    $FunctionDetails.Add([pscustomobject][ordered]@{
+        Index                = $FunctionIndex
+        Name                 = [string]$Function.Name
+        Kind                 = $FunctionKind
+        Exported             = [bool]$Function.Exported
+        ReturnType           = $null -ne $Function.ReturnArgument ? [string]$Function.ReturnArgument.Name : $null
+        Arguments            = [pscustomobject[]]$ArgumentDetails.ToArray()
+        Attributes           = [string[]]@($Function.Attributes | ForEach-Object { [string]$_.ToString() })
+        InstructionCount     = $FunctionInstructionCount
+        Calls                = [string[]]@($Calls)
+        StringConstants      = [string[]]@($FunctionConstants)
+        StaticReturnResolved = [bool]$StaticReturnInfo.IsResolved
+        StaticReturnValue    = $StaticReturnInfo.Value
+        StaticReturnReason   = [string]$StaticReturnInfo.Reason
+      })
+  }
+
+  $UsesExtendedType = @($PascalScript.Types | Where-Object { [string]$_.BaseType -ceq 'Extended' }).Count -gt 0
+  $Warnings = [Collections.Generic.List[string]]::new()
+  if ($UsesExtendedType) {
+    $Warnings.Add('The IFPS program uses Extended values. IFPSLib decodes them as x86 80-bit values; scripts compiled for a non-x86 runtime may use a 64-bit representation.')
+  }
+  if ($IndirectCallCount -gt 0) {
+    $Warnings.Add("The IFPS program contains $IndirectCallCount indirect function call(s); their targets and side effects cannot be resolved statically.")
+  }
+  if ($UnknownOpcodeCount -gt 0) {
+    $Warnings.Add("IFPSLib decoded $UnknownOpcodeCount unknown opcode(s); affected control flow remains unresolved.")
+  }
+
+  $Disassembly = $null
+  $DisassemblyTruncated = $false
+  if ($IncludeDisassembly) {
+    if ($Bytes.Length -gt $INNO_MAX_PASCAL_SCRIPT_DISASSEMBLY_INPUT_SIZE) {
+      throw "Text disassembly is limited to IFPS inputs no larger than $INNO_MAX_PASCAL_SCRIPT_DISASSEMBLY_INPUT_SIZE bytes."
+    }
+    $Disassembly = $PascalScript.Disassemble()
+    if ($Disassembly.Length -gt $MaximumDisassemblyCharacters) {
+      $Disassembly = $Disassembly.Substring(0, $MaximumDisassemblyCharacters)
+      $DisassemblyTruncated = $true
+      $Warnings.Add("The IFPS disassembly was truncated at $MaximumDisassemblyCharacters characters.")
+    }
+  }
+
+  return [pscustomobject][ordered]@{
+    Present               = $true
+    ByteLength            = $Bytes.Length
+    FileVersion           = $PascalScript.FileVersion
+    EntryPoint            = $null -ne $PascalScript.EntryPoint ? [string]$PascalScript.EntryPoint.Name : $null
+    TypeCount             = $PascalScript.Types.Count
+    FunctionCount         = $PascalScript.Functions.Count
+    ScriptFunctionCount   = $ScriptFunctions.Count
+    ExternalFunctionCount = $ExternalFunctions.Count
+    GlobalVariableCount   = $PascalScript.GlobalVariables.Count
+    InstructionCount      = $InstructionCount
+    IndirectCallCount     = $IndirectCallCount
+    UnknownOpcodeCount    = $UnknownOpcodeCount
+    UsesExtendedType      = $UsesExtendedType
+    ScriptFunctions       = [string[]]$ScriptFunctions.ToArray()
+    ExportedFunctions     = [string[]]$ExportedFunctions.ToArray()
+    ExternalFunctions     = [pscustomobject[]]$ExternalFunctions.ToArray()
+    DllImports            = [pscustomobject[]]$DllImports.ToArray()
+    Types                 = [pscustomobject[]]$TypeDetails.ToArray()
+    GlobalVariables       = [pscustomobject[]]$GlobalDetails.ToArray()
+    Functions             = [pscustomobject[]]$FunctionDetails.ToArray()
+    StringConstants       = [string[]]@($StringConstants)
+    RuntimeEffects        = [pscustomobject[]]$RuntimeEffects.ToArray()
+    StaticReturnValues    = [pscustomobject[]]$StaticReturnValues.ToArray()
+    Disassembly           = $Disassembly
+    DisassemblyTruncated  = $DisassemblyTruncated
+    Warnings              = [string[]]$Warnings.ToArray()
+    Parser                = 'IFPSTools.NET IFPSLib'
+    ParserVersion         = [IFPSLib.Script].Assembly.GetName().Version.ToString()
+  }
+}
+
+function Get-InnoPascalScriptInfo {
+  <#
+  .SYNOPSIS
+    Read and analyze the compiled Pascal Script embedded in an Inno installer.
+  .PARAMETER Path
+    Path to the Inno Setup installer. The installer is parsed but never executed.
+  .PARAMETER IncludeDisassembly
+    Include bounded textual IFPS disassembly.
+  .PARAMETER MaximumDisassemblyCharacters
+    Maximum characters retained from the optional disassembly.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [switch]$IncludeDisassembly,
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = $INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS
+  )
+
+  process {
+    $Context = Get-InnoAnalysisContext -Path $Path
+    ConvertTo-InnoPascalScriptInfo -Bytes $Context.ParsedLayout.CompiledCodeBytes -IncludeDisassembly:$IncludeDisassembly `
+      -MaximumDisassemblyCharacters $MaximumDisassemblyCharacters
+  }
+}
+
 function Get-InnoInfo {
   <#
   .SYNOPSIS
     Get static metadata from an Inno Setup installer
   .PARAMETER Path
     The path to the Inno Setup installer
+  .PARAMETER IncludePascalScriptAnalysis
+    Decode functions, calls, constants, and bounded static-effect evidence in the same parse.
+  .PARAMETER IncludeDisassembly
+    Include bounded textual IFPS disassembly. This implies IncludePascalScriptAnalysis.
+  .PARAMETER MaximumDisassemblyCharacters
+    Maximum characters retained from optional disassembly.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
-    [string]$Path
+    [string]$Path,
+    [switch]$IncludePascalScriptAnalysis,
+    [switch]$IncludeDisassembly,
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = $INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS
   )
 
   process {
-    $InstallerPath = (Get-Item -Path $Path -Force).FullName
-    $OffsetTable = Get-InnoOffsetTable -Path $InstallerPath
+    $Context = Get-InnoAnalysisContext -Path $Path
+    $InstallerPath = $Context.Path
+    $OffsetTable = $Context.OffsetTable
+    $SignatureInfo = $Context.SignatureInfo
+    $Layout = $Context.Layout
 
-    $FileStream = [System.IO.File]::OpenRead($InstallerPath)
-    $Reader = [System.IO.BinaryReader]::new($FileStream)
-
-    try {
-      $Reader.BaseStream.Seek($OffsetTable.Offset0, 'Begin') | Out-Null
-      $SignatureBytes = $Reader.ReadBytes($Script:INNO_SETUP_ID_SIZE)
-      $Signature = [System.Text.Encoding]::ASCII.GetString($SignatureBytes).Trim([char]0)
-    } finally {
-      $Reader.Close()
-      $FileStream.Close()
-    }
-
-    $SignatureMatch = [regex]::Match($Signature, $Script:INNO_SIGNATURE_PATTERN)
-    if (-not $SignatureMatch.Success) { throw 'The file is not a supported Inno Setup installer' }
-
-    # The serialized setup signature, not PE FileVersion, selects every
-    # version-dependent string count, fixed offset, flag layout, and digest size.
-    $PEInfo = Get-InnoPEInfo -Path $InstallerPath
-    $VersionNumber = Get-InnoVersionNumber -Version $SignatureMatch.Groups[1].Value
-    $Layout = Get-InnoLayout -VersionNumber $VersionNumber -UnicodeVariant ([bool]$SignatureMatch.Groups[2].Success)
-    $HeaderBlockInfo = Get-InnoHeaderBlockInfo -Path $InstallerPath -Offset0 $OffsetTable.Offset0 -Layout $Layout
+    # The exact catalog row, not PE FileVersion, selects string counts, fixed
+    # fields, metadata framing, payload layout, checksum, and call transform.
+    $PEInfo = $Context.PEInfo
+    $ParsedLayout = $Context.ParsedLayout
+    $VersionNumber = $Layout.VersionNumber
+    $HeaderBlockInfo = $ParsedLayout.HeaderBlockInfo
     $HeaderBytes = $HeaderBlockInfo.Bytes
-    $HeaderValues = Read-InnoHeaderStrings -Bytes $HeaderBytes -Layout $Layout
+    $HeaderValues = $ParsedLayout.HeaderValues
+    $ExtractionHeader = $ParsedLayout.ExtractionHeader
     $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBytes -Layout $Layout
     $HeaderArchitectureData = Get-InnoHeaderArchitectureData -HeaderValues $HeaderValues -PEInfo $PEInfo -HeaderFixedData $HeaderFixedData -Layout $Layout
-    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -VersionNumber $VersionNumber -HeaderFixedData $HeaderFixedData
+    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -Layout $Layout -HeaderFixedData $HeaderFixedData
     $Warnings = [System.Collections.Generic.List[string]]::new()
     foreach ($Warning in $HeaderArchitectureData.Warnings) { $Warnings.Add($Warning) }
+    $PascalScriptInfo = $null
+    try {
+      if ($IncludePascalScriptAnalysis -or $IncludeDisassembly) {
+        $PascalScriptInfo = ConvertTo-InnoPascalScriptInfo -Bytes $ParsedLayout.CompiledCodeBytes `
+          -IncludeDisassembly:$IncludeDisassembly -MaximumDisassemblyCharacters $MaximumDisassemblyCharacters
+      } else {
+        # Ordinary metadata parsing validates only the fixed IFPS header.
+        $PascalScriptInfo = Read-InnoPascalScriptHeader -Bytes $ParsedLayout.CompiledCodeBytes
+      }
+    } catch {
+      # Compiled code can be absent, vendor-modified, or from a future IFPS
+      # generation. Preserve the setup-header evidence instead of making the
+      # optional script analysis fatal to ordinary manifest parsing.
+      $Warnings.Add("Compiled Pascal Script analysis failed: $($_.Exception.Message)")
+    }
     if ($HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Files') {
       $Warnings.Add('The installer payload files are encrypted; static metadata is available, but extraction requires the setup password.')
     }
@@ -1887,14 +3097,45 @@ function Get-InnoInfo {
       $Warnings.Add('CreateUninstallRegKey or Uninstallable is a dynamic expression, so Apps & Features registration cannot be determined statically.')
     }
 
-    $AppNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[0]
-    $AppVerNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[1]
-    $RawAppId = $HeaderValues[2]
-    $AppIdInfo = Get-InnoStaticStringInfo -Value $RawAppId
-    $AppPublisherInfo = Get-InnoStaticStringInfo -Value $HeaderValues[4]
-    $AppVersionInfo = Get-InnoStaticStringInfo -Value $HeaderValues[9]
-    $DefaultDirName = $HeaderValues[10]
-    $UninstallDisplayNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[14]
+    # The file table supplies an exact boundary for the icon, INI, registry,
+    # delete, and run tables that follow it. Keep metadata useful when a
+    # proprietary or malformed record variant cannot be consumed, but expose a
+    # warning rather than returning guessed registry associations.
+    $PostFileRecordInfo = [pscustomobject]@{
+      IsResolved = $false; EndOffset = $null; Icons = @(); IniEntries = @(); RegistryEntries = @()
+      InstallDeleteEntries = @(); UninstallDeleteEntries = @(); RunEntries = @(); UninstallRunEntries = @()
+    }
+    if ($ExtractionHeader.Counts.NumFileEntries -gt 0 -and $ExtractionHeader.Counts.NumFileLocationEntries -gt 0) {
+      try {
+        $FileEntries = @(Get-InnoFileEntries -Bytes $HeaderBytes -Layout $Layout -Count $ExtractionHeader.Counts.NumFileEntries `
+            -FileLocationCount $ExtractionHeader.Counts.NumFileLocationEntries -SearchOffset $ExtractionHeader.SearchOffset)
+        $PostFileRecordInfo = Get-InnoPostFileRecordInfo -Bytes $HeaderBytes -Layout $Layout -Counts $ExtractionHeader.Counts -FileEntries $FileEntries
+      } catch {
+        $Warnings.Add("The catalogued post-file metadata tables could not be parsed: $($_.Exception.Message)")
+      }
+    } elseif (
+      $ExtractionHeader.Counts.NumIconEntries -gt 0 -or $ExtractionHeader.Counts.NumIniEntries -gt 0 -or
+      $ExtractionHeader.Counts.NumRegistryEntries -gt 0 -or $ExtractionHeader.Counts.NumInstallDeleteEntries -gt 0 -or
+      $ExtractionHeader.Counts.NumUninstallDeleteEntries -gt 0 -or $ExtractionHeader.Counts.NumRunEntries -gt 0 -or
+      $ExtractionHeader.Counts.NumUninstallRunEntries -gt 0
+    ) {
+      $Warnings.Add('Post-file metadata records exist without an anchorable embedded file table; registry and association evidence requires manual validation.')
+    }
+    $AssociationInfo = Get-InnoRegistryAssociationInfo -RegistryEntries ([pscustomobject[]]@($PostFileRecordInfo.RegistryEntries))
+    if (@($PostFileRecordInfo.RegistryEntries | Where-Object Conditional).Count -gt 0) {
+      $Warnings.Add('One or more Inno registry entries are conditional on components, tasks, languages, or Pascal expressions; emitted registry evidence may not apply to every installation path.')
+    }
+
+    $HeaderFields = $Layout.HeaderFields
+    $PascalScriptConstantMap = Get-InnoPascalScriptConstantMap -PascalScriptInfo $PascalScriptInfo -Values $HeaderValues
+    $AppNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppName] -ConstantMap $PascalScriptConstantMap
+    $AppVerNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppVerName] -ConstantMap $PascalScriptConstantMap
+    $RawAppId = $HeaderValues[$HeaderFields.AppId]
+    $AppIdInfo = Get-InnoStaticStringInfo -Value $RawAppId -ConstantMap $PascalScriptConstantMap
+    $AppPublisherInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.Publisher] -ConstantMap $PascalScriptConstantMap
+    $AppVersionInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppVersion] -ConstantMap $PascalScriptConstantMap
+    $DefaultDirName = $HeaderValues[$HeaderFields.DefaultDirName]
+    $UninstallDisplayNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.UninstallDisplayName] -ConstantMap $PascalScriptConstantMap
 
     $DefaultScope = Convert-InnoPrivilegeToScope -PrivilegesRequired $HeaderFixedData.PrivilegesRequired
 
@@ -1911,6 +3152,9 @@ function Get-InnoInfo {
     $InstallIn64BitMode = $HeaderArchitectureData.InstallIn64BitMode
 
     $DefaultDirectoryConstantMap = Get-InnoDefaultDirectoryConstantMap -DefaultScope $DefaultScope -InstallIn64BitMode $InstallIn64BitMode
+    foreach ($Constant in $PascalScriptConstantMap.GetEnumerator()) {
+      $DefaultDirectoryConstantMap[$Constant.Key] = $Constant.Value
+    }
     $DefaultDirInfo = Get-InnoStaticStringInfo -Value $DefaultDirName -ConstantMap $DefaultDirectoryConstantMap
     $ResolvedDefaultDirName = $DefaultDirInfo.Value
 
@@ -1924,9 +3168,9 @@ function Get-InnoInfo {
       $null
     }
 
-    $DisplayNameInfo = if (-not [string]::IsNullOrWhiteSpace($HeaderValues[14])) {
+    $DisplayNameInfo = if (-not [string]::IsNullOrWhiteSpace($HeaderValues[$HeaderFields.UninstallDisplayName])) {
       $UninstallDisplayNameInfo
-    } elseif (-not [string]::IsNullOrWhiteSpace($HeaderValues[1])) {
+    } elseif (-not [string]::IsNullOrWhiteSpace($HeaderValues[$HeaderFields.AppVerName])) {
       $AppVerNameInfo
     } else {
       $AppNameInfo
@@ -1986,6 +3230,19 @@ function Get-InnoInfo {
       AppsAndFeaturesInstallerType             = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? 'inno' : $null
       Warnings                                 = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
       UnresolvedFields                         = [string[]]@($UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      RegistryWrites                           = [pscustomobject[]]@($PostFileRecordInfo.RegistryEntries)
+      FileExtensions                           = [string[]]@($AssociationInfo.FileExtensions)
+      Protocols                                = [string[]]@($AssociationInfo.Protocols)
+      MetadataTablesResolved                   = $PostFileRecordInfo.IsResolved
+      MetadataRecordCounts                     = [pscustomobject]@{
+        Icons           = @($PostFileRecordInfo.Icons).Count
+        Ini             = @($PostFileRecordInfo.IniEntries).Count
+        Registry        = @($PostFileRecordInfo.RegistryEntries).Count
+        InstallDelete   = @($PostFileRecordInfo.InstallDeleteEntries).Count
+        UninstallDelete = @($PostFileRecordInfo.UninstallDeleteEntries).Count
+        Run             = @($PostFileRecordInfo.RunEntries).Count
+        UninstallRun    = @($PostFileRecordInfo.UninstallRunEntries).Count
+      }
       UninstallRegKeyBaseName                  = $UninstallRegKeyBaseName
       DefaultScope                             = $DefaultScope
       SupportedScopes                          = $SupportedScopes
@@ -2017,17 +3274,39 @@ function Get-InnoInfo {
       RawAppId                                 = $RawAppId
       RawDefaultDirName                        = $DefaultDirName
       UninstallDisplayName                     = $UninstallDisplayNameInfo.DecodedValue
+      ResolvedPascalCodeConstants              = [pscustomobject]$PascalScriptConstantMap
       UnresolvedConstants                      = [pscustomobject]$UnresolvedConstants
-      Signature                                = $Signature
+      Signature                                = $SignatureInfo.Signature
       VersionNumber                            = $VersionNumber
+      EditionId                                = $Layout.EditionId
+      Edition                                  = $Layout.Edition
+      CharacterMode                            = $Layout.CharacterMode
       EncryptionUse                            = $HeaderBlockInfo.EncryptionHeader.EncryptionUse
       IsHeaderEncrypted                        = $HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Full'
       FilesEncrypted                           = $HeaderBlockInfo.EncryptionHeader.EncryptionUse -in @('Files', 'Full')
       CompressMethod                           = $HeaderFixedData.CompressMethod
+      PascalScriptInfo                         = $PascalScriptInfo
+      UsesExternalDiskSlices                   = $OffsetTable.Offset1 -eq 0
+      SlicesPerDisk                            = $HeaderFixedData.SlicesPerDisk
       ParserVersionInfo                        = [pscustomobject]@{
-        SignatureVersion              = $SignatureMatch.Groups[1].Value
+        CatalogVersion                = $Script:InnoFormatCatalog.CatalogVersion
+        CatalogFormatId               = $Layout.Id
+        SignatureVersion              = $SignatureInfo.VersionText
+        InternalStructureVersion      = $Layout.InternalStructureVersion
+        EditionId                     = $Layout.EditionId
+        Edition                       = $Layout.Edition
+        CharacterMode                 = $Layout.CharacterMode
+        LayoutResolution              = $Layout.LayoutResolution
+        CandidateFormatIds            = [string[]]@($Layout.CandidateIds)
+        LoaderRoute                   = $Layout.LoaderRoute
+        MetadataRoute                 = $Layout.MetadataRoute
+        RecordSchemaRoute             = $Layout.RecordSchemaRoute
+        PayloadRoute                  = $Layout.PayloadRoute
+        ChecksumRoute                 = $Layout.ChecksumRoute
+        CallTransformRoute            = $Layout.CallTransformRoute
         HeaderStringCount             = $Layout.HeaderStringCount
         HeaderAnsiStringCount         = $Layout.HeaderAnsiStringCount
+        EntryCounts                   = $ExtractionHeader.Counts
         FileEntryStringCount          = $Layout.FileEntryStringCount
         FileEntryAnsiStringCount      = $Layout.FileEntryAnsiStringCount
         FileLocationEntrySize         = $Layout.FileLocationEntrySize
@@ -2037,6 +3316,8 @@ function Get-InnoInfo {
         UsesInt64BlockHeader          = $Layout.UsesInt64BlockHeader
         UsesLegacyCallTransform       = $Layout.UsesLegacyCallInstructionTransform
         OffsetTableVersion            = $OffsetTable.Version
+        PascalScriptByteLength        = $ParsedLayout.CompiledCodeBytes.Length
+        PascalScriptVersion           = $null -ne $PascalScriptInfo ? $PascalScriptInfo.FileVersion : $null
       }
     }
   }
@@ -2127,187 +3408,8 @@ function Read-ProductCodeFromInno {
   }
 }
 
-function Get-InnoVersion5Header {
-  <#
-  .SYNOPSIS
-    Read the legacy ANSI Inno Setup 5.x header counts needed for static file extraction
-  .PARAMETER Bytes
-    The decompressed first metadata block
-  .PARAMETER Layout
-    The supported Inno header layout
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The decompressed first metadata block')]
-    [byte[]]$Bytes,
 
-    [Parameter(Mandatory, HelpMessage = 'The supported Inno header layout')]
-    [pscustomobject]$Layout,
 
-    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
-    [int]$VersionNumber
-  )
-
-  if ($Layout.StringEncoding -ne 'Ansi') { throw 'The legacy Inno 5.x header reader only accepts ANSI layouts' }
-
-  $Stream = [System.IO.MemoryStream]::new($Bytes, $false)
-  $Reader = [System.IO.BinaryReader]::new($Stream)
-
-  try {
-    $HeaderValues = Read-InnoReaderStrings -Reader $Reader -Count ($Layout.HeaderStringCount + $Layout.HeaderAnsiStringCount) -Encoding (Get-InnoAnsiEncoding)
-    $HeaderFixedSize = Get-InnoVersion5HeaderFixedSize -VersionNumber $VersionNumber
-    # Old ANSI installers persist the fixed metadata immediately after the main header strings.
-    $Reader.BaseStream.Seek($Script:INNO_LEAD_BYTES_SIZE, 'Current') | Out-Null
-
-    $Counts = [ordered]@{
-      NumLanguageEntries        = $Reader.ReadInt32()
-      NumCustomMessageEntries   = $Reader.ReadInt32()
-      NumPermissionEntries      = $Reader.ReadInt32()
-      NumTypeEntries            = $Reader.ReadInt32()
-      NumComponentEntries       = $Reader.ReadInt32()
-      NumTaskEntries            = $Reader.ReadInt32()
-      NumDirEntries             = $Reader.ReadInt32()
-      NumFileEntries            = $Reader.ReadInt32()
-      NumFileLocationEntries    = $Reader.ReadInt32()
-      NumIconEntries            = $Reader.ReadInt32()
-      NumIniEntries             = $Reader.ReadInt32()
-      NumRegistryEntries        = $Reader.ReadInt32()
-      NumInstallDeleteEntries   = $Reader.ReadInt32()
-      NumUninstallDeleteEntries = $Reader.ReadInt32()
-      NumRunEntries             = $Reader.ReadInt32()
-      NumUninstallRunEntries    = $Reader.ReadInt32()
-    }
-
-    $RemainingHeaderBytes = $HeaderFixedSize - $Script:INNO_LEAD_BYTES_SIZE - ($Script:INNO_VERSION_5_HEADER_COUNT_FIELDS * 4)
-    if ($RemainingHeaderBytes -lt 0) { throw 'The ANSI Inno Setup header size is invalid' }
-    $Reader.BaseStream.Seek($RemainingHeaderBytes, 'Current') | Out-Null
-
-    return [pscustomobject]@{
-      HeaderValues = $HeaderValues
-      Counts       = [pscustomobject]$Counts
-      SearchOffset = [int]$Reader.BaseStream.Position
-      StreamOffset = $Reader.BaseStream.Position
-    }
-  } finally {
-    $Reader.Close()
-    $Stream.Close()
-  }
-}
-
-function Skip-InnoVersion5Entry {
-  <#
-  .SYNOPSIS
-    Skip an ANSI Inno Setup 5.x metadata entry in the first metadata block
-  .PARAMETER Reader
-    The binary reader positioned at the start of the entry
-  .PARAMETER StringCount
-    The number of serialized ANSI strings in the entry
-  .PARAMETER FixedSize
-    The number of fixed-size bytes that follow the serialized strings
-  #>
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The binary reader positioned at the start of the entry')]
-    [System.IO.BinaryReader]$Reader,
-
-    [Parameter(Mandatory, HelpMessage = 'The number of serialized ANSI strings in the entry')]
-    [int]$StringCount,
-
-    [Parameter(Mandatory, HelpMessage = 'The number of fixed-size bytes that follow the serialized strings')]
-    [int]$FixedSize
-  )
-
-  $null = Read-InnoReaderStrings -Reader $Reader -Count $StringCount -Encoding (Get-InnoAnsiEncoding)
-  $Reader.BaseStream.Seek($FixedSize, 'Current') | Out-Null
-}
-
-function Get-InnoVersion5FileEntries {
-  <#
-  .SYNOPSIS
-    Parse file entries from the first metadata block of an ANSI Inno Setup 5.x installer
-  .PARAMETER Bytes
-    The decompressed first metadata block
-  .PARAMETER Header
-    The parsed ANSI Inno Setup 5.x header metadata
-  #>
-  [OutputType([pscustomobject[]])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The decompressed first metadata block')]
-    [byte[]]$Bytes,
-
-    [Parameter(Mandatory, HelpMessage = 'The parsed ANSI Inno Setup 5.x header metadata')]
-    [pscustomobject]$Header
-  )
-
-  $Stream = [System.IO.MemoryStream]::new($Bytes, $false)
-  $Reader = [System.IO.BinaryReader]::new($Stream)
-
-  try {
-    # Inno serializes tables in a fixed order. Skip each preceding table using
-    # its declared count and versioned record width to reach the file table.
-    $Reader.BaseStream.Seek($Header.StreamOffset, 'Begin') | Out-Null
-
-    for ($i = 0; $i -lt $Header.Counts.NumLanguageEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount ($Script:INNO_LANGUAGE_ENTRY_STRINGS + $Script:INNO_LANGUAGE_ENTRY_ANSI_STRINGS) -FixedSize $Script:INNO_LANGUAGE_ENTRY_FIXED_SIZE
-    }
-    for ($i = 0; $i -lt $Header.Counts.NumCustomMessageEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount $Script:INNO_CUSTOM_MESSAGE_ENTRY_STRINGS -FixedSize $Script:INNO_CUSTOM_MESSAGE_ENTRY_FIXED_SIZE
-    }
-    for ($i = 0; $i -lt $Header.Counts.NumPermissionEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount $Script:INNO_PERMISSION_ENTRY_ANSI_STRINGS -FixedSize 0
-    }
-    for ($i = 0; $i -lt $Header.Counts.NumTypeEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount $Script:INNO_TYPE_ENTRY_STRINGS -FixedSize $Script:INNO_TYPE_ENTRY_FIXED_SIZE
-    }
-    for ($i = 0; $i -lt $Header.Counts.NumComponentEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount $Script:INNO_COMPONENT_ENTRY_STRINGS -FixedSize $Script:INNO_COMPONENT_ENTRY_FIXED_SIZE
-    }
-    for ($i = 0; $i -lt $Header.Counts.NumTaskEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount $Script:INNO_TASK_ENTRY_STRINGS -FixedSize $Script:INNO_TASK_ENTRY_FIXED_SIZE
-    }
-    for ($i = 0; $i -lt $Header.Counts.NumDirEntries; $i++) {
-      Skip-InnoVersion5Entry -Reader $Reader -StringCount $Script:INNO_DIRECTORY_ENTRY_STRINGS -FixedSize $Script:INNO_DIRECTORY_ENTRY_FIXED_SIZE
-    }
-
-    $Entries = [System.Collections.Generic.List[object]]::new()
-
-    # Read only extraction-relevant fields; payload bytes live in the second
-    # metadata block and are joined through LocationEntry rather than guessed.
-    for ($i = 0; $i -lt $Header.Counts.NumFileEntries; $i++) {
-      $Strings = Read-InnoReaderStrings -Reader $Reader -Count $Script:INNO_FILE_ENTRY_STRINGS -Encoding (Get-InnoAnsiEncoding)
-      $null = $Reader.ReadBytes(20) # MinVersion + OnlyBelowVersion
-      $LocationEntry = $Reader.ReadInt32()
-      $Attribs = $Reader.ReadInt32()
-      $ExternalSize = $Reader.ReadInt64()
-      $PermissionsEntry = $Reader.ReadInt16()
-      $Options = $Reader.ReadBytes($Script:INNO_FILE_ENTRY_OPTIONS_SIZE)
-      $FileType = $Reader.ReadByte()
-
-      $Entries.Add([pscustomobject]@{
-          SourceFilename     = $Strings[0]
-          DestName           = $Strings[1]
-          InstallFontName    = $Strings[2]
-          StrongAssemblyName = $Strings[3]
-          Components         = $Strings[4]
-          Tasks              = $Strings[5]
-          Languages          = $Strings[6]
-          Check              = $Strings[7]
-          AfterInstall       = $Strings[8]
-          BeforeInstall      = $Strings[9]
-          LocationEntry      = $LocationEntry
-          Attribs            = $Attribs
-          ExternalSize       = $ExternalSize
-          PermissionsEntry   = $PermissionsEntry
-          Options            = $Options
-          FileType           = $FileType
-        })
-    }
-
-    return $Entries.ToArray()
-  } finally {
-    $Reader.Close()
-    $Stream.Close()
-  }
-}
 
 function ConvertFrom-InnoVersion5FileLocationFlags {
   <#
@@ -2335,73 +3437,6 @@ function ConvertFrom-InnoVersion5FileLocationFlags {
   }
 }
 
-function Get-InnoVersion5FileLocations {
-  <#
-  .SYNOPSIS
-    Parse file location entries from the second metadata block of an ANSI Inno Setup 5.x installer
-  .PARAMETER Bytes
-    The decompressed second metadata block
-  .PARAMETER Count
-    The number of file location entries to read
-  #>
-  [OutputType([pscustomobject[]])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The decompressed second metadata block')]
-    [byte[]]$Bytes,
-
-    [Parameter(HelpMessage = 'The number of file location entries to read')]
-    [int]$Count
-  )
-
-  # When no trusted count is available, exact divisibility by the fixed record
-  # size is required before deriving one from the block length.
-  if ($Count -le 0) {
-    if (($Bytes.Length % $Script:INNO_FILE_LOCATION_ENTRY_SIZE) -ne 0) { throw 'The Inno Setup file location block size is invalid' }
-    $Count = [int]($Bytes.Length / $Script:INNO_FILE_LOCATION_ENTRY_SIZE)
-  }
-
-  $Stream = [System.IO.MemoryStream]::new($Bytes, $false)
-  $Reader = [System.IO.BinaryReader]::new($Stream)
-
-  try {
-    $Locations = [System.Collections.Generic.List[object]]::new()
-
-    # Location records describe slice/chunk coordinates and integrity evidence;
-    # they do not contain destination names.
-    for ($i = 0; $i -lt $Count; $i++) {
-      $FirstSlice = $Reader.ReadInt32()
-      $LastSlice = $Reader.ReadInt32()
-      $StartOffset = [long]$Reader.ReadInt32()
-      $ChunkSuboffset = $Reader.ReadInt64()
-      $OriginalSize = $Reader.ReadInt64()
-      $ChunkCompressedSize = $Reader.ReadInt64()
-      $Sha1 = $Reader.ReadBytes(20)
-      $TimeStamp = $Reader.ReadBytes(8)
-      $FileVersionMS = $Reader.ReadUInt32()
-      $FileVersionLS = $Reader.ReadUInt32()
-      $Flags = ConvertFrom-InnoVersion5FileLocationFlags -Value $Reader.ReadUInt16()
-
-      $Locations.Add([pscustomobject]@{
-          FirstSlice          = $FirstSlice
-          LastSlice           = $LastSlice
-          StartOffset         = $StartOffset
-          ChunkSuboffset      = $ChunkSuboffset
-          OriginalSize        = $OriginalSize
-          ChunkCompressedSize = $ChunkCompressedSize
-          Sha1                = $Sha1
-          TimeStamp           = $TimeStamp
-          FileVersionMS       = $FileVersionMS
-          FileVersionLS       = $FileVersionLS
-          Flags               = $Flags
-        })
-    }
-
-    return $Locations.ToArray()
-  } finally {
-    $Reader.Close()
-    $Stream.Close()
-  }
-}
 
 function Get-InnoExtractionHeader {
   <#
@@ -2436,28 +3471,17 @@ function Get-InnoExtractionHeader {
       default { throw "Unsupported Inno Setup header string encoding: $($Layout.StringEncoding)" }
     }
 
-    # Non-Unicode 5.x headers persist a 256-bit ANSI lead-byte set before the counts.
-    if ($Layout.VersionNumber -lt 6000 -and $Layout.StringEncoding -eq 'Ansi') {
+    # Catalog rows identify exactly which ANSI generations serialize the
+    # 256-bit LeadBytes set between strings and entry counts.
+    if ($Layout.HasLeadBytes) {
       if ($Reader.BaseStream.Position + $Script:INNO_LEAD_BYTES_SIZE -gt $Reader.BaseStream.Length) {
         throw 'The Inno Setup header lead-byte set is truncated'
       }
       $Reader.BaseStream.Seek($Script:INNO_LEAD_BYTES_SIZE, 'Current') | Out-Null
     }
 
-    $CountNames = [System.Collections.Generic.List[string]]::new()
-    $CountNames.AddRange([string[]]@(
-        'NumLanguageEntries', 'NumCustomMessageEntries', 'NumPermissionEntries',
-        'NumTypeEntries', 'NumComponentEntries', 'NumTaskEntries', 'NumDirEntries'
-      ))
-    if ($Layout.VersionNumber -ge 6500) { $CountNames.Add('NumISSigKeyEntries') }
-    $CountNames.AddRange([string[]]@(
-        'NumFileEntries', 'NumFileLocationEntries', 'NumIconEntries', 'NumIniEntries',
-        'NumRegistryEntries', 'NumInstallDeleteEntries', 'NumUninstallDeleteEntries',
-        'NumRunEntries', 'NumUninstallRunEntries'
-      ))
-
     $Counts = [ordered]@{}
-    foreach ($CountName in $CountNames) {
+    foreach ($CountName in $Layout.HeaderCountNames) {
       if ($Reader.BaseStream.Position + 4 -gt $Reader.BaseStream.Length) { throw 'The Inno Setup entry counts are truncated' }
       $Count = $Reader.ReadInt32()
       if ($Count -lt 0 -or $Count -gt 500000) { throw "The Inno Setup $CountName value is invalid: $Count" }
@@ -2487,6 +3511,9 @@ function Read-InnoFileEntryAtOffset {
     Previously validated layout evidence containing the coordinate ranges needed by this operation.
   .PARAMETER FileLocationCount
     Declared record count or parser count limit; malformed or excessive counts are rejected.
+  .PARAMETER SearchOffset
+    First byte after setup-header strings and counts. Header strings before this
+    boundary are never accepted as file-entry evidence.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2518,7 +3545,9 @@ function Read-InnoFileEntryAtOffset {
       if ($VerificationType -gt 2) { throw "The Inno Setup file verification type is invalid: $VerificationType" }
     }
 
-    if ($Reader.BaseStream.Position + 24 -gt $Reader.BaseStream.Length) { throw 'The Inno Setup file entry is truncated' }
+    if ($Reader.BaseStream.Position + $Layout.FileEntryVersionDataSize + 8 -gt $Reader.BaseStream.Length) {
+      throw 'The Inno Setup file entry is truncated'
+    }
     $Reader.BaseStream.Seek($Layout.FileEntryVersionDataSize, 'Current') | Out-Null # MinVersion + OnlyBelowVersion
     $LocationEntry = $Reader.ReadInt32()
     if ($LocationEntry -lt -1 -or $LocationEntry -ge $FileLocationCount) {
@@ -2528,14 +3557,17 @@ function Read-InnoFileEntryAtOffset {
     # Consume and validate the complete fixed tail so RecordEnd points exactly
     # at the next serialized file entry. This makes full table enumeration
     # source-backed rather than a search for unrelated file-name strings.
-    $RemainingFixedBytes = 4 + 8 + 2 + ($Layout.FileEntryHasBitness ? 1 : 0) +
-    $Layout.FileEntryOptionsSize + 1 + $Layout.FileEntryTrailingSize
+    $RemainingFixedBytes = 4 + $Layout.FileEntryExternalSizeSize +
+    ($Layout.FileEntryHasCopyMode ? 1 : 0) + ($Layout.FileEntryHasPermissions ? 2 : 0) +
+    ($Layout.FileEntryHasBitness ? 1 : 0) + $Layout.FileEntryOptionsSize + 1 +
+    $Layout.FileEntryTrailingSize
     if ($Reader.BaseStream.Position + $RemainingFixedBytes -gt $Reader.BaseStream.Length) {
       throw 'The Inno Setup file entry fixed fields are truncated'
     }
     $Attribs = $Reader.ReadInt32()
-    $ExternalSize = $Reader.ReadInt64()
-    $PermissionsEntry = $Reader.ReadInt16()
+    $ExternalSize = if ($Layout.FileEntryExternalSizeSize -eq 8) { $Reader.ReadInt64() } else { [long]$Reader.ReadInt32() }
+    $CopyMode = if ($Layout.FileEntryHasCopyMode) { $Reader.ReadByte() } else { $null }
+    $PermissionsEntry = if ($Layout.FileEntryHasPermissions) { $Reader.ReadInt16() } else { $null }
     $Bitness = if ($Layout.FileEntryHasBitness) { $Reader.ReadByte() } else { $null }
     $Options = $Reader.ReadBytes($Layout.FileEntryOptionsSize)
     $FileType = $Reader.ReadByte()
@@ -2546,27 +3578,28 @@ function Read-InnoFileEntryAtOffset {
     return [pscustomobject]@{
       RecordOffset            = $Offset
       RecordEnd               = [int]$Reader.BaseStream.Position
-      SourceFilename          = $Strings[0]
-      DestName                = $Strings[1]
-      InstallFontName         = $Strings[2]
-      StrongAssemblyName      = $Strings[3]
-      Components              = $Strings[4]
-      Tasks                   = $Strings[5]
-      Languages               = $Strings[6]
-      Check                   = $Strings[7]
-      AfterInstall            = $Strings[8]
-      BeforeInstall           = $Layout.FileEntryStringCount -gt 9 ? $Strings[9] : $null
-      Excludes                = $Layout.FileEntryStringCount -gt 10 ? $Strings[10] : $null
-      DownloadISSigSource     = $Layout.FileEntryStringCount -gt 11 ? $Strings[11] : $null
-      DownloadUserName        = $Layout.FileEntryStringCount -gt 12 ? $Strings[12] : $null
-      DownloadPassword        = $Layout.FileEntryStringCount -gt 13 ? $Strings[13] : $null
-      ExtractArchivePassword  = $Layout.FileEntryStringCount -gt 14 ? $Strings[14] : $null
+      SourceFilename          = $Layout.FileEntryFields.Contains('SourceFilename') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'SourceFilename')] : $null
+      DestName                = $Layout.FileEntryFields.Contains('DestName') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'DestName')] : $null
+      InstallFontName         = $Layout.FileEntryFields.Contains('InstallFontName') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'InstallFontName')] : $null
+      StrongAssemblyName      = $Layout.FileEntryFields.Contains('StrongAssemblyName') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'StrongAssemblyName')] : $null
+      Components              = $Layout.FileEntryFields.Contains('Components') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'Components')] : $null
+      Tasks                   = $Layout.FileEntryFields.Contains('Tasks') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'Tasks')] : $null
+      Languages               = $Layout.FileEntryFields.Contains('Languages') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'Languages')] : $null
+      Check                   = $Layout.FileEntryFields.Contains('Check') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'Check')] : $null
+      AfterInstall            = $Layout.FileEntryFields.Contains('AfterInstall') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'AfterInstall')] : $null
+      BeforeInstall           = $Layout.FileEntryFields.Contains('BeforeInstall') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'BeforeInstall')] : $null
+      Excludes                = $Layout.FileEntryFields.Contains('Excludes') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'Excludes')] : $null
+      DownloadISSigSource     = $Layout.FileEntryFields.Contains('DownloadISSigSource') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'DownloadISSigSource')] : $null
+      DownloadUserName        = $Layout.FileEntryFields.Contains('DownloadUserName') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'DownloadUserName')] : $null
+      DownloadPassword        = $Layout.FileEntryFields.Contains('DownloadPassword') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'DownloadPassword')] : $null
+      ExtractArchivePassword  = $Layout.FileEntryFields.Contains('ExtractArchivePassword') ? $Strings[[Array]::IndexOf($Layout.FileEntryFields, 'ExtractArchivePassword')] : $null
       VerificationAllowedKeys = $VerificationAllowedKeys
       VerificationHash        = $VerificationHash
       VerificationType        = $VerificationType
       LocationEntry           = $LocationEntry
       Attribs                 = $Attribs
       ExternalSize            = $ExternalSize
+      CopyMode                = $CopyMode
       PermissionsEntry        = $PermissionsEntry
       Bitness                 = $Bitness
       Options                 = $Options
@@ -2618,25 +3651,12 @@ function Get-InnoFileEntries {
   }
 
   $ConstantPrefix = $Layout.StringEncoding -eq 'Unicode' ? [byte[]](0x7B, 0x00) : [byte[]](0x7B)
-  $ConstantOffsets = @(Find-BinaryPattern -Bytes $Bytes -Pattern $ConstantPrefix -StartOffset $SearchOffset -Maximum 131072)
+  $ConstantOffsets = @(Find-BinaryPattern -Bytes $Bytes -Pattern $ConstantPrefix -StartOffset $SearchOffset -Maximum 4096)
 
-  foreach ($CandidateLayout in $CandidateLayouts) {
-    # A generated uninstaller can begin with all strings empty. Other tables
-    # begin with SourceFilename, or an empty source followed by a {app} DestName.
-    $CandidateOffsets = [Collections.Generic.HashSet[int]]::new()
-    $EmptyStringCount = $CandidateLayout.FileEntryStringCount + $CandidateLayout.FileEntryAnsiStringCount
-    $EmptyPrefix = [byte[]]::new($EmptyStringCount * 4)
-    foreach ($Offset in Find-BinaryPattern -Bytes $Bytes -Pattern $EmptyPrefix -StartOffset $SearchOffset -Maximum 131072) {
-      $null = $CandidateOffsets.Add([int]$Offset)
-    }
-    foreach ($Offset in $ConstantOffsets) {
-      if ($Offset -ge 4) { $null = $CandidateOffsets.Add([int]$Offset - 4) }
-      if ($Offset -ge 8 -and [BitConverter]::ToInt32($Bytes, [int]$Offset - 8) -eq 0) {
-        $null = $CandidateOffsets.Add([int]$Offset - 8)
-      }
-    }
+  $TestCandidateOffsets = {
+    param([int[]]$CandidateStarts, [pscustomobject]$CandidateLayout, [int]$CandidateFileLocationCount)
 
-    foreach ($CandidateStart in @($CandidateOffsets | Sort-Object)) {
+    foreach ($CandidateStart in $CandidateStarts) {
       if ($CandidateStart -lt $SearchOffset -or $CandidateStart -gt $Bytes.Length - 4) { continue }
       $FirstLength = [BitConverter]::ToInt32($Bytes, $CandidateStart)
       if ($FirstLength -lt 0 -or $FirstLength -gt $Script:INNO_MAX_ENTRY_STRING_SIZE -or
@@ -2651,7 +3671,7 @@ function Get-InnoFileEntries {
       $NamedCount = 0
       for ($Index = 0; $Index -lt $Count; $Index++) {
         try {
-          $Entry = Read-InnoFileEntryAtOffset -Bytes $Bytes -Offset $Cursor -Layout $CandidateLayout -FileLocationCount $FileLocationCount
+          $Entry = Read-InnoFileEntryAtOffset -Bytes $Bytes -Offset $Cursor -Layout $CandidateLayout -FileLocationCount $CandidateFileLocationCount
         } catch {
           $Valid = $false
           break
@@ -2689,16 +3709,277 @@ function Get-InnoFileEntries {
         $Cursor = $Entry.RecordEnd
       }
 
-      $MinimumDistinctLocations = [Math]::Min(2, $FileLocationCount)
+      $MinimumDistinctLocations = [Math]::Min(2, $CandidateFileLocationCount)
+      # Inno always emits an unnamed uninstaller file entry when uninstall
+      # support is enabled. A minimal setup can therefore contain one named
+      # payload and one valid unnamed compiler-generated entry.
       if ($Valid -and $Entries.Count -eq $Count -and $EmbeddedCount -gt 0 -and
-        $NamedCount -ge [Math]::Min(2, $Count) -and
+        $NamedCount -ge 1 -and
         $LocationIndexes.Count -ge $MinimumDistinctLocations) {
-        return $Entries.ToArray()
+        return [pscustomobject]@{ Entries = $Entries.ToArray() }
       }
     }
+    return $null
+  }
+
+  foreach ($CandidateLayout in $CandidateLayouts) {
+    # Inno can place an all-empty compiler-generated uninstaller record before
+    # the first named payload. Evaluate empty and named anchors together in
+    # offset order so a later named record cannot shift the table by one entry
+    # and consume the first icon/INI record as a false final file record.
+    $CandidateOffsets = [Collections.Generic.HashSet[int]]::new()
+    $EmptyStringCount = $CandidateLayout.FileEntryStringCount + $CandidateLayout.FileEntryAnsiStringCount
+    $EmptyPrefix = [byte[]]::new($EmptyStringCount * 4)
+    foreach ($Offset in Find-BinaryPattern -Bytes $Bytes -Pattern $EmptyPrefix -StartOffset $SearchOffset -Maximum 4096) {
+      $null = $CandidateOffsets.Add([int]$Offset)
+    }
+    foreach ($Offset in $ConstantOffsets) {
+      if ($Offset -ge 4) { $null = $CandidateOffsets.Add([int]$Offset - 4) }
+      if ($Offset -ge 8 -and [BitConverter]::ToInt32($Bytes, [int]$Offset - 8) -eq 0) {
+        $null = $CandidateOffsets.Add([int]$Offset - 8)
+      }
+    }
+
+    # DestName is the second string in every file record. Find populated
+    # SourceFilename prefixes in one forward pass instead of walking backward
+    # up to 16 KiB from every brace anchor. The resulting candidates still have
+    # to consume the complete declared file table below.
+    if ($ConstantOffsets.Count -gt 0) {
+      Import-InnoCallTransform
+      $MaximumCandidateOffset = [int]($ConstantOffsets | Measure-Object -Maximum).Maximum
+      $DetectedOffsets = [Dumplings.InstallerParsers.InnoCallTransform]::FindLengthPrefixedSecondStringRecords(
+        $Bytes,
+        $SearchOffset,
+        $MaximumCandidateOffset,
+        [int[]]$ConstantOffsets,
+        $CandidateLayout.StringEncoding -eq 'Unicode',
+        $Script:INNO_MAX_FILE_ENTRY_PATH_SCAN,
+        $Script:INNO_MAX_ENTRY_STRING_SIZE
+      )
+      foreach ($SourceOffset in $DetectedOffsets) {
+        $null = $CandidateOffsets.Add($SourceOffset)
+      }
+    }
+    $Match = & $TestCandidateOffsets ([int[]]@($CandidateOffsets | Sort-Object)) $CandidateLayout $FileLocationCount
+    if ($Match) { return $Match.Entries }
   }
 
   throw 'The complete Inno Setup file-entry table could not be located with the detected version layout'
+}
+
+function Read-InnoCatalogRecord {
+  <#
+  .SYNOPSIS
+    Read one variable-length Inno metadata record using its resolved catalog schema.
+  .PARAMETER Reader
+    Reader positioned at the record's first serialized string. The function advances it to the next record.
+  .PARAMETER Schema
+    Resolved record schema containing ordered wide/ANSI fields and the packed fixed-tail size.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][System.IO.BinaryReader]$Reader,
+    [Parameter(Mandatory)][pscustomobject]$Schema
+  )
+
+  $Start = [long]$Reader.BaseStream.Position
+  $Values = [ordered]@{}
+  $WideValues = Read-InnoReaderStrings -Reader $Reader -Count $Schema.Fields.Count -Encoding ([Text.Encoding]::Unicode) -MaximumLength $Script:INNO_MAX_ENTRY_STRING_SIZE
+  for ($Index = 0; $Index -lt $Schema.Fields.Count; $Index++) { $Values[$Schema.Fields[$Index]] = $WideValues[$Index] }
+  $AnsiValues = Read-InnoReaderStrings -Reader $Reader -Count $Schema.AnsiFields.Count -Encoding (Get-InnoAnsiEncoding) -MaximumLength $Script:INNO_MAX_ENTRY_STRING_SIZE
+  for ($Index = 0; $Index -lt $Schema.AnsiFields.Count; $Index++) { $Values[$Schema.AnsiFields[$Index]] = $AnsiValues[$Index] }
+
+  if ($Schema.FixedSize -lt 0 -or $Reader.BaseStream.Position + $Schema.FixedSize -gt $Reader.BaseStream.Length) {
+    throw "The Inno Setup $($Schema.Id) record fixed tail is truncated"
+  }
+  $FixedBytes = $Reader.ReadBytes($Schema.FixedSize)
+  return [pscustomobject]@{
+    RecordOffset = $Start
+    RecordEnd    = [long]$Reader.BaseStream.Position
+    Values       = [pscustomobject]$Values
+    FixedBytes   = $FixedBytes
+  }
+}
+
+function Read-InnoCatalogRecordTable {
+  <#
+  .SYNOPSIS
+    Read a bounded number of contiguous records selected by the format catalog.
+  .PARAMETER Reader
+    Reader positioned at the first record; it remains open and advances through the table.
+  .PARAMETER Schema
+    Resolved schema shared by every record in the table.
+  .PARAMETER Count
+    Trusted setup-header count, bounded to the parser-wide record limit.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][System.IO.BinaryReader]$Reader,
+    [Parameter(Mandatory)][pscustomobject]$Schema,
+    [Parameter(Mandatory)][ValidateRange(0, 500000)][int]$Count
+  )
+
+  if ($Count -eq 0) { return @() }
+  if ($Schema.Id -eq 'absent') { throw 'The Inno Setup header declares records that are absent from the selected catalog format' }
+  $Records = [Collections.Generic.List[object]]::new($Count)
+  for ($Index = 0; $Index -lt $Count; $Index++) { $Records.Add((Read-InnoCatalogRecord -Reader $Reader -Schema $Schema)) }
+  return $Records.ToArray()
+}
+
+function ConvertFrom-InnoRegistryRootKey {
+  <#
+  .SYNOPSIS
+    Decode the UInt32 registry-root value serialized by the Inno compiler.
+  .PARAMETER Value
+    Raw little-endian root value, including the source-defined HKEY_AUTO value.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][uint32]$Value)
+
+  $RootNames = @{
+    ([uint32]0x00000001) = 'HKA'
+    ([uint32]2147483648) = 'HKCR'
+    ([uint32]2147483649) = 'HKCU'
+    ([uint32]2147483650) = 'HKLM'
+    ([uint32]2147483651) = 'HKU'
+    ([uint32]2147483653) = 'HKCC'
+  }
+  if ($RootNames.ContainsKey($Value)) { return $RootNames[$Value] }
+  return ('0x{0:X8}' -f $Value)
+}
+
+function ConvertFrom-InnoRegistryRecord {
+  <#
+  .SYNOPSIS
+    Project a raw catalog registry record into deterministic registry-write evidence.
+  .PARAMETER Record
+    Record returned by Read-InnoCatalogRecord.
+  .PARAMETER Schema
+    Registry schema containing source-backed offsets in the packed fixed tail.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$Record,
+    [Parameter(Mandatory)][pscustomobject]$Schema
+  )
+
+  $RootValue = [BitConverter]::ToUInt32($Record.FixedBytes, [int]$Schema.RootKeyOffset)
+  $TypeValue = $Record.FixedBytes[[int]$Schema.TypeOffset]
+  $Type = switch ($TypeValue) {
+    0 { 'None' }
+    1 { 'String' }
+    2 { 'ExpandString' }
+    3 { 'DWord' }
+    4 { 'Binary' }
+    5 { 'MultiString' }
+    6 { 'QWord' }
+    default { "Unknown($TypeValue)" }
+  }
+  return [pscustomobject][ordered]@{
+    RootKey       = ConvertFrom-InnoRegistryRootKey -Value $RootValue
+    RootKeyValue  = $RootValue
+    Subkey        = $Record.Values.Subkey
+    ValueName     = $Record.Values.ValueName
+    ValueData     = $Record.Values.ValueData
+    Type          = $Type
+    TypeValue     = $TypeValue
+    Components    = $Record.Values.Components
+    Tasks         = $Record.Values.Tasks
+    Languages     = $Record.Values.Languages
+    Check         = $Record.Values.Check
+    AfterInstall  = $Record.Values.AfterInstall
+    BeforeInstall = $Record.Values.BeforeInstall
+    Conditional   = -not [string]::IsNullOrWhiteSpace($Record.Values.Components) -or
+    -not [string]::IsNullOrWhiteSpace($Record.Values.Tasks) -or
+    -not [string]::IsNullOrWhiteSpace($Record.Values.Languages) -or
+    -not [string]::IsNullOrWhiteSpace($Record.Values.Check)
+    Options       = [byte[]]$Record.FixedBytes[[int]$Schema.OptionsOffset..($Record.FixedBytes.Length - 1)]
+    RecordOffset  = $Record.RecordOffset
+  }
+}
+
+function Get-InnoPostFileRecordInfo {
+  <#
+  .SYNOPSIS
+    Parse all catalogued metadata tables that physically follow the file table.
+  .PARAMETER Bytes
+    Decompressed first metadata block.
+  .PARAMETER Layout
+    Resolved catalog layout containing record-family schemas.
+  .PARAMETER Counts
+    Validated setup-header entry counts.
+  .PARAMETER FileEntries
+    Complete file-entry table; its final boundary anchors the following tables.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [Parameter(Mandatory)][pscustomobject]$Counts,
+    [Parameter(Mandatory)][pscustomobject[]]$FileEntries
+  )
+
+  if ($FileEntries.Count -eq 0) {
+    return [pscustomobject]@{ IsResolved = $false; EndOffset = $null; Icons = @(); IniEntries = @(); RegistryEntries = @(); InstallDeleteEntries = @(); UninstallDeleteEntries = @(); RunEntries = @(); UninstallRunEntries = @() }
+  }
+  $Stream = [IO.MemoryStream]::new($Bytes, $false)
+  $Reader = [IO.BinaryReader]::new($Stream)
+  try {
+    $Reader.BaseStream.Position = [long]$FileEntries[-1].RecordEnd
+    $Icons = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Icon -Count $Counts.NumIconEntries)
+    $IniEntries = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Ini -Count $Counts.NumIniEntries)
+    $RegistryRecords = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Registry -Count $Counts.NumRegistryEntries)
+    $RegistryEntries = @($RegistryRecords | ForEach-Object { ConvertFrom-InnoRegistryRecord -Record $_ -Schema $Layout.RecordFamilies.Registry })
+    $InstallDelete = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Delete -Count $Counts.NumInstallDeleteEntries)
+    $UninstallDelete = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Delete -Count $Counts.NumUninstallDeleteEntries)
+    $Run = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Run -Count $Counts.NumRunEntries)
+    $UninstallRun = @(Read-InnoCatalogRecordTable -Reader $Reader -Schema $Layout.RecordFamilies.Run -Count $Counts.NumUninstallRunEntries)
+    return [pscustomobject]@{
+      IsResolved             = $true
+      EndOffset              = [long]$Reader.BaseStream.Position
+      Icons                  = $Icons
+      IniEntries             = $IniEntries
+      RegistryEntries        = $RegistryEntries
+      InstallDeleteEntries   = $InstallDelete
+      UninstallDeleteEntries = $UninstallDelete
+      RunEntries             = $Run
+      UninstallRunEntries    = $UninstallRun
+    }
+  } finally {
+    $Reader.Dispose()
+    $Stream.Dispose()
+  }
+}
+
+function Get-InnoRegistryAssociationInfo {
+  <#
+  .SYNOPSIS
+    Derive literal file-extension and URL-protocol evidence from parsed registry records.
+  .PARAMETER RegistryEntries
+    Registry writes returned by Get-InnoPostFileRecordInfo.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][AllowEmptyCollection()][pscustomobject[]]$RegistryEntries)
+
+  $Extensions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Protocols = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Entry in $RegistryEntries) {
+    $ClassesPath = if ($Entry.RootKey -eq 'HKCR') {
+      [string]$Entry.Subkey
+    } elseif ($Entry.RootKey -in @('HKCU', 'HKLM', 'HKA') -and $Entry.Subkey -match '^(?i)Software\\Classes\\(?<Path>.+)$') {
+      $Matches.Path
+    } else {
+      $null
+    }
+    if ([string]::IsNullOrWhiteSpace($ClassesPath) -or $ClassesPath -match '\{code:') { continue }
+    $FirstSegment = ($ClassesPath -split '\\', 2)[0]
+    if ($FirstSegment -match '^\.[A-Za-z0-9][A-Za-z0-9+_-]*$') { $null = $Extensions.Add($FirstSegment.TrimStart('.').ToLowerInvariant()) }
+    if ($Entry.ValueName -ieq 'URL Protocol' -and $FirstSegment -match '^[A-Za-z][A-Za-z0-9+.-]*$') { $null = $Protocols.Add($FirstSegment.ToLowerInvariant()) }
+  }
+  return [pscustomobject]@{
+    FileExtensions = [string[]]@($Extensions | Sort-Object)
+    Protocols      = [string[]]@($Protocols | Sort-Object)
+  }
 }
 
 function Find-InnoFileEntry {
@@ -2722,6 +4003,7 @@ function Find-InnoFileEntry {
     [Parameter(Mandatory)][pscustomobject]$Layout,
     [Parameter(Mandatory)][string]$Name,
     [Parameter(Mandatory)][ValidateRange(1, 500000)][int]$FileLocationCount,
+    [Parameter(Mandatory)][ValidateRange(0, [int]::MaxValue)][int]$SearchOffset,
     [string]$Language
   )
 
@@ -2781,7 +4063,7 @@ function Find-InnoFileEntry {
     $Entry = & $TestCandidate $StringStart $LocationCount $SelectedLanguage
     if ($Entry) { return $Entry }
 
-    $MinimumStart = [Math]::Max(0, $StringStart - $Script:INNO_MAX_FILE_ENTRY_PATH_SCAN)
+    $MinimumStart = [Math]::Max($SearchOffset, $StringStart - $Script:INNO_MAX_FILE_ENTRY_PATH_SCAN)
     $PreviousMatches = 0
     for ($PreviousStart = $StringStart - 4; $PreviousStart -ge $MinimumStart; $PreviousStart--) {
       $ExpectedLength = $StringStart - $PreviousStart - 4
@@ -2803,7 +4085,7 @@ function Find-InnoFileEntry {
     $SerializedNeedle = [byte[]]::new(4 + $Needle.Length)
     [System.BitConverter]::GetBytes($Needle.Length).CopyTo($SerializedNeedle, 0)
     $Needle.CopyTo($SerializedNeedle, 4)
-    foreach ($StringStart in (Find-BinaryPattern -Bytes $Bytes -Pattern $SerializedNeedle -Maximum 64)) {
+    foreach ($StringStart in (Find-BinaryPattern -Bytes $Bytes -Pattern $SerializedNeedle -StartOffset $SearchOffset -Maximum 64)) {
       $Entry = & $TestStringStart ([int]$StringStart) $FileLocationCount $Language
       if ($Entry) { return $Entry }
     }
@@ -2815,9 +4097,9 @@ function Find-InnoFileEntry {
   foreach ($NeedleValue in $NeedleValues) {
     $Needle = $Encoding.GetBytes($NeedleValue)
     if ($Needle.Length -eq 0) { continue }
-    foreach ($Occurrence in (Find-BinaryPattern -Bytes $Bytes -Pattern $Needle -Maximum 16)) {
+    foreach ($Occurrence in (Find-BinaryPattern -Bytes $Bytes -Pattern $Needle -StartOffset $SearchOffset -Maximum 16)) {
       $StringEnd = [int]$Occurrence + $Needle.Length
-      $MinimumStart = [Math]::Max(0, $StringEnd - $Script:INNO_MAX_FILE_ENTRY_PATH_SCAN)
+      $MinimumStart = [Math]::Max($SearchOffset, $StringEnd - $Script:INNO_MAX_FILE_ENTRY_PATH_SCAN)
       for ($StringStart = $StringEnd - 4; $StringStart -ge $MinimumStart; $StringStart--) {
         $ExpectedLength = $StringEnd - $StringStart - 4
         if ($Bytes[$StringStart + 3] -ne 0 -or [System.BitConverter]::ToInt32($Bytes, $StringStart) -ne $ExpectedLength) { continue }
@@ -2834,43 +4116,38 @@ function Find-InnoFileEntry {
 function ConvertFrom-InnoFileLocationFlags {
   <#
   .SYNOPSIS
-    Decode legacy or compact Inno file-location flags
+    Decode a catalogued Inno file-location flag set.
   .PARAMETER Value
-    Format-specific field or value interpreted according to the current record/version.
-  .PARAMETER Legacy
-    Selects the legacy record flag layout documented by the detected installer generation.
+    Packed little-endian flag value read from the location record.
+  .PARAMETER FlagNames
+    Ordered semantic names whose array indexes are their persisted bit indexes.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][uint16]$Value,
-    [Parameter(Mandatory)][bool]$Legacy
+    [Parameter(Mandatory)][string[]]$FlagNames
   )
 
-  if ($Legacy) {
-    return [pscustomobject]@{
-      VersionInfoValid         = [bool]($Value -band 0x0001)
-      VersionInfoNotValid      = [bool]($Value -band 0x0002)
-      TimeStampInUtc           = [bool]($Value -band 0x0004)
-      IsUninstallExecutable    = [bool]($Value -band 0x0008)
-      CallInstructionOptimized = [bool]($Value -band 0x0010)
-      TouchApplied             = [bool]($Value -band 0x0020)
-      ChunkEncrypted           = [bool]($Value -band 0x0040)
-      ChunkCompressed          = [bool]($Value -band 0x0080)
-      SolidBreak               = [bool]($Value -band 0x0100)
-    }
-  }
-
-  return [pscustomobject]@{
-    VersionInfoValid         = [bool]($Value -band 0x01)
+  $Decoded = [ordered]@{
+    VersionInfoValid         = $false
     VersionInfoNotValid      = $false
-    TimeStampInUtc           = [bool]($Value -band 0x02)
+    TimeStampInUtc           = $false
     IsUninstallExecutable    = $false
-    CallInstructionOptimized = [bool]($Value -band 0x04)
+    CallInstructionOptimized = $false
     TouchApplied             = $false
-    ChunkEncrypted           = [bool]($Value -band 0x08)
-    ChunkCompressed          = [bool]($Value -band 0x10)
+    ChunkEncrypted           = $false
+    ChunkCompressed          = $false
     SolidBreak               = $false
+    BZip2                    = $false
+    Sign                     = $false
+    SignOnce                 = $false
   }
+  for ($Bit = 0; $Bit -lt $FlagNames.Count; $Bit++) {
+    $Name = $FlagNames[$Bit]
+    if (-not $Decoded.Contains($Name)) { $Decoded[$Name] = $false }
+    $Decoded[$Name] = [bool]($Value -band (1 -shl $Bit))
+  }
+  return [pscustomobject]$Decoded
 }
 
 function Read-InnoFileLocation {
@@ -2910,16 +4187,24 @@ function Read-InnoFileLocation {
     $FirstSlice = $Reader.ReadInt32()
     $LastSlice = $Reader.ReadInt32()
     $StartOffset = if ($Layout.FileLocationStartOffsetSize -eq 8) { $Reader.ReadInt64() } else { [long]$Reader.ReadInt32() }
-    $ChunkSuboffset = $Reader.ReadInt64()
-    $OriginalSize = $Reader.ReadInt64()
-    $ChunkCompressedSize = $Reader.ReadInt64()
+    if ($Layout.FileLocationHasChunkFields) {
+      $ChunkSuboffset = $Reader.ReadInt64()
+      $OriginalSize = $Reader.ReadInt64()
+      $ChunkCompressedSize = $Reader.ReadInt64()
+    } else {
+      # Inno 1.3.21 through 4.0.0 stores one independent zlib/bzip stream per
+      # file. There is no solid-stream suboffset and both sizes are 32-bit.
+      $ChunkSuboffset = 0L
+      $OriginalSize = [long]$Reader.ReadInt32()
+      $ChunkCompressedSize = [long]$Reader.ReadInt32()
+    }
     $Digest = $Reader.ReadBytes($Layout.FileLocationDigestSize)
     $TimeStamp = $Reader.ReadBytes(8)
     $FileVersionMS = $Reader.ReadUInt32()
     $FileVersionLS = $Reader.ReadUInt32()
-    $RawFlags = if ($Layout.FileLocationUsesLegacyFlags) { [uint16]$Reader.ReadUInt16() } else { [uint16]$Reader.ReadByte() }
+    $RawFlags = if ($Layout.FileLocationFlagSize -eq 2) { [uint16]$Reader.ReadUInt16() } else { [uint16]$Reader.ReadByte() }
     $Sign = if ($Layout.FileLocationHasSign) { $Reader.ReadByte() } else { $null }
-    $Flags = ConvertFrom-InnoFileLocationFlags -Value $RawFlags -Legacy $Layout.FileLocationUsesLegacyFlags
+    $Flags = ConvertFrom-InnoFileLocationFlags -Value $RawFlags -FlagNames $Layout.FileLocationFlagNames
 
     if ($FirstSlice -lt 0 -or $LastSlice -lt $FirstSlice -or $StartOffset -lt 0 -or
       $ChunkSuboffset -lt 0 -or $OriginalSize -lt 0 -or $ChunkCompressedSize -lt 0) {
@@ -2936,7 +4221,7 @@ function Read-InnoFileLocation {
       ChunkCompressedSize = $ChunkCompressedSize
       DigestAlgorithm     = $Layout.FileLocationDigestAlgorithm
       Digest              = $Digest
-      Md5                  = $Layout.FileLocationDigestAlgorithm -eq 'MD5' ? $Digest : $null
+      Md5                 = $Layout.FileLocationDigestAlgorithm -eq 'MD5' ? $Digest : $null
       Sha1                = $Layout.FileLocationDigestAlgorithm -eq 'SHA1' ? $Digest : $null
       Sha256              = $Layout.FileLocationDigestAlgorithm -eq 'SHA256' ? $Digest : $null
       TimeStamp           = $TimeStamp
@@ -2944,6 +4229,7 @@ function Read-InnoFileLocation {
       FileVersionLS       = $FileVersionLS
       RawFlags            = $RawFlags
       Flags               = $Flags
+      IsBZip2             = $Flags.BZip2
       Sign                = $Sign
     }
   } finally {
@@ -3016,87 +4302,6 @@ function Resolve-InnoVersion5FileMatch {
   return $Match
 }
 
-function Find-InnoVersion5FileEntry {
-  <#
-  .SYNOPSIS
-    Locate a targeted ANSI Inno Setup 5.x file entry directly from the first metadata block
-  .PARAMETER Bytes
-    The decompressed first metadata block
-  .PARAMETER Name
-    The exact file name to locate
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The decompressed first metadata block')]
-    [byte[]]$Bytes,
-
-    [Parameter(Mandatory, HelpMessage = 'The exact file name to locate')]
-    [string]$Name
-  )
-
-  $Encoding = Get-InnoAnsiEncoding
-  $TargetName = $Name.ToLowerInvariant()
-  $FileEntryTrailerSize = $Script:INNO_FILE_ENTRY_FIXED_SIZE
-
-  # Legacy 5.x targeted lookup tests only structurally plausible string-record
-  # starts and validates the fixed trailer before accepting a name match.
-  for ($Start = 0; $Start -le $Bytes.Length - (4 + $FileEntryTrailerSize); $Start++) {
-    $DeclaredLength = [System.BitConverter]::ToInt32($Bytes, $Start)
-    if ($DeclaredLength -lt 0 -or $DeclaredLength -gt 4096) { continue }
-
-    $Stream = [System.IO.MemoryStream]::new($Bytes, $false)
-    $Reader = [System.IO.BinaryReader]::new($Stream)
-    try {
-      $Reader.BaseStream.Seek($Start, 'Begin') | Out-Null
-      $Strings = Read-InnoReaderStrings -Reader $Reader -Count $Script:INNO_FILE_ENTRY_STRINGS -Encoding $Encoding
-      if ($Reader.BaseStream.Position + $FileEntryTrailerSize -gt $Reader.BaseStream.Length) { continue }
-
-      $CandidateNames = @(
-        $Strings[0],
-        $Strings[1],
-        [System.IO.Path]::GetFileName($Strings[0]),
-        [System.IO.Path]::GetFileName($Strings[1])
-      ).Where({ -not [string]::IsNullOrWhiteSpace($_) }).ForEach({ $_.ToLowerInvariant() })
-
-      if (-not $CandidateNames.Where({ $_ -eq $TargetName -or $_.EndsWith("\$TargetName") }, 'First')) { continue }
-
-      $null = $Reader.ReadBytes(20) # MinVersion + OnlyBelowVersion
-      $LocationEntry = $Reader.ReadInt32()
-      $Attribs = $Reader.ReadInt32()
-      $ExternalSize = $Reader.ReadInt64()
-      $PermissionsEntry = $Reader.ReadInt16()
-      $Options = $Reader.ReadBytes($Script:INNO_FILE_ENTRY_OPTIONS_SIZE)
-      $FileType = $Reader.ReadByte()
-
-      if ($LocationEntry -lt 0 -or $LocationEntry -gt 500000) { continue }
-
-      return [pscustomobject]@{
-        SourceFilename     = $Strings[0]
-        DestName           = $Strings[1]
-        InstallFontName    = $Strings[2]
-        StrongAssemblyName = $Strings[3]
-        Components         = $Strings[4]
-        Tasks              = $Strings[5]
-        Languages          = $Strings[6]
-        Check              = $Strings[7]
-        AfterInstall       = $Strings[8]
-        BeforeInstall      = $Strings[9]
-        LocationEntry      = $LocationEntry
-        Attribs            = $Attribs
-        ExternalSize       = $ExternalSize
-        PermissionsEntry   = $PermissionsEntry
-        Options            = $Options
-        FileType           = $FileType
-      }
-    } catch {
-    } finally {
-      $Reader.Close()
-      $Stream.Close()
-    }
-  }
-
-  throw "No file entry matched the ANSI Inno Setup target: $Name"
-}
 
 function Convert-InnoCallInstructions {
   <#
@@ -3160,6 +4365,233 @@ function Convert-InnoCallInstructions5309 {
   [Dumplings.InstallerParsers.InnoCallTransform]::Decode($Bytes, $Count, $AddressOffset)
 }
 
+function Import-InnoSliceStream {
+  <#
+  .SYNOPSIS
+    Load the bounded external-media stream used for Inno disk slices.
+  #>
+  if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.InnoSliceStream').Type) { return }
+  $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'Inno', 'InnoSliceStream.cs'
+  $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.InnoSliceStream'
+}
+
+function Get-InnoDiskSliceHeaderInfo {
+  <#
+  .SYNOPSIS
+    Validate an external Inno Setup disk-slice header.
+  .PARAMETER Path
+    Path to one setup-N.bin or setup-Na.bin slice.
+  .PARAMETER InternalStructureVersion
+    Catalogued setup structure version selecting the 32-bit idska32 or 64-bit idskb32 size record.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][int]$InternalStructureVersion
+  )
+
+  $SlicePath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $Modern = $InternalStructureVersion -ge 6502
+  $HeaderLength = $Modern ? 16 : 12
+  $ExpectedId = $Modern ? $Script:INNO_DISK_SLICE_ID_6502 : $Script:INNO_DISK_SLICE_ID_LEGACY
+  $Stream = [IO.File]::Open($SlicePath, 'Open', 'Read', 'Read')
+  try {
+    if ($Stream.Length -lt $HeaderLength) { throw "The Inno Setup disk slice is shorter than its $HeaderLength-byte header: $SlicePath" }
+    $Header = Read-BinaryBytes -Stream $Stream -Offset 0 -Count $HeaderLength
+    if (-not (Test-BinarySequence -Left $Header[0..7] -Right $ExpectedId)) {
+      $ExpectedName = $Modern ? 'idskb32' : 'idska32'
+      throw "The Inno Setup disk slice does not contain the expected $ExpectedName header: $SlicePath"
+    }
+    $DeclaredSize = $Modern ? [BitConverter]::ToInt64($Header, 8) : [long][BitConverter]::ToUInt32($Header, 8)
+    if ($DeclaredSize -ne $Stream.Length) {
+      throw "The Inno Setup disk slice declares $DeclaredSize bytes but contains $($Stream.Length): $SlicePath"
+    }
+    return [pscustomobject]@{
+      Path         = $SlicePath
+      HeaderLength = $HeaderLength
+      Length       = $Stream.Length
+      Identifier   = $Modern ? 'idskb32' : 'idska32'
+    }
+  } finally { $Stream.Dispose() }
+}
+
+function Get-InnoDiskSliceFileName {
+  <#
+  .SYNOPSIS
+    Reproduce Inno Setup's zero-based slice to physical media filename mapping.
+  .PARAMETER InstallerPath
+    Setup executable whose base name prefixes the external media.
+  .PARAMETER Slice
+    Zero-based logical slice number from a file-location record.
+  .PARAMETER SlicesPerDisk
+    Number of letter-suffixed slices emitted for each numbered disk.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][string]$InstallerPath,
+    [Parameter(Mandatory)][ValidateRange(0, [int]::MaxValue)][int]$Slice,
+    [Parameter(Mandatory)][ValidateRange(1, 26)][int]$SlicesPerDisk
+  )
+
+  $Prefix = [IO.Path]::GetFileNameWithoutExtension($InstallerPath)
+  $Major = [Math]::Floor($Slice / $SlicesPerDisk) + 1
+  $Minor = $Slice % $SlicesPerDisk
+  if ($SlicesPerDisk -eq 1) { return "$Prefix-$Major.bin" }
+  return "$Prefix-$Major$([char]([int][char]'a' + $Minor)).bin"
+}
+
+function Resolve-InnoDiskSliceSet {
+  <#
+  .SYNOPSIS
+    Locate and validate the external slices required by one physical payload chunk.
+  .PARAMETER InstallerPath
+    Setup executable used for the official media filename prefix and default directory.
+  .PARAMETER FirstSlice
+    First zero-based slice named by the file-location record.
+  .PARAMETER LastSlice
+    Last zero-based slice named by the file-location record.
+  .PARAMETER SlicesPerDisk
+    Parsed setup-header media geometry.
+  .PARAMETER InternalStructureVersion
+    Catalogued structure version selecting the slice header layout.
+  .PARAMETER DiskSourcePath
+    Optional directories or explicit slice files searched before the installer directory.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][string]$InstallerPath,
+    [Parameter(Mandatory)][int]$FirstSlice,
+    [Parameter(Mandatory)][int]$LastSlice,
+    [Parameter(Mandatory)][ValidateRange(1, 26)][int]$SlicesPerDisk,
+    [Parameter(Mandatory)][int]$InternalStructureVersion,
+    [string[]]$DiskSourcePath
+  )
+
+  $Directories = [Collections.Generic.List[string]]::new()
+  $ExplicitFiles = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($SourcePath in @($DiskSourcePath)) {
+    if ([string]::IsNullOrWhiteSpace($SourcePath)) { continue }
+    $Resolved = Resolve-InstallerFileSystemPath -Path $SourcePath
+    if (Test-Path -LiteralPath $Resolved -PathType Leaf) {
+      $ExplicitFiles[[IO.Path]::GetFileName($Resolved)] = $Resolved
+    } elseif (Test-Path -LiteralPath $Resolved -PathType Container) {
+      $Directories.Add($Resolved)
+    } else {
+      throw "The Inno Setup disk source does not exist: $Resolved"
+    }
+  }
+  $InstallerDirectory = [IO.Path]::GetDirectoryName($InstallerPath)
+  if (-not $Directories.Contains($InstallerDirectory)) { $Directories.Add($InstallerDirectory) }
+
+  $Result = [Collections.Generic.List[object]]::new()
+  for ($Slice = $FirstSlice; $Slice -le $LastSlice; $Slice++) {
+    $FileName = Get-InnoDiskSliceFileName -InstallerPath $InstallerPath -Slice $Slice -SlicesPerDisk $SlicesPerDisk
+    $SlicePath = $null
+    if (-not $ExplicitFiles.TryGetValue($FileName, [ref]$SlicePath)) {
+      foreach ($Directory in $Directories) {
+        $Candidate = Join-Path -Path $Directory -ChildPath $FileName
+        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+          $SlicePath = (Get-Item -LiteralPath $Candidate -Force).FullName
+          break
+        }
+      }
+    }
+    if (-not $SlicePath) {
+      throw "The Inno Setup external media slice is missing: $FileName"
+    }
+    $Header = Get-InnoDiskSliceHeaderInfo -Path $SlicePath -InternalStructureVersion $InternalStructureVersion
+    $Header | Add-Member -NotePropertyName Slice -NotePropertyValue $Slice
+    $Result.Add($Header)
+  }
+  return $Result.ToArray()
+}
+
+function Get-InnoFileChunkStream {
+  <#
+  .SYNOPSIS
+    Open the compressed bytes of one embedded or external Inno payload chunk.
+  .PARAMETER Path
+    Setup executable containing metadata and, for single-file media, payload data.
+  .PARAMETER Offset1
+    Embedded payload base. Zero selects external disk slices.
+  .PARAMETER Location
+    Validated file-location record containing slice and chunk bounds.
+  .PARAMETER InternalStructureVersion
+    Catalogued structure version selecting disk-slice framing.
+  .PARAMETER SlicesPerDisk
+    Parsed setup-header media geometry.
+  .PARAMETER DiskSourcePath
+    Optional external-media directories or explicit files.
+  #>
+  [OutputType([System.IO.Stream])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][long]$Offset1,
+    [Parameter(Mandatory)][pscustomobject]$Location,
+    [Parameter(Mandatory)][int]$InternalStructureVersion,
+    [int]$SlicesPerDisk = 0,
+    [string[]]$DiskSourcePath
+  )
+
+  if ($Offset1 -ne 0) {
+    if ($Location.FirstSlice -ne $Location.LastSlice) {
+      throw 'An embedded Inno Setup payload cannot span external disk slices'
+    }
+    $InstallerStream = [IO.File]::Open($Path, 'Open', 'Read', 'Read')
+    try {
+      $ChunkOffset = [long]$Offset1 + [long]$Location.StartOffset
+      if ($ChunkOffset -lt 0 -or $ChunkOffset -gt $InstallerStream.Length - 4 -or
+        $Location.ChunkCompressedSize -gt $InstallerStream.Length - $ChunkOffset - 4) {
+        throw 'The Inno Setup file chunk is outside the installer'
+      }
+      $ChunkMagic = [Text.Encoding]::ASCII.GetString((Read-BinaryBytes -Stream $InstallerStream -Offset $ChunkOffset -Count 4))
+      if ($ChunkMagic -ne $Script:INNO_CHUNK_MAGIC) { throw 'The Inno Setup chunk marker is invalid' }
+      return New-BoundedReadStream -Stream $InstallerStream -Offset ($ChunkOffset + 4) -Length $Location.ChunkCompressedSize
+    } catch {
+      $InstallerStream.Dispose()
+      throw
+    }
+  }
+
+  if ($SlicesPerDisk -lt 1) {
+    throw 'The Inno Setup header does not expose valid SlicesPerDisk metadata required to locate external media'
+  }
+  $Slices = @(Resolve-InnoDiskSliceSet -InstallerPath $Path -FirstSlice $Location.FirstSlice -LastSlice $Location.LastSlice `
+      -SlicesPerDisk $SlicesPerDisk -InternalStructureVersion $InternalStructureVersion -DiskSourcePath $DiskSourcePath)
+  $First = $Slices[0]
+  if ($Location.StartOffset -lt $First.HeaderLength -or $Location.StartOffset -gt $First.Length - 4) {
+    throw 'The Inno Setup external chunk marker is outside its first disk slice'
+  }
+  $FirstStream = [IO.File]::Open($First.Path, 'Open', 'Read', 'Read')
+  try {
+    $ChunkMagic = [Text.Encoding]::ASCII.GetString((Read-BinaryBytes -Stream $FirstStream -Offset $Location.StartOffset -Count 4))
+  } finally { $FirstStream.Dispose() }
+  if ($ChunkMagic -ne $Script:INNO_CHUNK_MAGIC) { throw 'The Inno Setup external chunk marker is invalid' }
+
+  $Paths = [Collections.Generic.List[string]]::new()
+  $Offsets = [Collections.Generic.List[long]]::new()
+  $Lengths = [Collections.Generic.List[long]]::new()
+  $Remaining = [long]$Location.ChunkCompressedSize
+  for ($Index = 0; $Index -lt $Slices.Count; $Index++) {
+    $Slice = $Slices[$Index]
+    $Offset = $Index -eq 0 ? [long]$Location.StartOffset + 4 : [long]$Slice.HeaderLength
+    $Available = [long]$Slice.Length - $Offset
+    if ($Available -lt 0) { throw "The Inno Setup disk slice data range is invalid: $($Slice.Path)" }
+    $Length = [Math]::Min($Remaining, $Available)
+    if ($Index -lt $Slices.Count - 1 -and $Length -ne $Available) {
+      throw 'The Inno Setup location record names additional slices after the compressed chunk has ended'
+    }
+    $Paths.Add($Slice.Path)
+    $Offsets.Add($Offset)
+    $Lengths.Add($Length)
+    $Remaining -= $Length
+  }
+  if ($Remaining -ne 0) { throw 'The Inno Setup external disk slices end before the compressed chunk is complete' }
+
+  Import-InnoSliceStream
+  return [Dumplings.InstallerParsers.InnoSliceStream]::new($Paths.ToArray(), $Offsets.ToArray(), $Lengths.ToArray())
+}
+
 function Open-InnoFileChunkDecoder {
   <#
   .SYNOPSIS
@@ -3204,6 +4636,70 @@ function Open-InnoFileChunkDecoder {
   return [pscustomobject]@{ Stream = $Decoder; Decoder = $Decoder }
 }
 
+function Get-InnoPayloadCompressionMethod {
+  <#
+  .SYNOPSIS
+    Resolve payload compression when an historical header schema does not yet expose CompressMethod.
+  .PARAMETER Path
+    Installer path containing the embedded payload stream.
+  .PARAMETER Offset1
+    Absolute base offset of the embedded setup data.
+  .PARAMETER Location
+    Validated file-location record identifying the physical chunk.
+  .PARAMETER Layout
+    Catalog descriptor constraining the permitted historical fallback.
+  .PARAMETER SlicesPerDisk
+    Parsed external-media geometry when Offset1 is zero.
+  .PARAMETER DiskSourcePath
+    Optional external-media directories or explicit slice paths.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][long]$Offset1,
+    [Parameter(Mandatory)][pscustomobject]$Location,
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [int]$SlicesPerDisk = 0,
+    [string[]]$DiskSourcePath
+  )
+
+  $PayloadDescriptor = $Script:InnoPayloadRouteDescriptors[$Layout.PayloadRoute]
+  if (-not $PayloadDescriptor) { throw "Unsupported Inno payload route: $($Layout.PayloadRoute)" }
+  if ($PayloadDescriptor.CompressionFromLocation) { return $Location.IsBZip2 ? 'BZip2' : 'Zlib' }
+
+  $Stream = Get-InnoFileChunkStream -Path $Path -Offset1 $Offset1 -Location $Location `
+    -InternalStructureVersion $Layout.InternalStructureVersion -SlicesPerDisk $SlicesPerDisk -DiskSourcePath $DiskSourcePath
+  try {
+    $Prefix = [byte[]]::new(3)
+    $PrefixRead = $Stream.Read($Prefix, 0, 3)
+    if ($PrefixRead -ne 3) { throw 'The Inno Setup compressed payload prefix is truncated' }
+  } finally { $Stream.Dispose() }
+
+  if ($Prefix[0] -eq 0x42 -and $Prefix[1] -eq 0x5A -and $Prefix[2] -eq 0x68) { return 'BZip2' }
+  if (($Prefix[0] -band 0x0F) -eq 8 -and (([int]$Prefix[0] * 256 + $Prefix[1]) % 31) -eq 0) { return 'Zlib' }
+
+  # Inno's generic LZMA block reader begins at structure 4.1.6. LZMA2 was
+  # introduced after the catalogued fixed header exposes CompressMethod, so an
+  # otherwise unidentified historical stream in this narrow interval is LZMA.
+  if ($Layout.InternalStructureVersion -ge 4105 -and $Layout.InternalStructureVersion -lt 5303) { return 'Lzma' }
+  throw 'The historical Inno Setup payload compression method could not be resolved structurally'
+}
+
+$Script:InnoCallTransformHandlers = @{
+  'legacy-stream' = {
+    param([IO.Stream]$InputStream, [IO.Stream]$OutputStream, [long]$Length, $Hash)
+    [Dumplings.InstallerParsers.InnoCallTransform]::DecodeStateful($InputStream, $OutputStream, $Length, $Hash)
+  }
+  'relative24-v1' = {
+    param([IO.Stream]$InputStream, [IO.Stream]$OutputStream, [long]$Length, $Hash)
+    [Dumplings.InstallerParsers.InnoCallTransform]::DecodeLegacy($InputStream, $OutputStream, $Length, $Hash)
+  }
+  'relative24-v3' = {
+    param([IO.Stream]$InputStream, [IO.Stream]$OutputStream, [long]$Length, $Hash)
+    [Dumplings.InstallerParsers.InnoCallTransform]::Decode($InputStream, $OutputStream, $Length, $Hash)
+  }
+}
+
 function Write-InnoFilePayload {
   <#
   .SYNOPSIS
@@ -3218,8 +4714,16 @@ function Write-InnoFilePayload {
     Compression framing or bounded decoder selected from validated format metadata.
   .PARAMETER OutputPath
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
-  .PARAMETER LegacyCallInstructionTransform
-    Use the pre-5.3.9 CALL/JMP transform selected by the setup-data signature.
+  .PARAMETER PayloadRoute
+    Catalogued physical payload framing route.
+  .PARAMETER CallTransformRoute
+    Catalogued executable CALL/JMP transform route.
+  .PARAMETER InternalStructureVersion
+    Catalogued setup structure version selecting external disk framing.
+  .PARAMETER SlicesPerDisk
+    Parsed setup-header media geometry.
+  .PARAMETER DiskSourcePath
+    Optional external-media directories or explicit slice paths.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
@@ -3228,16 +4732,15 @@ function Write-InnoFilePayload {
     [Parameter(Mandatory)][pscustomobject]$Location,
     [Parameter(Mandatory)][string]$CompressionMethod,
     [Parameter(Mandatory)][string]$OutputPath,
-    [switch]$LegacyCallInstructionTransform
+    [Parameter(Mandatory)][ValidateSet('legacy-adler', 'chunked-always-compressed', 'chunked-legacy', 'chunked-modern')][string]$PayloadRoute,
+    [Parameter(Mandatory)][ValidateSet('legacy-stream', 'relative24-v1', 'relative24-v3')][string]$CallTransformRoute,
+    [Parameter(Mandatory)][int]$InternalStructureVersion,
+    [int]$SlicesPerDisk = 0,
+    [string[]]$DiskSourcePath
   )
 
   if ($Location.Flags.ChunkEncrypted) { throw 'Encrypted Inno Setup file chunks require the setup password and are not supported' }
 
-  # This path handles a single embedded setup.exe data stream. External slices
-  # and password-encrypted chunks require runtime inputs unavailable statically.
-  if ($Offset1 -eq 0 -or $Location.FirstSlice -ne 0 -or $Location.LastSlice -ne 0) {
-    throw 'Disk-spanning Inno Setup payload extraction requires the external setup slice files and is not supported by this path'
-  }
   if ($Location.OriginalSize -gt $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE -or
     $Location.ChunkSuboffset -gt $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE -or
     $Location.OriginalSize -gt $Script:INNO_MAX_DECOMPRESSED_BLOCK_SIZE - $Location.ChunkSuboffset) {
@@ -3245,7 +4748,6 @@ function Write-InnoFilePayload {
   }
 
   $InstallerPath = (Get-Item -LiteralPath $Path -Force).FullName
-  $InstallerStream = [System.IO.File]::OpenRead($InstallerPath)
   $ChunkRange = $null
   $Decoder = $null
   $Hash = $null
@@ -3253,19 +4755,16 @@ function Write-InnoFilePayload {
   $Buffer = $null
   $TemporaryPath = "$OutputPath.$([guid]::NewGuid().ToString('N')).partial"
   try {
-    $ChunkOffset = [long]$Offset1 + [long]$Location.StartOffset
-    if ($ChunkOffset -lt 0 -or $ChunkOffset -gt $InstallerStream.Length - 4 -or
-      $Location.ChunkCompressedSize -gt $InstallerStream.Length - $ChunkOffset - 4) {
-      throw 'The Inno Setup file chunk is outside the installer'
-    }
-    $ChunkMagic = [System.Text.Encoding]::ASCII.GetString((Read-BinaryBytes -Stream $InstallerStream -Offset $ChunkOffset -Count 4))
-    if ($ChunkMagic -ne $Script:INNO_CHUNK_MAGIC) { throw 'The Inno Setup chunk marker is invalid' }
-
-    # Bound the decoder to the catalog-declared chunk so it cannot consume a
-    # following chunk, signature, or certificate table on malformed input.
-    $ChunkRange = New-BoundedReadStream -Stream $InstallerStream -Offset ($ChunkOffset + 4) -Length $Location.ChunkCompressedSize -LeaveOpen
-    $DecoderInfo = Open-InnoFileChunkDecoder -Stream $ChunkRange -CompressionMethod $CompressionMethod `
-      -Compressed $Location.Flags.ChunkCompressed -CompressedSize $Location.ChunkCompressedSize
+    # Get-InnoFileChunkStream returns one exact compressed range for embedded
+    # media or a forward-only logical stream spanning validated external slices.
+    $ChunkRange = Get-InnoFileChunkStream -Path $InstallerPath -Offset1 $Offset1 -Location $Location `
+      -InternalStructureVersion $InternalStructureVersion -SlicesPerDisk $SlicesPerDisk -DiskSourcePath $DiskSourcePath
+    $PayloadDescriptor = $Script:InnoPayloadRouteDescriptors[$PayloadRoute]
+    if (-not $PayloadDescriptor) { throw "Unsupported Inno payload route: $PayloadRoute" }
+    $EffectiveCompressionMethod = if ($PayloadDescriptor.CompressionFromLocation -and $Location.IsBZip2) { 'BZip2' } else { $CompressionMethod }
+    $IsCompressed = $PayloadDescriptor.AlwaysCompressed -or $Location.Flags.ChunkCompressed
+    $DecoderInfo = Open-InnoFileChunkDecoder -Stream $ChunkRange -CompressionMethod $EffectiveCompressionMethod `
+      -Compressed $IsCompressed -CompressedSize $Location.ChunkCompressedSize
     $PayloadStream = $DecoderInfo.Stream
     $Decoder = $DecoderInfo.Decoder
 
@@ -3283,25 +4782,25 @@ function Write-InnoFilePayload {
     $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
     $OutputStream = [System.IO.File]::Open($TemporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
     $HashAlgorithm = switch ($Location.DigestAlgorithm) {
+      'Adler32' { $null }
+      'CRC32' { $null }
       'MD5' { [System.Security.Cryptography.HashAlgorithmName]::MD5 }
       'SHA1' { [System.Security.Cryptography.HashAlgorithmName]::SHA1 }
       'SHA256' { [System.Security.Cryptography.HashAlgorithmName]::SHA256 }
       default { throw "Unsupported Inno Setup file digest algorithm: $($Location.DigestAlgorithm)" }
     }
-    $Hash = [System.Security.Cryptography.IncrementalHash]::CreateHash($HashAlgorithm)
+    if ($null -ne $HashAlgorithm) {
+      $Hash = [System.Security.Cryptography.IncrementalHash]::CreateHash($HashAlgorithm)
+    }
 
     # Inno applies the CALL/JMP transform to exact 64 KiB blocks. Delegate that
     # source-defined framing to the bounded C# stream implementation; ordinary
     # files keep the pooled copy loop and never materialize the full payload.
     if ($Location.Flags.CallInstructionOptimized) {
       Import-InnoCallTransform
-      if ($LegacyCallInstructionTransform) {
-        [Dumplings.InstallerParsers.InnoCallTransform]::DecodeLegacy(
-          $PayloadStream, $OutputStream, [long]$Location.OriginalSize, $Hash)
-      } else {
-        [Dumplings.InstallerParsers.InnoCallTransform]::Decode(
-          $PayloadStream, $OutputStream, [long]$Location.OriginalSize, $Hash)
-      }
+      $TransformHandler = $Script:InnoCallTransformHandlers[$CallTransformRoute]
+      if (-not $TransformHandler) { throw "Unsupported Inno CALL/JMP transform route: $CallTransformRoute" }
+      & $TransformHandler $PayloadStream $OutputStream ([long]$Location.OriginalSize) $Hash
     } else {
       $Remaining = [long]$Location.OriginalSize
       while ($Remaining -gt 0) {
@@ -3312,18 +4811,34 @@ function Write-InnoFilePayload {
           if ($Read -le 0) { throw 'The Inno Setup file payload is truncated' }
           $TotalRead += $Read
         }
-        $Hash.AppendData($Buffer, 0, $BlockLength)
+        if ($Hash) { $Hash.AppendData($Buffer, 0, $BlockLength) }
         $OutputStream.Write($Buffer, 0, $BlockLength)
         $Remaining -= $BlockLength
       }
     }
 
-    $ActualDigest = $Hash.GetHashAndReset()
-    if (-not (Test-BinarySequence -Left $ActualDigest -Right $Location.Digest)) {
-      throw "The extracted Inno Setup file does not match its stored $($Location.DigestAlgorithm) digest"
-    }
     $OutputStream.Dispose()
     $OutputStream = $null
+    $DigestMatches = switch ($Location.DigestAlgorithm) {
+      'Adler32' {
+        Import-InnoCallTransform
+        $InputStream = [IO.File]::OpenRead($TemporaryPath)
+        try {
+          [uint32]$ActualValue = [Dumplings.InstallerParsers.InnoCallTransform]::ComputeAdler32($InputStream)
+        } finally { $InputStream.Dispose() }
+        $ActualValue -eq [BitConverter]::ToUInt32($Location.Digest, 0)
+      }
+      'CRC32' {
+        (Get-BinaryCrc32 -Path $TemporaryPath -MaximumBytes $Location.OriginalSize) -eq [BitConverter]::ToUInt32($Location.Digest, 0)
+      }
+      default {
+        $ActualDigest = $Hash.GetHashAndReset()
+        Test-BinarySequence -Left $ActualDigest -Right $Location.Digest
+      }
+    }
+    if (-not $DigestMatches) {
+      throw "The extracted Inno Setup file does not match its stored $($Location.DigestAlgorithm) digest"
+    }
     [System.IO.File]::Move($TemporaryPath, $OutputPath, $true)
     return Get-Item -LiteralPath $OutputPath -Force
   } finally {
@@ -3332,121 +4847,10 @@ function Write-InnoFilePayload {
     if ($Decoder) { $Decoder.Dispose() }
     if ($ChunkRange) { $ChunkRange.Dispose() }
     if ($Buffer) { [System.Buffers.ArrayPool[byte]]::Shared.Return($Buffer, $false) }
-    $InstallerStream.Dispose()
     if (Test-Path -LiteralPath $TemporaryPath) { Remove-Item -LiteralPath $TemporaryPath -Force }
   }
 }
 
-function Get-InnoVersion5FileBytes {
-  <#
-  .SYNOPSIS
-    Extract a single file payload from an ANSI Inno Setup 5.x installer without executing it
-  .PARAMETER Path
-    The path to the installer
-  .PARAMETER Offset1
-    The setup data offset from the loader offset table
-  .PARAMETER Location
-    The parsed file location entry
-  .PARAMETER VersionNumber
-    The numeric Inno Setup version
-  #>
-  [OutputType([byte[]])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The path to the installer')]
-    [string]$Path,
-
-    [Parameter(Mandatory, HelpMessage = 'The setup data offset from the loader offset table')]
-    [long]$Offset1,
-
-    [Parameter(Mandatory, HelpMessage = 'The parsed file location entry')]
-    [pscustomobject]$Location,
-
-    [Parameter(Mandatory, HelpMessage = 'The numeric Inno Setup version')]
-    [int]$VersionNumber
-  )
-
-  if ($Location.Flags.ChunkEncrypted) { throw 'Encrypted Inno Setup file chunks are not supported' }
-
-  $Stream = [System.IO.File]::OpenRead((Get-Item -Path $Path -Force).FullName)
-  $Reader = [System.IO.BinaryReader]::new($Stream)
-
-  try {
-    # Offset1 points at the setup data stream. StartOffset is chunk-relative within that stream.
-    $Stream.Seek($Offset1 + $Location.StartOffset, 'Begin') | Out-Null
-    $ChunkMagic = [System.Text.Encoding]::ASCII.GetString($Reader.ReadBytes(4))
-    if ($ChunkMagic -ne $Script:INNO_CHUNK_MAGIC) { throw 'The Inno Setup chunk marker is invalid' }
-
-    $ChunkBytes = $Reader.ReadBytes([int]$Location.ChunkCompressedSize)
-    if ($ChunkBytes.Length -ne $Location.ChunkCompressedSize) { throw 'The Inno Setup file chunk is truncated' }
-
-    $ChunkCandidates = [System.Collections.Generic.List[object]]::new()
-
-    if ($Location.Flags.ChunkCompressed) {
-      foreach ($CompressionCandidate in @(
-          @{ Name = 'LZMA'; Expand = { param($Bytes) Expand-InnoLzmaBytes -Bytes $Bytes } },
-          @{ Name = 'LZMA2'; Expand = { param($Bytes) Expand-InnoLzma2Bytes -Bytes $Bytes } }
-        )) {
-        try {
-          $ChunkCandidates.Add([pscustomobject]@{
-              Name  = $CompressionCandidate.Name
-              Bytes = & $CompressionCandidate.Expand $ChunkBytes
-            })
-        } catch {
-        }
-      }
-    } else {
-      $ChunkCandidates.Add([pscustomobject]@{
-          Name  = 'Stored'
-          Bytes = $ChunkBytes
-        })
-    }
-
-    if (-not $ChunkCandidates) {
-      throw 'The Inno Setup file chunk could not be decompressed with a supported method'
-    }
-
-    $CandidateFailures = [System.Collections.Generic.List[string]]::new()
-
-    foreach ($ChunkCandidate in $ChunkCandidates) {
-      if ($Location.ChunkSuboffset -lt 0 -or $Location.ChunkSuboffset + $Location.OriginalSize -gt $ChunkCandidate.Bytes.Length) {
-        $CandidateFailures.Add("$($ChunkCandidate.Name): the Inno Setup file chunk metadata is invalid")
-        continue
-      }
-
-      $RawBytes = [byte[]]::new([int]$Location.OriginalSize)
-      [Buffer]::BlockCopy($ChunkCandidate.Bytes, [int]$Location.ChunkSuboffset, $RawBytes, 0, $RawBytes.Length)
-      $FileCandidates = [System.Collections.Generic.List[object]]::new()
-
-      if ($Location.Flags.CallInstructionOptimized) {
-        $DecodedBytes = [byte[]]$RawBytes.Clone()
-        if ($VersionNumber -ge 5309) {
-          Convert-InnoCallInstructions5309 -Bytes $DecodedBytes
-        } else {
-          Convert-InnoCallInstructions -Bytes $DecodedBytes
-        }
-        $FileCandidates.Add([pscustomobject]@{ Name = "$($ChunkCandidate.Name)/Decoded"; Bytes = $DecodedBytes })
-      }
-      $FileCandidates.Add([pscustomobject]@{ Name = "$($ChunkCandidate.Name)/Raw"; Bytes = $RawBytes })
-
-      foreach ($FileCandidate in $FileCandidates) {
-        if ($Location.Sha1.Length -eq 20) {
-          $ActualSha1 = [System.Security.Cryptography.SHA1]::HashData($FileCandidate.Bytes)
-          if ([System.Linq.Enumerable]::SequenceEqual($ActualSha1, $Location.Sha1)) {
-            return , $FileCandidate.Bytes
-          }
-          $CandidateFailures.Add("$($FileCandidate.Name): SHA1 digest mismatch")
-        } else {
-          return , $FileCandidate.Bytes
-        }
-      }
-    }
-
-    throw "The extracted Inno Setup file does not match the stored SHA1 digest. Tried: $($CandidateFailures -join '; ')"
-  } finally {
-    $Reader.Close()
-    $Stream.Close()
-  }
-}
 
 function Read-UnsupportedArchitecturesFromInno {
   <#
@@ -3524,6 +4928,8 @@ function Expand-InnoInstaller {
     Behavior when an output path already exists or multiple file entries resolve to the same path.
   .PARAMETER MaximumExpandedBytes
     Maximum aggregate bytes written, including aliases that share one payload location.
+  .PARAMETER DiskSourcePath
+    Optional directories or explicit setup-*.bin files used for external multi-disk media. The setup executable directory is searched automatically.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -3543,7 +4949,10 @@ function Expand-InnoInstaller {
     [string]$CollisionAction = 'Prompt',
 
     [ValidateRange(1, [long]::MaxValue)]
-    [long]$MaximumExpandedBytes = 17179869184
+    [long]$MaximumExpandedBytes = 17179869184,
+
+    [Parameter(HelpMessage = 'Directories or explicit files containing external Inno Setup disk slices')]
+    [string[]]$DiskSourcePath
   )
 
   process {
@@ -3556,44 +4965,34 @@ function Expand-InnoInstaller {
 
     $OffsetTable = Get-InnoOffsetTable -Path $InstallerPath
 
-    $FileStream = [System.IO.File]::OpenRead($InstallerPath)
-    $Reader = [System.IO.BinaryReader]::new($FileStream)
-    try {
-      $Reader.BaseStream.Seek($OffsetTable.Offset0, 'Begin') | Out-Null
-      $SignatureBytes = $Reader.ReadBytes($Script:INNO_SETUP_ID_SIZE)
-      $Signature = [System.Text.Encoding]::ASCII.GetString($SignatureBytes).Trim([char]0)
-    } finally {
-      $Reader.Close()
-      $FileStream.Close()
+    $SignatureInfo = Get-InnoSignatureInfo -Path $InstallerPath -OffsetTable $OffsetTable
+    $Layout = Get-InnoLayout -SignatureInfo $SignatureInfo -LoaderRoute $OffsetTable.LoaderRoute
+    if ($Layout.SupportStatus -ne 'Supported') {
+      throw "The Inno edition '$($Layout.Edition)' is identified but its record layout is not supported"
     }
-
-    $SignatureMatch = [regex]::Match($Signature, $Script:INNO_SIGNATURE_PATTERN)
-    if (-not $SignatureMatch.Success) { throw 'The file is not a supported Inno Setup installer' }
-
-    $VersionNumber = Get-InnoVersionNumber -Version $SignatureMatch.Groups[1].Value
-    $Layout = Get-InnoLayout -VersionNumber $VersionNumber -UnicodeVariant ([bool]$SignatureMatch.Groups[2].Success)
 
     # Parse the first metadata block once to obtain counts, compression method,
     # encryption state, and the exact versioned file-entry layout.
-    $HeaderBlockInfo = Get-InnoHeaderBlockInfo -Path $InstallerPath -Offset0 $OffsetTable.Offset0 -Layout $Layout
+    $ParsedLayout = Resolve-InnoParsedLayout -Path $InstallerPath -OffsetTable $OffsetTable -Layout $Layout
+    $Layout = $ParsedLayout.Layout
+    $HeaderBlockInfo = $ParsedLayout.HeaderBlockInfo
     if ($HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Files') {
       throw 'The Inno Setup payload files are encrypted and require the setup password'
     }
-    $Header = Get-InnoExtractionHeader -Bytes $HeaderBlockInfo.Bytes -Layout $Layout
+    $Header = $ParsedLayout.ExtractionHeader
     $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBlockInfo.Bytes -Layout $Layout
     if ($Header.Counts.NumFileLocationEntries -le 0) { throw 'The Inno Setup installer does not contain embedded file locations' }
-    try {
-      $FileEntries = @(Get-InnoFileEntries -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Count $Header.Counts.NumFileEntries `
-          -FileLocationCount $Header.Counts.NumFileLocationEntries -SearchOffset $Header.SearchOffset)
-    } catch {
-      # A few legacy/custom 5.x compilers mix entry layouts that cannot prove a
-      # complete table. Preserve the established exact-name path for those
-      # installers, but never use it to satisfy wildcard or all-file extraction.
-      if ($Name.IndexOfAny([char[]]'*?[') -ge 0) { throw }
+    if ($Layout.InternalStructureVersion -lt 5303 -and $Name.IndexOfAny([char[]]'*?[') -lt 0) {
+      # Exact selection can use the serialized path as a bounded index and
+      # validate the complete surrounding record. This avoids traversing every
+      # unrelated historical table when the caller requests one known payload.
       $FileEntries = @(
         Find-InnoFileEntry -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Name $Name `
-          -FileLocationCount $Header.Counts.NumFileLocationEntries -Language $Language
+          -FileLocationCount $Header.Counts.NumFileLocationEntries -SearchOffset $Header.SearchOffset -Language $Language
       )
+    } else {
+      $FileEntries = @(Get-InnoFileEntries -Bytes $HeaderBlockInfo.Bytes -Layout $Layout -Count $Header.Counts.NumFileEntries `
+          -FileLocationCount $Header.Counts.NumFileLocationEntries -SearchOffset $Header.SearchOffset)
     }
     $SelectedEntries = [System.Collections.Generic.List[object]]::new()
     foreach ($Entry in $FileEntries) {
@@ -3618,9 +5017,7 @@ function Expand-InnoInstaller {
     $FileStream = [System.IO.File]::OpenRead($InstallerPath)
     $Reader = [System.IO.BinaryReader]::new($FileStream)
     try {
-      $LocationBlockHeader = Test-InnoCompressedBlockHeader -Reader $Reader -Offset $HeaderBlockInfo.NextOffset -UsesInt64BlockHeader $Layout.UsesInt64BlockHeader -FileLength $FileStream.Length
-      if (-not $LocationBlockHeader) { throw 'The Inno Setup file location block could not be located' }
-      $LocationBlockInfo = Read-InnoCompressedBlock -Reader $Reader -BlockHeader $LocationBlockHeader
+      $LocationBlockInfo = Read-InnoMetadataBlock -Reader $Reader -Offset $HeaderBlockInfo.NextOffset -Layout $Layout
     } finally {
       $Reader.Close()
       $FileStream.Close()
@@ -3677,9 +5074,14 @@ function Expand-InnoInstaller {
         }
         $File = Get-Item -LiteralPath $Target.Path -Force
       } else {
+        $CompressionMethod = if ([string]::IsNullOrWhiteSpace($HeaderFixedData.CompressMethod)) {
+          Get-InnoPayloadCompressionMethod -Path $InstallerPath -Offset1 $OffsetTable.Offset1 -Location $Location -Layout $Layout `
+            -SlicesPerDisk $HeaderFixedData.SlicesPerDisk -DiskSourcePath $DiskSourcePath
+        } else { $HeaderFixedData.CompressMethod }
         $File = Write-InnoFilePayload -Path $InstallerPath -Offset1 $OffsetTable.Offset1 -Location $Location `
-          -CompressionMethod $HeaderFixedData.CompressMethod -OutputPath $Target.Path `
-          -LegacyCallInstructionTransform:$Layout.UsesLegacyCallInstructionTransform
+          -CompressionMethod $CompressionMethod -OutputPath $Target.Path -PayloadRoute $Layout.PayloadRoute `
+          -CallTransformRoute $Layout.CallTransformRoute -InternalStructureVersion $Layout.InternalStructureVersion `
+          -SlicesPerDisk $HeaderFixedData.SlicesPerDisk -DiskSourcePath $DiskSourcePath
         $LocationOutput[$Entry.LocationEntry] = $File.FullName
       }
       $ExpandedBytes += $File.Length
@@ -3689,4 +5091,4 @@ function Expand-InnoInstaller {
   }
 }
 
-Export-ModuleMember -Function Get-InnoInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Read-UnsupportedArchitecturesFromInno, Test-InnoUnsupportedArchitecture, Test-InnoAppsAndFeaturesEntry, Expand-InnoInstaller
+Export-ModuleMember -Function Get-InnoFormatInfo, Get-InnoInfo, Get-InnoPascalScriptInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Read-UnsupportedArchitecturesFromInno, Test-InnoUnsupportedArchitecture, Test-InnoAppsAndFeaturesEntry, Expand-InnoInstaller

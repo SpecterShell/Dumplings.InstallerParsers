@@ -77,7 +77,7 @@ function Import-NSISBZip2Decoder {
   #>
   if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.NSIS.NsisBZip2Stream').Type) { return }
 
-  $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Assets\NsisBZip2Stream.cs'
+  $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Assets\Source\NSIS\NsisBZip2Stream.cs'
   $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.NSIS.NsisBZip2Stream'
 }
 

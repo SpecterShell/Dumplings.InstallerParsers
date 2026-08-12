@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Format sources: https://github.com/CybercentreCanada/sfextract, https://github.com/Puyodead1/SFUnpacker, https://codeberg.org/CYBERDEV/defactory, and https://github.com/madler/zlib
 # Setup Factory 7-9 static parser. Format details are derived from sfextract
-# (MIT) and SFUnpacker (LGPL-3.0-or-later); see THIRD-PARTY-NOTICES.md.
+# (MIT) and SFUnpacker (LGPL-3.0-or-later); see Assets/THIRD-PARTY-NOTICES.md.
 #
 # Binary structure consumed by this parser (overlay-relative, LE integers):
 #
@@ -120,7 +120,7 @@ function Expand-SetupFactoryCompressedBytes {
       # Setup Factory 7 can use PKWARE implode. Load the small bounded decoder only when its
       # dictionary/literal property pair is structurally valid.
       if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-  $DecoderSource = Join-Path $PSScriptRoot '..\..\Assets\PkwareBlast.cs'
+  $DecoderSource = Join-Path $PSScriptRoot '..\..\Assets\Source\SetupFactory\PkwareBlast.cs'
         if (-not (Test-Path -LiteralPath $DecoderSource)) { throw "The PKWARE decoder source is missing: $DecoderSource" }
         Add-Type -Path $DecoderSource
       }

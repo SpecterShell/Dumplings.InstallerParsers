@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param (
   [Parameter(Mandatory, HelpMessage = 'The installer parser action to invoke')]
-  [ValidateSet('NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
+  [ValidateSet('NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
   [string]$Action,
 
   [Parameter(HelpMessage = 'The path to the installer')]
@@ -34,8 +34,20 @@ param (
   [ValidateSet('user', 'machine')]
   [string]$Scope,
 
+  [Parameter(HelpMessage = 'Directories or explicit files containing external Inno Setup disk slices')]
+  [string[]]$DiskSourcePath,
+
   [Parameter(HelpMessage = 'The maximum number of bytes written while expanding an installer')]
-  [long]$MaximumExpandedBytes
+  [long]$MaximumExpandedBytes,
+
+  [Parameter(HelpMessage = 'Include textual disassembly in supported bytecode-analysis actions')]
+  [switch]$IncludeDisassembly,
+
+  [Parameter(HelpMessage = 'Include detailed Pascal Script analysis in Inno metadata output')]
+  [switch]$IncludePascalScriptAnalysis,
+
+  [Parameter(HelpMessage = 'Maximum characters retained from textual bytecode disassembly')]
+  [int]$MaximumDisassemblyCharacters
 )
 
 Set-StrictMode -Version 3.0
@@ -86,7 +98,23 @@ try {
     }
     'Inno.GetInfo' {
       Import-Module (Join-Path $InstallerPath 'Inno.psm1') -Force
-      Get-InnoInfo -Path $Path
+      $Arguments = @{
+        Path                        = $Path
+        IncludePascalScriptAnalysis = $IncludePascalScriptAnalysis
+        IncludeDisassembly          = $IncludeDisassembly
+      }
+      if ($MaximumDisassemblyCharacters -gt 0) { $Arguments.MaximumDisassemblyCharacters = $MaximumDisassemblyCharacters }
+      Get-InnoInfo @Arguments
+    }
+    'Inno.GetFormatInfo' {
+      Import-Module (Join-Path $InstallerPath 'Inno.psm1') -Force
+      Get-InnoFormatInfo -Path $Path
+    }
+    'Inno.GetPascalScriptInfo' {
+      Import-Module (Join-Path $InstallerPath 'Inno.psm1') -Force
+      $Arguments = @{ Path = $Path; IncludeDisassembly = $IncludeDisassembly }
+      if ($MaximumDisassemblyCharacters -gt 0) { $Arguments.MaximumDisassemblyCharacters = $MaximumDisassemblyCharacters }
+      Get-InnoPascalScriptInfo @Arguments
     }
     'Inno.Expand' {
       Import-Module (Join-Path $InstallerPath 'Inno.psm1') -Force
@@ -97,6 +125,7 @@ try {
       }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if (-not [string]::IsNullOrWhiteSpace($Language)) { $ExpandArguments.Language = $Language }
+      if ($DiskSourcePath) { $ExpandArguments.DiskSourcePath = $DiskSourcePath }
       if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
 
       @(Expand-InnoInstaller @ExpandArguments).ForEach({ $_.FullName })

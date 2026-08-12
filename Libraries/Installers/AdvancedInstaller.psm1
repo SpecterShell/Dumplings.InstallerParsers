@@ -30,27 +30,6 @@ $ADVANCED_INSTALLER_FILE_ENTRY_SIZE = 24
 $ADVANCED_INSTALLER_XOR_HEADER_SIZE = 512
 $ADVANCED_INSTALLER_MAXIMUM_CONFIGURATION_SIZE = 4194304
 
-function Get-AdvancedInstallerAssembly {
-  <#
-  .SYNOPSIS
-    Get a managed compression assembly used for static Advanced Installer extraction
-  .PARAMETER Name
-    The assembly file name under Modules\InstallerParsers\Assets
-  #>
-  [OutputType([System.IO.FileInfo])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The assembly file name under Modules\InstallerParsers\Assets')]
-    [string]$Name
-  )
-
-$AssetsPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Assets'
-  if (Test-Path -Path ($Path = Join-Path -Path $AssetsPath -ChildPath $Name)) {
-    return Get-Item -Path $Path -Force
-  } else {
-    throw "The $Name assembly could not be found"
-  }
-}
-
 function Import-AdvancedInstallerAssembly {
   <#
   .SYNOPSIS
