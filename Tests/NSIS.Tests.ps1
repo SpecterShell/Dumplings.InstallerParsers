@@ -163,6 +163,198 @@ Describe 'NSIS parser' {
     $Result.InvalidCandidate | Should -BeNullOrEmpty
   }
 
+  It 'Should route compact NSISBI 3.12 external and split-file header fields' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Compact = Get-NSISFirstHeaderFlagInfo -Flags ([uint32]0x70) -DataBlockLow 3 -DataBlockHigh 64
+      $Legacy = Get-NSISFirstHeaderFlagInfo -Flags ([uint32]0x1F0) -DataBlockLow 0 -DataBlockHigh 0
+      $Pre304 = Get-NSISFirstHeaderFlagInfo -Flags ([uint32]0) -DataBlockLow 31 -DataBlockHigh ([uint32]2147483648) -Pre304
+      [pscustomobject]@{
+        CompactRoute = $Compact.FlagRoute
+        CompactCount = $Compact.ExternalFileCount
+        CompactSize  = $Compact.ExternalSegmentSize
+        CompactStub  = $Compact.IsStubInstaller
+        LegacyRoute  = $Legacy.FlagRoute
+        LegacyStub   = $Legacy.IsStubInstaller
+        Pre304Route  = $Pre304.FlagRoute
+        Pre304Length = $Pre304.DataBlockLength
+        Pre304File   = $Pre304.HasExternalFile
+      }
+    }
+
+    $Result.CompactRoute | Should -Be 'nsisbi-compact-3.12'
+    $Result.CompactCount | Should -Be 3
+    $Result.CompactSize | Should -Be 64MB
+    $Result.CompactStub | Should -BeTrue
+    $Result.LegacyRoute | Should -Be 'nsisbi-legacy'
+    $Result.LegacyStub | Should -BeTrue
+    $Result.Pre304Route | Should -Be 'nsisbi-pre-3.04.1'
+    $Result.Pre304Length | Should -Be 31
+    $Result.Pre304File | Should -BeTrue
+  }
+
+  It 'Should normalize NSISBI external payload opcodes without losing their source' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      [pscustomobject]@{
+        File     = ConvertFrom-NSISBiOpcode -Opcode 20
+        StubFile = ConvertFrom-NSISBiOpcode -Opcode 21
+        Verify   = ConvertFrom-NSISBiOpcode -Opcode 22
+        Delete   = ConvertFrom-NSISBiOpcode -Opcode 23
+      }
+    }
+
+    $Result.File | Should -Be 20
+    $Result.StubFile | Should -Be 1000
+    $Result.Verify | Should -Be 1001
+    $Result.Delete | Should -Be 21
+  }
+
+  It 'Should decode bounded dictionary-backed LZ4 streams used by NSISBI MTW' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      Import-NSISLz4Decoder
+      $First = [Text.Encoding]::ASCII.GetBytes('abcdefghijklmnop')
+      $Expected = [Text.Encoding]::ASCII.GetBytes('abcdefghijklmnopabcdefghi12345')
+      $Encoded = [Collections.Generic.List[byte]]::new()
+
+      # First inner block: 16 literals, followed by the uint16 stream length.
+      $Encoded.Add(18)
+      $Encoded.Add(0)
+      $Encoded.Add(0xF0)
+      $Encoded.Add(1)
+      $Encoded.AddRange($First)
+
+      # Second block references nine bytes from the previous block's dictionary
+      # and ends with five literals. A zero uint16 terminates the LZ4 stream.
+      $Encoded.Add(9)
+      $Encoded.Add(0)
+      $Encoded.Add(0x05)
+      $Encoded.Add(0x10)
+      $Encoded.Add(0)
+      $Encoded.Add(0x50)
+      $Encoded.AddRange([Text.Encoding]::ASCII.GetBytes('12345'))
+      $Encoded.Add(0)
+      $Encoded.Add(0)
+
+      $EncodedBytes = $Encoded.ToArray()
+      $Decoded = [Dumplings.InstallerParsers.NSIS.NsisLz4BlockDecoder]::Decode($EncodedBytes, $Expected.Length)
+      $Truncated = [byte[]]$EncodedBytes[0..($EncodedBytes.Length - 2)]
+      $TruncatedError = {
+        [Dumplings.InstallerParsers.NSIS.NsisLz4BlockDecoder]::Decode($Truncated, $Expected.Length)
+      } | Should -Throw -PassThru
+      [pscustomobject]@{
+        Matches        = [Linq.Enumerable]::SequenceEqual([byte[]]$Expected, [byte[]]$Decoded)
+        TruncatedError = [string]$TruncatedError
+      }
+    }
+
+    $Result.Matches | Should -BeTrue
+    $Result.TruncatedError | Should -Match 'end marker is missing|length is truncated'
+  }
+
+  It 'Should read NSISBI split sidecars as one seekable logical stream' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $SegmentDirectory = Join-Path $Script:FixtureDirectory 'nsisbi-segments'
+    Remove-Item -LiteralPath $SegmentDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    $null = New-Item -Path $SegmentDirectory -ItemType Directory -Force
+    try {
+      $Result = & $Module {
+        param($SegmentDirectory)
+        $First = Join-Path $SegmentDirectory 'setup1.bin'
+        $Second = Join-Path $SegmentDirectory 'setup2.bin'
+        [IO.File]::WriteAllBytes($First, [Text.Encoding]::ASCII.GetBytes('first-'))
+        [IO.File]::WriteAllBytes($Second, [Text.Encoding]::ASCII.GetBytes('second'))
+        $Stream = New-NSISExternalDataStream -Path @($First, $Second)
+        try {
+          $Stream.Position = 4
+          $Bytes = [byte[]]::new(8)
+          $Read = $Stream.Read($Bytes, 0, $Bytes.Length)
+          [pscustomobject]@{ Text = [Text.Encoding]::ASCII.GetString($Bytes, 0, $Read); Length = $Stream.Length }
+        } finally { $Stream.Dispose() }
+      } $SegmentDirectory
+
+      $Result.Text | Should -Be 't-second'
+      $Result.Length | Should -Be 12
+    } finally {
+      Remove-Item -LiteralPath $SegmentDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should honor an explicit ANSI source code page without using host defaults' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Encoding = Get-NSISAnsiEncoding -LanguageId 1041 -CodePage 932
+      [pscustomobject]@{ CodePage = $Encoding.CodePage; Text = $Encoding.GetString([byte[]](0x83, 0x65, 0x83, 0x58, 0x83, 0x67)) }
+    }
+
+    $Result.CodePage | Should -Be 932
+    $Result.Text | Should -Be 'テスト'
+  }
+
+  It 'Should preserve multibyte ANSI literals in symbolic extraction paths' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      [Text.Encoding]::RegisterProvider([Text.CodePagesEncodingProvider]::Instance)
+      $Encoding = [Text.Encoding]::GetEncoding(932)
+      $Literal = $Encoding.GetBytes('テスト.exe')
+      $Strings = [byte[]]::new($Literal.Length + 1)
+      [Array]::Copy($Literal, $Strings, $Literal.Length)
+      $State = [pscustomobject]@{
+        StringsBlock = $Strings
+        AnsiEncoding = $Encoding
+        VersionInfo  = [pscustomobject]@{ Unicode = $false; IsV3 = $true; Type = 'NSIS3'; VariableRoute = 'current' }
+      }
+      Get-NSISSymbolicString -State $State -RelativeOffset 0
+    }
+
+    $Result | Should -Be 'テスト.exe'
+  }
+
+  It 'Should extract non-solid NSISBI sidecar records and enforce their CRC32' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Directory = Join-Path $Script:FixtureDirectory 'nsisbi-external-extraction'
+    Remove-Item -LiteralPath $Directory -Recurse -Force -ErrorAction SilentlyContinue
+    $null = New-Item -Path $Directory -ItemType Directory -Force
+    try {
+      $Result = & $Module {
+        param($Directory)
+        $Content = [Text.Encoding]::UTF8.GetBytes('external NSISBI payload')
+        $Record = [byte[]]::new(4 + $Content.Length)
+        [Array]::Copy([BitConverter]::GetBytes([uint32]$Content.Length), $Record, 4)
+        [Array]::Copy($Content, 0, $Record, 4, $Content.Length)
+        $HeaderData = [pscustomobject]@{ PackedSizeWidth = 4; Compression = 'Stored'; PayloadOffset = 0; CompressedHeaderSize = 0 }
+        $OutputPath = Join-Path $Directory 'payload.bin'
+        $Payload = [pscustomobject]@{
+          DataOffset = [uint64]0; SourcePath = 'payload.bin'; OutputPath = $OutputPath
+          TimeLow = [uint32]0; TimeHigh = [uint32]0; Crc32 = [uint32](Get-BinaryCrc32 -Bytes $Content)
+        }
+        $Stream = [IO.MemoryStream]::new($Record, $false)
+        try { $Files = Expand-NSISNonSolidPayloads -Stream $Stream -HeaderData $HeaderData -Payload @($Payload) -MaximumExpandedBytes 1MB -DataBlockOffset 0 -DataBlockLength $Record.Length }
+        finally { $Stream.Dispose() }
+
+        $BadPath = Join-Path $Directory 'bad.bin'
+        $Payload.OutputPath = $BadPath
+        $Payload.Crc32 = [uint32]($Payload.Crc32 -bxor 1)
+        $BadStream = [IO.MemoryStream]::new($Record, $false)
+        try { $ErrorText = { Expand-NSISNonSolidPayloads -Stream $BadStream -HeaderData $HeaderData -Payload @($Payload) -MaximumExpandedBytes 1MB -DataBlockOffset 0 -DataBlockLength $Record.Length } | Should -Throw -PassThru }
+        finally { $BadStream.Dispose() }
+
+        [pscustomobject]@{
+          Text          = [IO.File]::ReadAllText($Files[0].FullName)
+          BadFileExists = Test-Path -LiteralPath $BadPath
+          ErrorText     = [string]$ErrorText
+        }
+      } $Directory
+
+      $Result.Text | Should -Be 'external NSISBI payload'
+      $Result.BadFileExists | Should -BeFalse
+      $Result.ErrorText | Should -Match 'CRC32 does not match'
+    } finally {
+      Remove-Item -LiteralPath $Directory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should decode independently compressed NSISBI multithread-wrapper records' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -693,19 +885,888 @@ Describe 'NSIS parser' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
       [pscustomobject]@{
-        LogOpcode      = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_SECTION_SET -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $true
-        ShiftedSection = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_SECTION_SET + 1) -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $true
-        ParkFileWrite  = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_FILE_SEEK -Type 'Park1' -Unicode $true -LogCmdIsEnabled $false
-        RegEnum        = Get-NSISNormalizedOpcode -Opcode 53 -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $false
-        NsisBiWriteReg = ConvertFrom-NSISBiOpcode -Opcode 53
+        LogOpcode        = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_SECTION_SET -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $true
+        ShiftedSection   = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_SECTION_SET + 1) -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $true
+        ParkFileWrite    = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_FILE_SEEK -Type 'Park1' -Unicode $true -LogCmdIsEnabled $false
+        Park2FontVersion = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_REGISTER_DLL -Type 'Park2' -Unicode $true -LogCmdIsEnabled $false
+        Park3FontName    = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_REGISTER_DLL + 1) -Type 'Park3' -Unicode $true -LogCmdIsEnabled $false
+        RegEnum          = Get-NSISNormalizedOpcode -Opcode 53 -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $false
+        NsisBiWriteReg   = ConvertFrom-NSISBiOpcode -Opcode 53
       }
     }
 
     $Result.LogOpcode | Should -Be 70
     $Result.ShiftedSection | Should -Be 63
     $Result.ParkFileWrite | Should -Be 68
+    $Result.Park2FontVersion | Should -Be 72
+    $Result.Park3FontName | Should -Be 73
     $Result.RegEnum | Should -Be 53
     $Result.NsisBiWriteReg | Should -Be 51
+  }
+
+  It 'Should reject tied command layouts only when their used opcode meanings differ' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      function New-TestCommandEntry([uint32]$Opcode) {
+        [pscustomobject]@{
+          LayoutOpcode = $Opcode
+          RawOpcode    = $Opcode
+          Raw          = [uint32[]]@($Opcode, 0, 0, 0, 0, 0, 0)
+          Values       = [int[]]@([int]$Opcode, 0, 0, 0, 0, 0, 0)
+        }
+      }
+
+      # A NUL-only Unicode string table provides no generation control codes.
+      # Opcode 10 has the same meaning in every candidate, while opcode 44 is
+      # RegisterDLL in official/Park1 and a font query in later Park layouts.
+      $Strings = [byte[]](0, 0)
+      $Equivalent = Get-NSISVersionInfo -StringsBlock $Strings -Entries @((New-TestCommandEntry 10))
+      $Different = Get-NSISVersionInfo -StringsBlock $Strings -Entries @((New-TestCommandEntry 44))
+      [pscustomobject]@{
+        EquivalentAmbiguity  = $Equivalent.HasSemanticAmbiguity
+        EquivalentConfidence = $Equivalent.DetectionConfidence
+        DifferentAmbiguity   = $Different.HasSemanticAmbiguity
+        DifferentConfidence  = $Different.DetectionConfidence
+        DifferentSignatures  = @($Different.CandidateLayouts.SemanticSignature | Select-Object -Unique).Count
+      }
+    }
+
+    $Result.EquivalentAmbiguity | Should -BeFalse
+    $Result.EquivalentConfidence | Should -Be 'Ambiguous'
+    $Result.DifferentAmbiguity | Should -BeTrue
+    $Result.DifferentConfidence | Should -Be 'UnsupportedAmbiguous'
+    $Result.DifferentSignatures | Should -BeGreaterThan 1
+  }
+
+  It 'Should simulate prior INI and registry writes and decode shortcut records' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $StringBytes = [System.Collections.Generic.List[byte]]::new()
+      $StringBytes.AddRange([byte[]](0, 0))
+      function Add-TestString([string]$Text) {
+        $Offset = [int]($StringBytes.Count / 2)
+        $StringBytes.AddRange([Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+      function New-TestEntry([int]$Opcode, [uint32[]]$Operands) {
+        $Raw = [uint32[]]@($Opcode) + $Operands
+        $Values = [int[]]::new($Raw.Count)
+        for ($Index = 0; $Index -lt $Raw.Count; $Index++) {
+          $Values[$Index] = [BitConverter]::ToInt32([BitConverter]::GetBytes($Raw[$Index]), 0)
+        }
+        [pscustomobject]@{ Opcode = $Opcode; RawOpcode = $Opcode; LayoutOpcode = $Opcode; Raw = $Raw; Values = $Values }
+      }
+
+      $Section = Add-TestString 'Application'
+      $Key = Add-TestString 'Mode'
+      $Value = Add-TestString 'Quiet'
+      $IniFile = Add-TestString '$INSTDIR\unit.ini'
+      $RegistryKey = Add-TestString 'Software\Dumplings\Unit'
+      $IndexZero = Add-TestString '0'
+      $Shortcut = Add-TestString '$DESKTOP\Unit.lnk'
+      $Target = Add-TestString '$INSTDIR\unit.exe'
+      $Arguments = Add-TestString '--open'
+      $Icon = Add-TestString '$INSTDIR\unit.exe'
+      $Comment = Add-TestString 'Unit shortcut'
+      $Hklm = [uint32]$Script:NSIS_REG_ROOT_HKLM
+      $PackedShortcut = [uint32](7 -bor (3 -shl 12) -bor 0x8000 -bor (0x0241 -shl 16))
+
+      $State = [pscustomobject]@{
+        Path                  = 'unit.exe'
+        StringsBlock          = $StringBytes.ToArray()
+        LanguageTable         = $null
+        VersionInfo           = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3'; VariableRoute = 'current' }
+        Variables             = @{}
+        Registry              = @{}
+        IniFiles              = @{}
+        IniWrites             = [System.Collections.Generic.List[object]]::new()
+        CreatedShortcuts      = [System.Collections.Generic.List[object]]::new()
+        HasUnknownControlFlow = $false
+        ConditionalReasons    = [System.Collections.Generic.HashSet[string]]::new()
+        ShellVarContext       = 'HKLM'
+        TargetScope           = 'machine'
+        Metadata              = [ordered]@{ DefaultInstallLocation = $null; RequestedExecutionLevel = 'requireAdministrator'; UnresolvedFields = [string[]]@() }
+      }
+      Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_INSTDIR -Value '$INSTDIR'
+      Set-NSISRegistryValue -State $State -Root 'HKLM' -Key 'Software\Dumplings\Unit' -Name 'DisplayName' -Value 'Unit'
+      Set-NSISRegistryValue -State $State -Root 'HKLM' -Key 'Software\Dumplings\Unit\Child' -Name 'Value' -Value '1'
+
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_WRITE_INI ([uint32[]]@($Section, $Key, $Value, $IniFile, 1, 0)))
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_READ_INI ([uint32[]]@(0, $Section, $Key, $IniFile, 0, 0)))
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_ENUM_REG ([uint32[]]@(1, $Hklm, $RegistryKey, $IndexZero, 0, 0)))
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_ENUM_REG ([uint32[]]@(2, $Hklm, $RegistryKey, $IndexZero, 1, 0)))
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_CREATE_SHORTCUT ([uint32[]]@($Shortcut, $Target, $Arguments, $Icon, $PackedShortcut, $Comment)))
+
+      [pscustomobject]@{
+        IniValue        = $State.Variables[0]
+        EnumeratedValue = $State.Variables[1]
+        EnumeratedChild = $State.Variables[2]
+        IniWrite        = $State.IniWrites[0]
+        Shortcut        = $State.CreatedShortcuts[0]
+      }
+    }
+
+    $Result.IniValue | Should -Be 'Quiet'
+    $Result.EnumeratedValue | Should -Be 'DisplayName'
+    $Result.EnumeratedChild | Should -Be 'Child'
+    $Result.IniWrite.Action | Should -Be 'Write'
+    $Result.IniWrite.File | Should -Be '$INSTDIR\unit.ini'
+    $Result.Shortcut.Path | Should -Be '$DESKTOP\Unit.lnk'
+    $Result.Shortcut.Target | Should -Be '$INSTDIR\unit.exe'
+    $Result.Shortcut.Arguments | Should -Be '--open'
+    $Result.Shortcut.IconIndex | Should -Be 7
+    $Result.Shortcut.ShowCommand | Should -Be 3
+    $Result.Shortcut.HotKey | Should -Be 0x0241
+    $Result.Shortcut.NoWorkingDirectory | Should -BeTrue
+    $Result.Shortcut.WorkingDirectory | Should -BeNullOrEmpty
+    $Result.Shortcut.Comment | Should -Be 'Unit shortcut'
+  }
+
+  It 'Should reproduce environment, registry, and INI read error contracts' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $StringBytes = [System.Collections.Generic.List[byte]]::new()
+      $StringBytes.AddRange([byte[]](0, 0))
+      function Add-TestString([string]$Text) {
+        $Offset = [int]($StringBytes.Count / 2)
+        $StringBytes.AddRange([Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+      function New-TestEntry([int]$Opcode, [uint32[]]$Operands) {
+        $Raw = [uint32[]]@($Opcode) + $Operands
+        $Values = [int[]]::new($Raw.Count)
+        for ($Index = 0; $Index -lt $Raw.Count; $Index++) { $Values[$Index] = [BitConverter]::ToInt32([BitConverter]::GetBytes($Raw[$Index]), 0) }
+        [pscustomobject]@{ Opcode = $Opcode; RawOpcode = $Opcode; LayoutOpcode = $Opcode; Raw = $Raw; Values = $Values }
+      }
+
+      $ReadEnv = Add-TestString '%TEMP%'
+      $ExpandEnv = Add-TestString '%TEMP%\payload;%MISSING%'
+      $RegistryKey = Add-TestString 'Software\Dumplings\Missing'
+      $RegistryName = Add-TestString 'Value'
+      $IniSection = Add-TestString 'Application'
+      $IniKey = Add-TestString 'Mode'
+      $IniFile = Add-TestString '$INSTDIR\missing.ini'
+      $State = [pscustomobject]@{
+        StringsBlock       = $StringBytes.ToArray()
+        LanguageTable      = $null
+        VersionInfo        = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3'; VariableRoute = 'current' }
+        Variables          = @{}
+        Environment        = @{ TEMP = '$TEMP' }
+        UnknownEnvironment = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Registry           = @{}
+        IniFiles           = @{}
+        ExecFlags          = @{}
+        UnknownExecFlags   = [System.Collections.Generic.HashSet[int]]::new()
+        ShellVarContext    = 'HKLM'
+      }
+
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_READ_ENV ([uint32[]]@(0, $ReadEnv, 1, 0, 0, 0)))
+      $ReadEnvValue = $State.Variables[0]
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_READ_ENV ([uint32[]]@(1, $ExpandEnv, 0, 0, 0, 0)))
+      $ExpandEnvValue = $State.Variables[1]
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_READ_REG ([uint32[]]@(2, [uint32]$Script:NSIS_REG_ROOT_HKLM, $RegistryKey, $RegistryName, 0, 0)))
+      $null = Invoke-NSISEntry -State $State -Entry (New-TestEntry $Script:NSIS_OPCODE_READ_INI ([uint32[]]@(3, $IniSection, $IniKey, $IniFile, 0, 0)))
+
+      [pscustomobject]@{
+        ReadEnv      = $ReadEnvValue
+        ExpandEnv    = $ExpandEnvValue
+        MissingNames = [string[]]$State.UnknownEnvironment
+        MissingReg   = $State.Variables[2]
+        MissingIni   = $State.Variables[3]
+        ErrorCount   = $State.ExecFlags[$Script:NSIS_EXEC_FLAG_ERROR]
+      }
+    }
+
+    $Result.ReadEnv | Should -Be '$TEMP'
+    $Result.ExpandEnv | Should -Be '$TEMP\payload;%MISSING%'
+    $Result.MissingNames | Should -Contain 'MISSING'
+    $Result.MissingReg | Should -BeNullOrEmpty
+    $Result.MissingIni | Should -BeNullOrEmpty
+    $Result.ErrorCount | Should -Be 2
+  }
+
+  It 'Should keep target filesystem predicates independent from the parser host' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        FileSystem         = @{}
+        FileSystemComplete = $false
+        Directories        = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Files              = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      }
+      $null = Set-NSISVirtualFileRecord -State $State -Path '%ProgramFiles%\Dumplings\present.dll' -Exists $true -FileVersion '1.2.3.4'
+      $null = Set-NSISVirtualFileRecord -State $State -Path '%ProgramFiles%\Dumplings\absent.dll' -Exists $false
+
+      [pscustomobject]@{
+        Present  = Get-NSISPathExistence -State $State -Path '%ProgramFiles%\Dumplings\present.dll'
+        Absent   = Get-NSISPathExistence -State $State -Path '%ProgramFiles%\Dumplings\absent.dll'
+        Unknown  = Get-NSISPathExistence -State $State -Path '%SystemRoot%\host-dependent.dll'
+        Wildcard = Get-NSISPathExistence -State $State -Path '%ProgramFiles%\Dumplings\*.dll'
+      }
+    }
+
+    $Result.Present | Should -Be 'Present'
+    $Result.Absent | Should -Be 'Absent'
+    $Result.Unknown | Should -Be 'Unknown'
+    $Result.Wildcard | Should -Be 'Present'
+  }
+
+  It 'Should fork unresolved file predicates and merge common registry effects' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' `
+      -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      param($Fixture)
+      $Initialized = Initialize-NSISState -FormatContext (Get-NSISFormatContext -Path $Fixture)
+      $State = $Initialized.State
+      $StringBytes = [Collections.Generic.List[byte]]::new()
+      $StringBytes.AddRange([byte[]](0, 0))
+      function Add-TestString([string]$Text) {
+        $Offset = [int]($StringBytes.Count / 2)
+        $StringBytes.AddRange([Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+      function New-TestEntry([int]$Opcode, [uint32[]]$Operands) {
+        $Raw = [uint32[]]@($Opcode) + $Operands
+        $Values = [int[]]::new($Raw.Count)
+        for ($Index = 0; $Index -lt $Raw.Count; $Index++) { $Values[$Index] = [BitConverter]::ToInt32([BitConverter]::GetBytes($Raw[$Index]), 0) }
+        [pscustomobject]@{ Opcode = $Opcode; RawOpcode = $Opcode; LayoutOpcode = $Opcode; Raw = $Raw; Values = $Values }
+      }
+
+      $Path = Add-TestString '%ProgramFiles%\Dumplings\existing.exe'
+      $Key = Add-TestString 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Dumplings.Branch'
+      $DisplayName = Add-TestString 'DisplayName'
+      $PresentName = Add-TestString 'Present branch'
+      $AbsentName = Add-TestString 'Absent branch'
+      $Publisher = Add-TestString 'Publisher'
+      $PublisherValue = Add-TestString 'Dumplings'
+      $Hklm = [uint32]$Script:NSIS_REG_ROOT_HKLM
+      $WriteType = [uint32]$Script:NSIS_REG_TYPE_STRING
+      $State.StringsBlock = $StringBytes.ToArray()
+      $State.Sections = @()
+      $State.Entries = [object[]]@(
+        (New-TestEntry $Script:NSIS_OPCODE_IF_FILE_EXISTS ([uint32[]]@($Path, 2, 6, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_IF_FILE_EXISTS ([uint32[]]@($Path, 3, 5, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_WRITE_REG ([uint32[]]@($Hklm, $Key, $DisplayName, $PresentName, $WriteType, $WriteType)))
+        (New-TestEntry $Script:NSIS_OPCODE_JUMP ([uint32[]]@(10, 0, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_RETURN ([uint32[]]@(0, 0, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_IF_FILE_EXISTS ([uint32[]]@($Path, 5, 7, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_WRITE_REG ([uint32[]]@($Hklm, $Key, $DisplayName, $AbsentName, $WriteType, $WriteType)))
+        (New-TestEntry $Script:NSIS_OPCODE_JUMP ([uint32[]]@(10, 0, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_RETURN ([uint32[]]@(0, 0, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_WRITE_REG ([uint32[]]@($Hklm, $Key, $Publisher, $PublisherValue, $WriteType, $WriteType)))
+        (New-TestEntry $Script:NSIS_OPCODE_RETURN ([uint32[]]@(0, 0, 0, 0, 0, 0)))
+      )
+
+      $Outcome = Invoke-NSISCodeSegment -State $State -Position 0
+      [pscustomobject]@{
+        Outcome           = $Outcome
+        DisplayWrites     = @($State.RegistryWrites | Where-Object Name -CEQ 'DisplayName')
+        PublisherWrite    = @($State.RegistryWrites | Where-Object Name -CEQ 'Publisher')
+        ProductCode       = $State.Metadata.ProductCode
+        DisplayName       = $State.Metadata.DisplayName
+        Publisher         = $State.Metadata.Publisher
+        ExploredBranches  = $State.ExploredBranchCount
+        TruncatedBranches = $State.TruncatedBranchCount
+        Predicates        = [string[]]$State.BranchPredicates
+      }
+    } $Fixture
+
+    $Result.Outcome | Should -Be 'Return'
+    $Result.DisplayWrites | Should -HaveCount 2
+    $Result.DisplayWrites.Conditional | Should -Not -Contain $false
+    $Result.PublisherWrite | Should -HaveCount 1
+    $Result.PublisherWrite.Conditional | Should -BeFalse
+    $Result.ProductCode | Should -Be 'Dumplings.Branch'
+    $Result.DisplayName | Should -BeNullOrEmpty
+    $Result.Publisher | Should -Be 'Dumplings'
+    $Result.ExploredBranches | Should -Be 1
+    $Result.TruncatedBranches | Should -Be 0
+    $Result.Predicates | Should -HaveCount 1
+  }
+
+  It 'Should preserve divergent branch variables as unknown values' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' `
+      -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      param($Fixture)
+      $State = (Initialize-NSISState -FormatContext (Get-NSISFormatContext -Path $Fixture)).State
+      $Strings = [Collections.Generic.List[byte]]::new()
+      $Strings.AddRange([byte[]](0, 0))
+      function Add-TestString([string]$Text) {
+        $Offset = [int]($Strings.Count / 2)
+        $Strings.AddRange([Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+      function New-TestEntry([int]$Opcode, [uint32[]]$Operands) {
+        $Raw = [uint32[]]@($Opcode) + $Operands
+        $Values = [int[]]::new($Raw.Count)
+        for ($Index = 0; $Index -lt $Raw.Count; $Index++) { $Values[$Index] = [BitConverter]::ToInt32([BitConverter]::GetBytes($Raw[$Index]), 0) }
+        [pscustomobject]@{ Opcode = $Opcode; RawOpcode = $Opcode; LayoutOpcode = $Opcode; Raw = $Raw; Values = $Values }
+      }
+      $TrueOffset = Add-TestString 'true'
+      $FalseOffset = Add-TestString 'false'
+      $State.StringsBlock = $Strings.ToArray()
+      $State.Sections = @()
+      $State.Entries = [object[]]@(
+        (New-TestEntry $Script:NSIS_OPCODE_IF_FLAG ([uint32[]]@(2, 4, $Script:NSIS_EXEC_FLAG_ERROR, [uint32]::MaxValue, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_ASSIGN_VAR ([uint32[]]@(0, $TrueOffset, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_RETURN ([uint32[]]@(0, 0, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_ASSIGN_VAR ([uint32[]]@(0, $FalseOffset, 0, 0, 0, 0)))
+        (New-TestEntry $Script:NSIS_OPCODE_RETURN ([uint32[]]@(0, 0, 0, 0, 0, 0)))
+      )
+      $null = $State.UnknownExecFlags.Add($Script:NSIS_EXEC_FLAG_ERROR)
+      $Outcome = Invoke-NSISCodeSegment -State $State -Position 0
+      [pscustomobject]@{
+        Outcome   = $Outcome
+        IsUnknown = $State.UnknownVariables.Contains(0)
+        Value     = Get-NSISVariableValue -State $State -Index 0
+        Branches  = $State.ExploredBranchCount
+        Warnings  = [string[]]$State.Warnings
+      }
+    } $Fixture
+
+    $Result.Outcome | Should -Be 'Return'
+    $Result.IsUnknown | Should -BeTrue
+    $Result.Value | Should -Be '$_NSIS_UNKNOWN_VAR_0_'
+    $Result.Branches | Should -Be 1
+    $Result.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should bound exponential branch exploration and retain truncation evidence' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' `
+      -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      param($Fixture)
+      $State = (Initialize-NSISState -FormatContext (Get-NSISFormatContext -Path $Fixture)).State
+      $Strings = [Collections.Generic.List[byte]]::new()
+      $Strings.AddRange([byte[]](0, 0))
+      function Add-TestString([string]$Text) {
+        $Offset = [int]($Strings.Count / 2)
+        $Strings.AddRange([Text.Encoding]::Unicode.GetBytes($Text + [char]0))
+        return $Offset
+      }
+      function New-TestEntry([int]$Opcode, [uint32[]]$Operands) {
+        $Raw = [uint32[]]@($Opcode) + $Operands
+        $Values = [int[]]::new($Raw.Count)
+        for ($Index = 0; $Index -lt $Raw.Count; $Index++) { $Values[$Index] = [BitConverter]::ToInt32([BitConverter]::GetBytes($Raw[$Index]), 0) }
+        [pscustomobject]@{ Opcode = $Opcode; RawOpcode = $Opcode; LayoutOpcode = $Opcode; Raw = $Raw; Values = $Values }
+      }
+
+      $Entries = [Collections.Generic.List[object]]::new()
+      for ($Level = 0; $Level -lt 5; $Level++) {
+        $Path = Add-TestString "%ProgramFiles%\Dumplings\predicate-$Level.dat"
+        $FirstBranchAddress = $Entries.Count + 2
+        $SecondBranchAddress = $Entries.Count + 3
+        $JoinAddress = $Entries.Count + 4
+        $Entries.Add((New-TestEntry $Script:NSIS_OPCODE_IF_FILE_EXISTS ([uint32[]]@($Path, $FirstBranchAddress, $SecondBranchAddress, 0, 0, 0))))
+        $Entries.Add((New-TestEntry $Script:NSIS_OPCODE_JUMP ([uint32[]]@($JoinAddress, 0, 0, 0, 0, 0))))
+        $Entries.Add((New-TestEntry $Script:NSIS_OPCODE_JUMP ([uint32[]]@($JoinAddress, 0, 0, 0, 0, 0))))
+      }
+      $Entries.Add((New-TestEntry $Script:NSIS_OPCODE_RETURN ([uint32[]]@(0, 0, 0, 0, 0, 0))))
+      $State.StringsBlock = $Strings.ToArray()
+      $State.Sections = @()
+      $State.Entries = $Entries.ToArray()
+
+      $Outcome = Invoke-NSISCodeSegment -State $State -Position 0
+      [pscustomobject]@{
+        Outcome             = $Outcome
+        ExploredPredicates  = $State.ExploredBranchCount
+        TruncatedBranches   = $State.TruncatedBranchCount
+        HasUnresolvedBranch = $State.Metadata.UnresolvedFields -contains 'ControlFlowBranches'
+        Warnings            = [string[]]$State.Warnings
+      }
+    } $Fixture
+
+    $Result.Outcome | Should -Be 'Return'
+    $Result.ExploredPredicates | Should -Be 5
+    $Result.TruncatedBranches | Should -Be 1
+    $Result.HasUnresolvedBranch | Should -BeTrue
+    $Result.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should parse command-line options and file versions with source-defined operand order' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $StringsBlock = [Text.Encoding]::ASCII.GetBytes("%TEMP%\app.exe`0")
+      $State = [pscustomobject]@{
+        Variables          = @{}
+        StringsBlock       = $StringsBlock
+        LanguageTable      = $null
+        VersionInfo        = [pscustomobject]@{ Unicode = $false; IsV3 = $true; Type = 'NSIS3' }
+        AnsiEncoding       = [Text.Encoding]::ASCII
+        FileSystem         = @{}
+        FileSystemComplete = $true
+        Directories        = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Files              = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        ExecFlags          = @{}
+        UnknownExecFlags   = [System.Collections.Generic.HashSet[int]]::new()
+      }
+      $null = Set-NSISVirtualFileRecord -State $State -Path '%TEMP%\app.exe' -FileVersion '1.2.3.4' -ProductVersion '5.6.7.8'
+      $Entry = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_GET_DLL_VERSION; Values = [int[]]@(43, 0, 1, 0, 0, 0, 0) }
+      Set-NSISFileVersionResult -State $State -Entry $Entry
+
+      [pscustomobject]@{
+        Parameters  = Get-NSISCommandLineParameters -CommandLine '"C:\Program Files\App\setup.exe" /S /D="C:\App Dir"'
+        InstallPath = Get-NSISCommandLineOption -Parameters '/S /D="C:\App Dir"' -Option '/D='
+        HighWord    = $State.Variables[0]
+        LowWord     = $State.Variables[1]
+      }
+    }
+
+    $Result.Parameters | Should -Be '/S /D="C:\App Dir"'
+    $Result.InstallPath | Should -Be 'C:\App Dir'
+    $Result.HighWord | Should -Be '65538'
+    $Result.LowWord | Should -Be '196612'
+  }
+
+  It 'Should emulate bounded virtual file handles and section mutation' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $StringsBlock = [Text.Encoding]::ASCII.GetBytes("%TEMP%\state.txt`0hello`05`0")
+      $State = [pscustomobject]@{
+        Variables          = @{}
+        StringsBlock       = $StringsBlock
+        LanguageTable      = $null
+        VersionInfo        = [pscustomobject]@{ Unicode = $false; IsV3 = $true; Type = 'NSIS3' }
+        AnsiEncoding       = [Text.Encoding]::ASCII
+        FileSystem         = @{}
+        FileSystemComplete = $true
+        Directories        = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Files              = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        FileHandles        = @{}
+        NextFileHandle     = 1
+        FindHandles        = @{}
+        NextFindHandle     = 1
+        ExecFlags          = @{}
+        UnknownExecFlags   = [System.Collections.Generic.HashSet[int]]::new()
+        CurrentInstallType = 0
+        InstallTypeNames   = @{}
+        Sections           = @([pscustomobject]@{ Index = 0; NameOffset = 0; InstallTypes = 1; Flags = 0; CodeOffset = 0; CodeSize = 0; SizeKb = 1 })
+      }
+      $Open = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_FILE_OPEN; Values = [int[]]@(55, 0, 0x40000000, 2, 0, 0, 0) }
+      $Write = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_FILE_WRITE; Values = [int[]]@(56, 0, 17, 0, 0, 0, 0) }
+      $Close = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_FILE_CLOSE; Values = [int[]]@(54, 0, 0, 0, 0, 0, 0) }
+      Invoke-NSISFileOperation -State $State -Entry $Open
+      Invoke-NSISFileOperation -State $State -Entry $Write
+      Invoke-NSISFileOperation -State $State -Entry $Close
+
+      $State.StringsBlock = [Text.Encoding]::ASCII.GetBytes("0`01`01`0")
+      $SectionSet = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_SECTION_SET; Values = [int[]]@(63, 0, 4, -3, 0, 0, 0) }
+      Invoke-NSISSectionOperation -State $State -Entry $SectionSet
+      $SetInstallTypeOne = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_INSTALL_TYPE_SET; Values = [int[]]@(64, 2, 0, 1, 1, 0, 0) }
+      $SetInstallTypeZero = [pscustomobject]@{ Opcode = $Script:NSIS_OPCODE_INSTALL_TYPE_SET; Values = [int[]]@(64, 0, 0, 1, 1, 0, 0) }
+      Invoke-NSISSectionOperation -State $State -Entry $SetInstallTypeOne
+      $SelectedForTypeOne = ($State.Sections[0].Flags -band $Script:NSIS_SECTION_FLAG_SELECTED) -ne 0
+      Invoke-NSISSectionOperation -State $State -Entry $SetInstallTypeZero
+      [pscustomobject]@{
+        Content             = [Text.Encoding]::ASCII.GetString((Get-NSISVirtualFileRecord -State $State -Path '%TEMP%\state.txt').Content)
+        Flags               = $State.Sections[0].Flags
+        SelectedForTypeOne  = $SelectedForTypeOne
+        SelectedForTypeZero = ($State.Sections[0].Flags -band $Script:NSIS_SECTION_FLAG_SELECTED) -ne 0
+      }
+    }
+
+    $Result.Content | Should -Be 'hello'
+    $Result.Flags | Should -Be 1
+    $Result.SelectedForTypeOne | Should -BeFalse
+    $Result.SelectedForTypeZero | Should -BeTrue
+  }
+
+  It 'Should apply source-defined silent MessageBox defaults and arithmetic errors' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        Variables        = @{}
+        StringsBlock     = [Text.Encoding]::ASCII.GetBytes("10`00`0")
+        LanguageTable    = $null
+        VersionInfo      = [pscustomobject]@{ Unicode = $false; IsV3 = $true; Type = 'NSIS3' }
+        AnsiEncoding     = [Text.Encoding]::ASCII
+        ExecFlags        = @{ $Script:NSIS_EXEC_FLAG_SILENT = 1; $Script:NSIS_EXEC_FLAG_ERROR = 0 }
+        LastExecFlags    = @{}
+        UnknownExecFlags = [System.Collections.Generic.HashSet[int]]::new()
+        Stack            = [System.Collections.Generic.List[string]]::new()
+      }
+
+      $MessageBox = [pscustomobject]@{
+        Opcode = $Script:NSIS_OPCODE_MESSAGE_BOX
+        Values = [int[]]@($Script:NSIS_OPCODE_MESSAGE_BOX, (6 -shl 21), 0, 6, 91, 7, 92)
+      }
+      $MessageResult = Invoke-NSISEntry -State $State -Entry $MessageBox
+
+      $DivideByZero = [pscustomobject]@{
+        Opcode = $Script:NSIS_OPCODE_INT_OP
+        Values = [int[]]@($Script:NSIS_OPCODE_INT_OP, 0, 0, 3, 3, 0, 0)
+      }
+      $null = Invoke-NSISEntry -State $State -Entry $DivideByZero
+      $IfErrors = [pscustomobject]@{
+        Opcode = $Script:NSIS_OPCODE_IF_FLAG
+        Values = [int[]]@($Script:NSIS_OPCODE_IF_FLAG, 71, 72, $Script:NSIS_EXEC_FLAG_ERROR, 0, 0, 0)
+      }
+      $ErrorResult = Invoke-NSISEntry -State $State -Entry $IfErrors
+
+      [pscustomobject]@{
+        MessageAddress = $MessageResult.Address
+        DivisionResult = $State.Variables[0]
+        ErrorAddress   = $ErrorResult.Address
+        ErrorAfterTest = $State.ExecFlags[$Script:NSIS_EXEC_FLAG_ERROR]
+      }
+    }
+
+    $Result.MessageAddress | Should -Be 91
+    $Result.DivisionResult | Should -Be '0'
+    $Result.ErrorAddress | Should -Be 71
+    $Result.ErrorAfterTest | Should -Be 0
+  }
+
+  It 'Should resolve every catalogued NSIS edition and serialized-format route' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Profiles = foreach ($Profile in $Script:NSISFormatCatalog.Profiles) {
+        Get-NSISCatalogProfile -Id $Profile.Id
+      }
+      [pscustomobject]@{
+        IsValid        = Test-NSISFormatCatalog
+        ProfileCount   = @($Profiles).Count
+        EditionIds     = @($Profiles.EditionId | Sort-Object -Unique)
+        OpcodeRoutes   = @($Profiles.OpcodeRoute | Sort-Object -Unique)
+        VariableRoutes = @($Profiles.VariableRoute | Sort-Object -Unique)
+      }
+    }
+
+    $Result.IsValid | Should -BeTrue
+    $Result.ProfileCount | Should -Be 10
+    $Result.EditionIds | Should -Be @('nsisbi', 'official', 'park')
+    $Result.OpcodeRoutes | Should -Be @('official', 'park1', 'park2', 'park3')
+    $Result.VariableRoutes | Should -Be @('current', 'legacy-200', 'legacy-225')
+  }
+
+  It 'Should select legacy NSIS variable layouts from exact compiled command evidence' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      # ANSI NSIS 2 represents a variable-only string as 0xFD followed by a
+      # packed 14-bit variable index and a NUL terminator.
+      $Variable27 = [byte[]]@(0xFD, 0x9B, 0x80, 0x00)
+      $Legacy200Entry = [pscustomobject]@{
+        LayoutOpcode = $Script:NSIS_OPCODE_GET_DLG_ITEM
+        Values       = [int[]]@($Script:NSIS_OPCODE_GET_DLG_ITEM, 29, 0, 0, 0, 0, 0)
+      }
+      $Legacy225Entry = [pscustomobject]@{
+        LayoutOpcode = $Script:NSIS_OPCODE_GET_DLG_ITEM
+        Values       = [int[]]@($Script:NSIS_OPCODE_GET_DLG_ITEM, 28, 0, 0, 0, 0, 0)
+      }
+
+      [pscustomobject]@{
+        Legacy200 = (Get-NSISLegacyVariableProfileEvidence -StringsBlock $Variable27 -Entries @($Legacy200Entry)).VariableRoute
+        Legacy225 = (Get-NSISLegacyVariableProfileEvidence -StringsBlock $Variable27 -Entries @($Legacy225Entry)).VariableRoute
+        Current   = (Get-NSISLegacyVariableProfileEvidence -StringsBlock $Variable27 -Entries @()).VariableRoute
+      }
+    }
+
+    $Result.Legacy200 | Should -Be 'legacy-200'
+    $Result.Legacy225 | Should -Be 'legacy-225'
+    $Result.Current | Should -Be 'current'
+  }
+
+  It 'Should report a catalogued NSIS 3 Unicode profile for a real installer' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Result = Get-NSISFormatInfo -Path $Fixture
+
+    $Result.EditionId | Should -Be 'official'
+    $Result.Edition | Should -Be 'Nullsoft Scriptable Install System'
+    $Result.Generation | Should -Be 'NSIS3'
+    $Result.CharacterMode | Should -Be 'Unicode'
+    $Result.CatalogProfileId | Should -Be 'official-nsis3-unicode'
+    $Result.OpcodeRoute | Should -Be 'official'
+    $Result.VariableRoute | Should -Be 'current'
+    $Result.StubArchitecture | Should -Be 'x86'
+    $Result.IsSupported | Should -BeTrue
+  }
+
+  It 'Should verify the stock archive CRC and reject corruption inside its source range' {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSISHistorical'
+    $Fixture = Get-DumplingsTestFixture -Directory $FixtureDirectory -Name 'nsis204.exe' -Uri 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.04/nsis204.exe/download' -Sha256 '967CC080B8CB1D5B750C324805F1687591761E91BE2EAFE1FC71677FF2DF03F3' -UseSourceForgeMetaRefresh
+    $Info = Get-NSISFormatInfo -Path $Fixture
+    $Info.ArchiveCrcStatus | Should -Be 'Valid'
+    $Info.ArchiveCrcVerified | Should -BeTrue
+
+    $CorruptPath = Join-Path $FixtureDirectory 'nsis204-corrupt-crc.exe'
+    Copy-Item -LiteralPath $Fixture -Destination $CorruptPath -Force
+    try {
+      $Stream = [IO.File]::Open($CorruptPath, 'Open', 'ReadWrite', 'None')
+      try {
+        $Stream.Position = 600
+        $Original = $Stream.ReadByte()
+        $Stream.Position = 600
+        $Stream.WriteByte([byte]($Original -bxor 1))
+      } finally { $Stream.Dispose() }
+
+      { Get-NSISFormatInfo -Path $CorruptPath } | Should -Throw '*archive CRC32 does not match*'
+    } finally {
+      Remove-Item -LiteralPath $CorruptPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should route the historical builder installer <Name> through <CatalogProfileId>' -ForEach @(
+    @{
+      Name             = 'nsis203.exe'
+      Url              = 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.03/nsis203.exe/download'
+      Sha256           = 'E92B46158832393C98AC73DFC1CC95B35D453DCB40B7ABFCF1F0FB17B2F1786B'
+      CatalogProfileId = 'official-legacy-200-ansi'
+      EditionId        = 'official'
+      CharacterMode    = 'Ansi'
+      VariableRoute    = 'legacy-200'
+      WarningPattern   = $null
+    }
+    @{
+      Name             = 'nsis-2.25-setup.exe'
+      Url              = 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.25/nsis-2.25-setup.exe/download'
+      Sha256           = 'ED90919C21352BEA6770503826AEEB13D00C3487DF3177E96A5706E27EF47CB7'
+      CatalogProfileId = 'official-legacy-225-ansi'
+      EditionId        = 'official'
+      CharacterMode    = 'Ansi'
+      VariableRoute    = 'legacy-225'
+      WarningPattern   = $null
+    }
+    @{
+      Name             = 'nsis204.exe'
+      Url              = 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.04/nsis204.exe/download'
+      Sha256           = '967CC080B8CB1D5B750C324805F1687591761E91BE2EAFE1FC71677FF2DF03F3'
+      CatalogProfileId = 'official-legacy-225-ansi'
+      EditionId        = 'official'
+      CharacterMode    = 'Ansi'
+      VariableRoute    = 'legacy-225'
+      WarningPattern   = $null
+    }
+    @{
+      Name             = 'nsis-2.26-setup.exe'
+      Url              = 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.26/nsis-2.26-setup.exe/download'
+      Sha256           = 'E7792E303E7DF9EF08D73583F9DE39A6FC78C5A1E8192C8C848542DDB5CC8804'
+      CatalogProfileId = 'official-nsis2-ansi'
+      EditionId        = 'official'
+      CharacterMode    = 'Ansi'
+      VariableRoute    = 'current'
+      WarningPattern   = 'does not contain decisive generation control codes'
+    }
+    @{
+      Name             = 'nsis-2.46-setup.exe'
+      Url              = 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.46/nsis-2.46-setup.exe/download'
+      Sha256           = '69C2AE5C9F2EE45B0626905FAFFAA86D4E2FC0D3E8C118C8BC6899DF68467B32'
+      CatalogProfileId = 'official-nsis2-ansi'
+      EditionId        = 'official'
+      CharacterMode    = 'Ansi'
+      VariableRoute    = 'current'
+      WarningPattern   = 'does not contain decisive generation control codes'
+    }
+    @{
+      Name             = 'nsis-2.51-setup.exe'
+      Url              = 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.51/nsis-2.51-setup.exe/download'
+      Sha256           = '8A4A86BD028793038A4B744281A4DF436948F3D1941ADCB68C07BA6E42FB6165'
+      CatalogProfileId = 'official-nsis2-ansi'
+      EditionId        = 'official'
+      CharacterMode    = 'Ansi'
+      VariableRoute    = 'current'
+      WarningPattern   = 'does not contain decisive generation control codes'
+    }
+    @{
+      Name             = 'nsis-2.33-Unicode-setup.exe'
+      Url              = 'https://sourceforge.net/projects/nsisu/files/nsisu/nsisu-2.33/nsis-2.33-Unicode-setup.exe/download'
+      Sha256           = '403A80CF3CBDF12A5C11A8AFA30BC1C7BA4551080477EC527B43AA043F764E52'
+      CatalogProfileId = 'park-2461-unicode'
+      EditionId        = 'park'
+      CharacterMode    = 'Unicode'
+      VariableRoute    = 'current'
+      WarningPattern   = $null
+    }
+    @{
+      Name             = 'nsis-2.46.2-Unicode-setup.exe'
+      Url              = 'https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/unsis/nsis-2.46.2-Unicode-setup.exe'
+      Sha256           = '8AD0290E8158A6E6078E7E8CD33B0D85936A65312A9DD62E2873D7456ACFCA32'
+      CatalogProfileId = 'park-2462-unicode'
+      EditionId        = 'park'
+      CharacterMode    = 'Unicode'
+      VariableRoute    = 'current'
+      WarningPattern   = $null
+    }
+    @{
+      Name             = 'nsis-2.46.3-Unicode-setup.exe'
+      Url              = 'https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/unsis/nsis-2.46.3-Unicode-setup.exe'
+      Sha256           = '6E660BDCC5E10EF2F4FE9430D367FD083D252728F2BE70ED74407C10515E52A6'
+      CatalogProfileId = 'park-2463-unicode'
+      EditionId        = 'park'
+      CharacterMode    = 'Unicode'
+      VariableRoute    = 'current'
+      WarningPattern   = $null
+    }
+  ) {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSISHistorical'
+    $Fixture = Get-DumplingsTestFixture -Directory $FixtureDirectory -Name $Name -Uri $Url -Sha256 $Sha256 -UseSourceForgeMetaRefresh
+    $Result = Get-NSISFormatInfo -Path $Fixture
+
+    $Result.CatalogProfileId | Should -Be $CatalogProfileId
+    $Result.EditionId | Should -Be $EditionId
+    $Result.CharacterMode | Should -Be $CharacterMode
+    $Result.VariableRoute | Should -Be $VariableRoute
+    $Result.IsSupported | Should -BeTrue
+    if ($WarningPattern) {
+      @($Result.Warnings | Where-Object { $_ -match $WarningPattern }) | Should -Not -BeNullOrEmpty
+    } else {
+      $Result.Warnings | Should -BeNullOrEmpty
+    }
+  }
+
+  It 'Should parse and extract controlled NSISBI 3.03.1 all-in-one and external layouts' {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSISHistorical\NSISBI303'
+    $AioPath = Join-Path $FixtureDirectory 'nsisbi-3.03.1-aio.exe'
+    $ExternalPath = Join-Path $FixtureDirectory 'nsisbi-3.03.1-external.exe'
+    $SidecarPath = Join-Path $FixtureDirectory 'nsisbi-3.03.1-external.nsisbin'
+    if (-not (Test-Path -LiteralPath $AioPath) -or -not (Test-Path -LiteralPath $ExternalPath) -or -not (Test-Path -LiteralPath $SidecarPath)) {
+      Set-ItResult -Skipped -Because 'The controlled NSISBI 3.03.1 fixtures have not been built in the persistent fixture cache.'
+      return
+    }
+
+    (Get-FileHash -LiteralPath $AioPath -Algorithm SHA256).Hash | Should -Be '3DA8A7B47149A05AB3AE95BB2A487617F9F6685D41781156EE0386F23CCE566F'
+    (Get-FileHash -LiteralPath $ExternalPath -Algorithm SHA256).Hash | Should -Be '4B0E26431892E8DA329C560A4004CE75D07CF34A89FDDE0E24A0C763E1B0BE09'
+    (Get-FileHash -LiteralPath $SidecarPath -Algorithm SHA256).Hash | Should -Be 'B427D794256D18E6483FD778BBD5D8DEAE9790ADDF23CE545194ED1ABB6119C4'
+
+    $AioFormat = Get-NSISFormatInfo -Path $AioPath
+    $ExternalFormat = Get-NSISFormatInfo -Path $ExternalPath
+    $AioInfo = Get-NSISInfo -Path $AioPath
+    $ExternalInfo = Get-NSISInfo -Path $ExternalPath
+
+    $AioFormat.FirstHeaderFlagRoute | Should -Be 'nsisbi-pre-3.04.1'
+    $AioFormat.CompressionRoute | Should -Be 'Deflate'
+    $AioFormat.IsSupported | Should -BeTrue
+    $AioFormat.HasExternalFile | Should -BeFalse
+    $ExternalFormat.FirstHeaderFlagRoute | Should -Be 'nsisbi-pre-3.04.1'
+    $ExternalFormat.HasExternalFile | Should -BeTrue
+    $ExternalFormat.ExternalFileCount | Should -Be 1
+    $AioInfo.ProductCode | Should -Be 'Dumplings.NSISBI303'
+    $AioInfo.DisplayName | Should -Be 'Dumplings NSISBI 3.03 Fixture'
+    $ExternalInfo.ProductCode | Should -Be 'Dumplings.NSISBI303'
+
+    $AioDestination = Join-Path $TestDrive 'nsisbi303-aio'
+    $ExternalDestination = Join-Path $TestDrive 'nsisbi303-external'
+    $AioExtracted = @(Expand-NSISInstaller -Path $AioPath -DestinationPath $AioDestination -Name 'payload.txt' -MaximumExpandedBytes 1048576 -CollisionAction Rename)
+    $ExternalExtracted = @(Expand-NSISInstaller -Path $ExternalPath -DestinationPath $ExternalDestination -Name 'payload.txt' -ExternalDataPath $SidecarPath -MaximumExpandedBytes 1048576 -CollisionAction Rename)
+    $AioExtracted.Count | Should -Be 1
+    $ExternalExtracted.Count | Should -Be 1
+    (Get-Content -LiteralPath $AioExtracted[0].FullName -Raw).TrimEnd() | Should -Be 'controlled NSISBI payload'
+    (Get-Content -LiteralPath $ExternalExtracted[0].FullName -Raw).TrimEnd() | Should -Be 'controlled NSISBI payload'
+  }
+
+  It 'Should parse and extract current NSISBI 3.12.3 MTW codecs and split media' {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSISHistorical\NSISBI3123'
+    $ExpectedFiles = [ordered]@{
+      'nsisbi-3.12.3-mtw-bzip2.exe' = '9BBDDAA76270171D3E9B5CE20A82F0FEFF0BA852CACDCFD43953C8B9CE4AA7E6'
+      'nsisbi-3.12.3-mtw-lz4.exe'   = '41F717F421857975B0DDA9A65FB232AEF87D87FDED48B64CE0AC68FAFEF6E08A'
+      'nsisbi-3.12.3-mtw-lzma.exe'  = 'EBE9D7D85CF4BEED5DF6AE88C6AEA552EB1FD40AF5B7658B4C73B9AD7A9CB011'
+      'nsisbi-3.12.3-mtw-zlib.exe'  = '654D5D064AD7C123C1E0BF94B31BE9952A1E4C90B125EDBF8BC3C3497AA63990'
+      'nsisbi-3.12.3-split-lz4.exe' = '1E4E753A06B877548FF5A2483074E10CA928B060C6A86E54ED6420E95F222317'
+      'setup1.bin'                  = '8FC6458F1309E8484AC50AC30139DA96EDA7AB22C0F393B9EF3DF5915EF383E3'
+      'setup2.bin'                  = '258116D11097B191E001694092C3B219A708EAD9E1CAF936E0F20DE1852B4ED3'
+      'setup3.bin'                  = '200471612C424E084B65618416C03D15887EF69E3328ACA5D0F31203EA2631B3'
+      'setup4.bin'                  = 'B1A9ED365F324E83B47E1CBEA22FFDEA2DE081B008FC47D691182A758C63DB72'
+    }
+    foreach ($FileName in $ExpectedFiles.Keys) {
+      if (-not (Test-Path -LiteralPath (Join-Path $FixtureDirectory $FileName))) {
+        Set-ItResult -Skipped -Because 'The controlled NSISBI 3.12.3 fixtures have not been built in the persistent fixture cache.'
+        return
+      }
+    }
+    foreach ($Entry in $ExpectedFiles.GetEnumerator()) {
+      (Get-FileHash -LiteralPath (Join-Path $FixtureDirectory $Entry.Key) -Algorithm SHA256).Hash | Should -Be $Entry.Value
+    }
+
+    $Cases = @(
+      @{ Name = 'nsisbi-3.12.3-mtw-bzip2.exe'; ProductCode = 'Dumplings.NSISBI3123.bzip2'; Compression = 'Mtw-BZip2' }
+      @{ Name = 'nsisbi-3.12.3-mtw-lz4.exe'; ProductCode = 'Dumplings.NSISBI3123.lz4'; Compression = 'Mtw-Lz4' }
+      @{ Name = 'nsisbi-3.12.3-mtw-lzma.exe'; ProductCode = 'Dumplings.NSISBI3123.lzma'; Compression = 'Mtw-Lzma' }
+      @{ Name = 'nsisbi-3.12.3-mtw-zlib.exe'; ProductCode = 'Dumplings.NSISBI3123.zlib'; Compression = 'Mtw-Deflate' }
+    )
+    foreach ($Case in $Cases) {
+      $Path = Join-Path $FixtureDirectory $Case.Name
+      $Format = Get-NSISFormatInfo -Path $Path
+      $Info = Get-NSISInfo -Path $Path
+      $Format.FirstHeaderFlagRoute | Should -Be 'nsisbi-compact-3.12'
+      $Format.CatalogProfileId | Should -Be 'nsisbi-nsis3-unicode'
+      $Format.CompressionRoute | Should -Be $Case.Compression
+      $Format.IsSolid | Should -BeFalse
+      $Format.IsSupported | Should -BeTrue
+      $Info.ProductCode | Should -Be $Case.ProductCode
+
+      $Destination = Join-Path $TestDrive ([IO.Path]::GetFileNameWithoutExtension($Case.Name))
+      $Extracted = @(Expand-NSISInstaller -Path $Path -DestinationPath $Destination -Name 'payload.bin' -MaximumExpandedBytes 5MB -CollisionAction Rename)
+      $Extracted.Count | Should -Be 1
+      $Extracted[0].Length | Should -Be 393216
+      (Get-FileHash -LiteralPath $Extracted[0].FullName -Algorithm SHA256).Hash | Should -Be 'E84CD435E7172FD0A416DC4B7107F74A905BAD4CF80D5CEC64B7F2A01BC43DAE'
+    }
+
+    $SplitPath = Join-Path $FixtureDirectory 'nsisbi-3.12.3-split-lz4.exe'
+    $Sidecars = 1..4 | ForEach-Object { Join-Path $FixtureDirectory "setup$_.bin" }
+    $SplitFormat = Get-NSISFormatInfo -Path $SplitPath
+    $SplitInfo = Get-NSISInfo -Path $SplitPath
+    $SplitFormat.FirstHeaderFlagRoute | Should -Be 'nsisbi-compact-3.12'
+    $SplitFormat.CompressionRoute | Should -Be 'Mtw-Lz4'
+    $SplitFormat.ExternalFileCount | Should -Be 4
+    $SplitFormat.HasExternalFile | Should -BeTrue
+    $SplitInfo.ProductCode | Should -Be 'Dumplings.NSISBI3123.lz4.Split'
+
+    $SplitDestination = Join-Path $TestDrive 'nsisbi-3.12.3-split-lz4'
+    $SplitExtracted = @(Expand-NSISInstaller -Path $SplitPath -DestinationPath $SplitDestination -Name 'payload.bin' -ExternalDataPath $Sidecars -MaximumExpandedBytes 5MB -CollisionAction Rename)
+    $SplitExtracted.Count | Should -Be 1
+    $SplitExtracted[0].Length | Should -Be 3407872
+    (Get-FileHash -LiteralPath $SplitExtracted[0].FullName -Algorithm SHA256).Hash | Should -Be 'AA99FC11291174927E5A472F6D22E80A1302C5CC8EBF034BA27A90195E8FAA19'
+  }
+
+  It 'Should reject truncated current NSISBI split media without retaining output' {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSISHistorical\NSISBI3123'
+    $RequiredNames = @('nsisbi-3.12.3-split-lz4.exe', 'setup1.bin', 'setup2.bin', 'setup3.bin', 'setup4.bin')
+    foreach ($Name in $RequiredNames) {
+      if (-not (Test-Path -LiteralPath (Join-Path $FixtureDirectory $Name))) {
+        Set-ItResult -Skipped -Because 'The controlled NSISBI 3.12.3 split fixture has not been built in the persistent fixture cache.'
+        return
+      }
+    }
+
+    $CorruptDirectory = Join-Path $TestDrive 'nsisbi-3.12.3-truncated-split'
+    $null = New-Item -Path $CorruptDirectory -ItemType Directory -Force
+    foreach ($Name in $RequiredNames) {
+      Copy-Item -LiteralPath (Join-Path $FixtureDirectory $Name) -Destination (Join-Path $CorruptDirectory $Name)
+    }
+    $TruncatedPath = Join-Path $CorruptDirectory 'setup2.bin'
+    $Stream = [IO.File]::Open($TruncatedPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $Stream.SetLength($Stream.Length - 1) } finally { $Stream.Dispose() }
+
+    $Installer = Join-Path $CorruptDirectory 'nsisbi-3.12.3-split-lz4.exe'
+    $Sidecars = 1..4 | ForEach-Object { Join-Path $CorruptDirectory "setup$_.bin" }
+    $Destination = Join-Path $CorruptDirectory 'expanded'
+    {
+      Expand-NSISInstaller -Path $Installer -DestinationPath $Destination -Name 'payload.bin' -ExternalDataPath $Sidecars -MaximumExpandedBytes 5MB -CollisionAction Rename
+    } | Should -Throw
+    Test-Path -LiteralPath (Join-Path $Destination 'payload.bin') | Should -BeFalse
+  }
+
+  It 'Should select the log-enabled command layout from source-defined EW_LOG operands' {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSISHistorical'
+    $Fixture = Join-Path $FixtureDirectory 'nsis-2.46-log-fixture.exe'
+    if (-not (Test-Path -LiteralPath $Fixture)) {
+      Set-ItResult -Skipped -Because 'The controlled NSIS 2.46 log-enabled fixture has not been built in the persistent fixture cache.'
+      return
+    }
+
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be 'CFF450A72C150DA9B45583A09C4FCE0E31B01541122C336A27BE87CD3F268B0F'
+    $Format = Get-NSISFormatInfo -Path $Fixture
+    $Info = Get-NSISInfo -Path $Fixture
+
+    $Format.CatalogProfileId | Should -Be 'official-nsis2-ansi'
+    $Format.LogCommandEnabled | Should -BeTrue
+    $Format.IsSupported | Should -BeTrue
+    $Info.ProductCode | Should -Be 'Dumplings.NSIS246Log'
+    $Info.DisplayName | Should -Be 'Dumplings NSIS 2.46 Log Fixture'
+    $Info.ParserVersionInfo.LogCmdIsEnabled | Should -BeTrue
   }
 
   It 'Should model the source-backed x64.nsh System plug-in architecture probes' {
@@ -736,6 +1797,27 @@ Describe 'NSIS parser' {
     [int]$Result.arm64 | Should -BeGreaterThan 0
   }
 
+  It 'Should model the nsProcess fresh-install stack contract' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        Stack                    = [System.Collections.Generic.List[string]]::new()
+        UnknownProcessPredicates = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      }
+      $State.Stack.Add('example.exe')
+      $Handled = Invoke-NSISProcessPluginCall -State $State -FunctionName '_FindProcess'
+      [pscustomobject]@{
+        Handled = $Handled
+        Result  = Pop-NSISStackValue -State $State
+        Process = @($State.UnknownProcessPredicates)[0]
+      }
+    }
+
+    $Result.Handled | Should -BeTrue
+    $Result.Result | Should -Be '603'
+    $Result.Process | Should -Be 'example.exe'
+  }
+
   It 'Should model electron-builder System plug-in known-folder register outputs' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -762,7 +1844,7 @@ Describe 'NSIS parser' {
       }
     }
 
-    $ExpectedPath = Join-Path $env:LOCALAPPDATA 'Programs'
+    $ExpectedPath = '%LocalAppData%\Programs'
     $Result.KnownFolderHandled | Should -BeTrue
     $Result.CopyHandled | Should -BeTrue
     $Result.Result | Should -Be '0'
@@ -793,26 +1875,26 @@ Describe 'NSIS parser' {
       $State.Variables[21]
     }
 
-    $Result | Should -Be (Join-Path $env:LOCALAPPDATA 'Programs')
+    $Result | Should -Be '%LocalAppData%\Programs'
   }
 
   It 'Should resolve stable installer-related Windows known folders' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
-    $WindowsDirectory = if ($env:windir) { $env:windir } else { 'C:\Windows' }
-    $SystemDirectory = Join-Path $WindowsDirectory 'System32'
-    $SystemX86Directory = if ([Environment]::Is64BitOperatingSystem) { Join-Path $WindowsDirectory 'SysWOW64' } else { $SystemDirectory }
-    $ProgramFiles64 = if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }
-    $ProgramFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $ProgramFiles64 }
-    $CommonProgramFiles64 = if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { $env:CommonProgramFiles }
-    $CommonProgramFilesX86 = if (${env:CommonProgramFiles(x86)}) { ${env:CommonProgramFiles(x86)} } else { $CommonProgramFiles64 }
-    $UserStartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu'
-    $CommonStartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu'
+    $WindowsDirectory = '%SystemRoot%'
+    $SystemDirectory = '%SystemRoot%\System32'
+    $SystemX86Directory = '%SystemRoot%\SysWOW64'
+    $ProgramFiles64 = '%ProgramFiles%'
+    $ProgramFilesX86 = '%ProgramFiles(x86)%'
+    $CommonProgramFiles64 = '%ProgramFiles%\Common Files'
+    $CommonProgramFilesX86 = '%ProgramFiles(x86)%\Common Files'
+    $UserStartMenu = '%AppData%\Microsoft\Windows\Start Menu'
+    $CommonStartMenu = '%ProgramData%\Microsoft\Windows\Start Menu'
     $Cases = [ordered]@{
-      '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' = $env:LOCALAPPDATA
-      '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' = $env:APPDATA
-      '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' = Join-Path $env:USERPROFILE 'AppData\LocalLow'
-      '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' = $env:ProgramData
-      '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' = $env:USERPROFILE
+      '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' = '%LocalAppData%'
+      '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' = '%AppData%'
+      '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' = '%UserProfile%\AppData\LocalLow'
+      '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' = '%ProgramData%'
+      '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' = '%UserProfile%'
       '{F38BF404-1D43-42F2-9305-67DE0B28FC23}' = $WindowsDirectory
       '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}' = $SystemDirectory
       '{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}' = $SystemX86Directory
@@ -823,8 +1905,8 @@ Describe 'NSIS parser' {
       '{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}' = $CommonProgramFiles64
       '{DE974D24-D9C6-4D3E-BF91-F4455120B917}' = $CommonProgramFilesX86
       '{6365D5A7-0F0D-45E5-87F6-0DA56B6A4F7D}' = $CommonProgramFiles64
-      '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}' = Join-Path $env:LOCALAPPDATA 'Programs'
-      '{BCBD3057-CA5C-4622-B42D-BC56DB0AE516}' = Join-Path $env:LOCALAPPDATA 'Programs\Common'
+      '{5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}' = '%LocalAppData%\Programs'
+      '{BCBD3057-CA5C-4622-B42D-BC56DB0AE516}' = '%LocalAppData%\Programs\Common'
       '{625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}' = $UserStartMenu
       '{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}' = Join-Path $UserStartMenu 'Programs'
       '{B97D20BB-F46A-4C97-BA10-5E3608430854}' = Join-Path $UserStartMenu 'Programs\Startup'
@@ -989,6 +2071,7 @@ Describe 'NSIS parser' {
     $X86Info.DefaultInstallLocation | Should -Be '%ProgramFiles(x86)%\BitComet'
     $X86Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $X86Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'BitComet'
+    $X86Info.ParserVersionInfo.HasComponentPage | Should -BeTrue
 
     $X64Info.ProductCode | Should -Be 'BitComet_x64'
     $X64Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\BitComet'
@@ -1066,14 +2149,14 @@ Describe 'NSIS parser' {
     $UserInfo.ProductCode | Should -Be 'BFD312E9-1019-4F57-9F44-F86246833B50'
     $UserInfo.Scope | Should -Be 'user'
     $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\WorkBuddy'
-    $UserInfo.UninstallString | Should -Be ('"{0}\Programs\WorkBuddy\Uninstall WorkBuddy.exe" /currentuser' -f $env:LOCALAPPDATA)
+    $UserInfo.UninstallString | Should -Be '"%LocalAppData%\Programs\WorkBuddy\Uninstall WorkBuddy.exe" /currentuser'
     @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKCU'
     $UserInfo.Warnings | Should -BeNullOrEmpty
 
     $MachineInfo.ProductCode | Should -Be 'BFD312E9-1019-4F57-9F44-F86246833B50'
     $MachineInfo.Scope | Should -Be 'machine'
     $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\WorkBuddy'
-    $MachineInfo.UninstallString | Should -Be ('"{0}\WorkBuddy\Uninstall WorkBuddy.exe" /allusers' -f $env:ProgramFiles)
+    $MachineInfo.UninstallString | Should -Be '"%ProgramFiles%\WorkBuddy\Uninstall WorkBuddy.exe" /allusers'
     @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
     $MachineInfo.Warnings | Should -BeNullOrEmpty
   }
@@ -1326,7 +2409,7 @@ Describe 'NSIS parser' {
       -Url 'https://updatecdn.meeting.qq.com/cos/a2bf9c01f76b1df44383ab2f529bec13/TencentMeeting_0300000000_3.44.10.457_x86_64.publish.exe' `
       -Sha256 '91C02F0877B83052B4D2C0C20736ED1CA6DBC64F5FB09DA3911A5DE91A51BD93'
     $Info = Get-NSISInfo -Path $Fixture -Architecture x64
-    $InstallRoot = Join-Path $env:ProgramFiles 'Tencent\WeMeet'
+    $InstallRoot = '%ProgramFiles%\Tencent\WeMeet'
 
     $Info.ProductCode | Should -Be 'WeMeet'
     $Info.DisplayName | Should -Be 'Tencent Meeting'
@@ -1344,7 +2427,7 @@ Describe 'NSIS parser' {
       -Url 'https://goto-desktop.goto.com/GoToSetup-4.19.1.exe' `
       -Sha256 '6EF77AB5904A7FEDDA696F54AA346BDE535537D85D9F09DC8A6C321CEE1BDF41'
     $Info = Get-NSISInfo -Path $Fixture
-    $InstallRoot = Join-Path $env:LOCALAPPDATA 'Programs\goto'
+    $InstallRoot = '%LocalAppData%\Programs\goto'
 
     $Info.ProductCode | Should -Be 'b5746384-3503-4fbf-824a-0a42d1bd0639'
     $Info.DisplayName | Should -Be 'GoTo 4.19.1'
@@ -1369,6 +2452,8 @@ Describe 'NSIS parser' {
     $Info.ProductCode | Should -Be 'GameViewer'
     $Info.Publisher | Should -Be 'Netease'
     $Info.Scope | Should -Be 'user'
+    $Info.ParserVersionInfo.HasComponentPage | Should -BeFalse
+    $Info.ParserVersionInfo.UnresolvedProcessPredicates | Should -Contain 'GameViewer.exe'
     $Info.Warnings | Should -BeNullOrEmpty
   }
 
@@ -1537,11 +2622,11 @@ Describe 'NSIS parser' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
       [pscustomobject]@{
-        ProgramFiles   = ConvertTo-NSISManifestPath -Path "$env:ProgramFiles\Process Lasso"
-        ProgramFiles86 = ConvertTo-NSISManifestPath -Path "${env:ProgramFiles(x86)}\App"
-        LocalAppData   = ConvertTo-NSISManifestPath -Path "$env:LOCALAPPDATA\Programs\App"
-        RootOnly       = ConvertTo-NSISManifestPath -Path $env:ProgramFiles
-        NotAPrefix     = ConvertTo-NSISManifestPath -Path "$env:ProgramFiles.exe"
+        ProgramFiles   = ConvertTo-NSISManifestPath -Path '$PROGRAMFILES64\Process Lasso'
+        ProgramFiles86 = ConvertTo-NSISManifestPath -Path '$PROGRAMFILES32\App'
+        LocalAppData   = ConvertTo-NSISManifestPath -Path '$LOCALAPPDATA\Programs\App'
+        RootOnly       = ConvertTo-NSISManifestPath -Path '$PROGRAMFILES64'
+        NotAPrefix     = ConvertTo-NSISManifestPath -Path '$PROGRAMFILES64.exe'
         Unrelated      = ConvertTo-NSISManifestPath -Path 'D:\Custom\App'
       }
     }
@@ -1550,7 +2635,7 @@ Describe 'NSIS parser' {
     $Result.ProgramFiles86 | Should -Be '%ProgramFiles(x86)%\App'
     $Result.LocalAppData | Should -Be '%LocalAppData%\Programs\App'
     $Result.RootOnly | Should -Be '%ProgramFiles%'
-    $Result.NotAPrefix | Should -Be "$env:ProgramFiles.exe"
+    $Result.NotAPrefix | Should -Be '$PROGRAMFILES64.exe'
     $Result.Unrelated | Should -Be 'D:\Custom\App'
   }
 

@@ -15,7 +15,30 @@ $FormatModule = Import-Module (Join-Path $PSScriptRoot 'NSISFormat.psm1') -Force
 foreach ($Entry in $FormatModule.ExportedVariables.GetEnumerator()) {
   Set-Variable -Scope Script -Name $Entry.Key -Value $Entry.Value.Value
 }
-$SimulationModule = Import-Module (Join-Path $PSScriptRoot 'NSISSimulation.psm1') -Force -PassThru
+$null = Import-Module (Join-Path $PSScriptRoot 'NSISSimulation.psm1') -Force
+
+function Get-NSISFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify the serialized NSIS edition and format routes without requiring ARP metadata.
+  .PARAMETER Path
+    Path to the NSIS installer.
+  .OUTPUTS
+    A JSON-safe object containing edition, structural generation, character
+    mode, loader-stub architecture, selected catalog profile, parser route IDs,
+    candidate scores, support status, and warnings.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
+    [string]$Path
+  )
+
+  process {
+    $Context = Get-NSISFormatContext -Path (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf)
+    return ConvertTo-NSISFormatInfo -Context $Context
+  }
+}
 
 function Expand-NSISInstaller {
   <#
@@ -31,6 +54,8 @@ function Expand-NSISInstaller {
     Maximum total bytes written, including aliases that share one data record.
   .PARAMETER CollisionAction
     Behavior when a payload path already exists or multiple File commands resolve to one path.
+  .PARAMETER ExternalDataPath
+    Optional legacy .nsisbin file, current setupN.bin files, or their directory.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -39,7 +64,8 @@ function Expand-NSISInstaller {
     [string]$DestinationPath,
     [ValidateNotNullOrEmpty()][string]$Name = '*',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES,
-    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt'
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
+    [string[]]$ExternalDataPath
   )
 
   process {
@@ -50,10 +76,11 @@ function Expand-NSISInstaller {
       Name                 = $Name
       MaximumExpandedBytes = $MaximumExpandedBytes
       CollisionAction      = $CollisionAction
-      StateInitializer     = { param($HeaderData) Initialize-NSISState -HeaderData $HeaderData }
+      StateInitializer     = { param($FormatContext) Initialize-NSISState -FormatContext $FormatContext }
       PayloadSelector      = { param($State, $HeaderData, $Pattern) Get-NSISPayloadEntries -State $State -HeaderData $HeaderData -Name $Pattern }
     }
     if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $Arguments.DestinationPath = $DestinationPath }
+    if ($ExternalDataPath) { $Arguments.ExternalDataPath = $ExternalDataPath }
     return Expand-NSISPayload @Arguments
   }
 }
@@ -68,6 +95,16 @@ function Get-NSISInfo {
     The target Windows architecture used when the installer selects architecture-specific ARP metadata
   .PARAMETER Scope
     The target installation scope used when the installer selects scope-specific ARP metadata
+  .PARAMETER Environment
+    Virtual target environment variables used by ReadEnvStr and related commands.
+  .PARAMETER CommandLine
+    Virtual installer command line used by compiled command-line checks.
+  .PARAMETER FileSystem
+    Explicit virtual target filesystem facts keyed by Windows path.
+  .PARAMETER FileSystemComplete
+    Treat unlisted target paths as absent rather than unknown.
+  .PARAMETER AnsiCodePage
+    Explicit source code page for ANSI compiler output.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -80,17 +117,43 @@ function Get-NSISInfo {
 
     [Parameter(HelpMessage = 'The target installation scope used to resolve scope-specific ARP metadata')]
     [ValidateSet('user', 'machine')]
-    [string]$Scope
+    [string]$Scope,
+
+    [hashtable]$Environment = @{},
+
+    [AllowEmptyString()][string]$CommandLine = '',
+
+    [hashtable]$FileSystem = @{},
+
+    [switch]$FileSystemComplete,
+
+    [ValidateRange(1, 65535)][int]$AnsiCodePage
   )
 
   process {
-    $SimulationArguments = @{ Path = $Path }
+    $Context = Get-NSISFormatContext -Path (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf)
+    $FormatInfo = ConvertTo-NSISFormatInfo -Context $Context
+    if (-not $FormatInfo.IsSupported) {
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
+    }
+    $SimulationArguments = @{ FormatContext = $Context; Environment = $Environment; CommandLine = $CommandLine; FileSystem = $FileSystem }
+    if ($FileSystemComplete) { $SimulationArguments.FileSystemComplete = $true }
     if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $SimulationArguments.Architecture = $Architecture }
     if (-not [string]::IsNullOrWhiteSpace($Scope)) { $SimulationArguments.Scope = $Scope }
+    if ($AnsiCodePage -gt 0) { $SimulationArguments.AnsiCodePage = $AnsiCodePage }
     $Metadata = (Invoke-NSISStaticSimulation @SimulationArguments).Metadata
     if ([string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion)) {
       throw 'The NSIS installer does not expose deterministic uninstall metadata'
     }
+
+    # Structural ambiguity and external-media warnings are discovered before
+    # simulation. Merge them into the aggregate result so Get-NSISInfo callers
+    # do not need a second parse through Get-NSISFormatInfo.
+    $Metadata.Warnings = [string[]]@(
+      @($Metadata.Warnings; $FormatInfo.Warnings) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    )
 
     # Invoke-NSISStaticSimulation constructs the canonical aggregate result;
     # return it unchanged so bridge callers see exactly the parser's evidence.
@@ -230,4 +293,4 @@ function Read-ProductCodeFromNSIS {
   }
 }
 
-Export-ModuleMember -Function Get-NSISInfo, Expand-NSISInstaller, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS
+Export-ModuleMember -Function Get-NSISFormatInfo, Get-NSISInfo, Expand-NSISInstaller, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS

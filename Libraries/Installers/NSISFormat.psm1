@@ -67,6 +67,8 @@ $ErrorActionPreference = 'Stop'
 
 Import-InstallerArchiveDependency
 
+$Script:NSISFormatCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'NSISFormatCatalog.psd1')
+
 function Import-NSISBZip2Decoder {
   <#
   .SYNOPSIS
@@ -81,6 +83,28 @@ function Import-NSISBZip2Decoder {
   $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.NSIS.NsisBZip2Stream'
 }
 
+function Import-NSISLz4Decoder {
+  <#
+  .SYNOPSIS
+    Load the bounded raw LZ4 block decoder used by NSISBI MTW records.
+  #>
+  if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.NSIS.NsisLz4BlockDecoder').Type) { return }
+
+  $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Assets\Source\NSIS\NsisLz4BlockDecoder.cs'
+  $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.NSIS.NsisLz4BlockDecoder'
+}
+
+function Import-NSISSegmentedReadStream {
+  <#
+  .SYNOPSIS
+    Load the seekable multi-sidecar stream used by NSISBI 3.12 split output.
+  #>
+  if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.NSIS.NsisSegmentedReadStream').Type) { return }
+
+  $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\Assets\Source\NSIS\NsisSegmentedReadStream.cs'
+  $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.NSIS.NsisSegmentedReadStream'
+}
+
 # Constants
 $NSIS_FIRST_HEADER_SIZE = 28
 $NSISBI_FIRST_HEADER_SIZE = 36
@@ -92,6 +116,9 @@ $NSISBI_FLAG_LARGE_FILE_SOURCE = [uint32]0x20
 $NSISBI_FLAG_EXTERNAL_FILE_SUPPORT = [uint32]0x40
 $NSISBI_FLAG_HAS_EXTERNAL_FILE = [uint32]0x80
 $NSISBI_FLAG_IS_STUB_INSTALLER = [uint32]0x100
+$NSISBI_CURRENT_FLAG_FORMAT = [uint32]0x10
+$NSISBI_CURRENT_FLAG_HAS_EXTERNAL_FILE = [uint32]0x20
+$NSISBI_CURRENT_FLAG_IS_STUB_INSTALLER = [uint32]0x40
 $NSIS_ARCHIVE_ALIGNMENT = 512
 $NSIS_MAX_BACKWARD_PE_SCAN = 1048576
 $NSIS_MAX_FILE_SIZE = [uint64]4294967295
@@ -100,9 +127,15 @@ $NSIS_MAX_ENTRY_COUNT = 33554432
 $NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT = 65536
 $NSIS_MAX_EXTRACTION_FILE_COUNT = 262144
 $NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES = 1073741824
+$NSIS_MAX_VIRTUAL_FILE_BYTES = 4194304
 $NSISBI_MTW_BLOCK_HEADER_SIZE = 3
-$NSISBI_MTW_BLOCK_DATA_SIZE = 2097152
-$NSISBI_MTW_BLOCK_BUFFER_SIZE = 2307891
+# Current NSISBI codecs use different MTW block sizes: BZip2 uses 900,000
+# bytes, zlib/LZ4 use 1 MiB, and LZMA uses 4 MiB. Keep the parser bounds at
+# the largest source-defined route so older observed 2 MiB blocks also remain
+# valid without weakening the per-record output limit beyond current NSISBI.
+$NSISBI_MTW_BLOCK_DATA_SIZE = 4194304
+$NSISBI_MTW_BLOCK_BUFFER_SIZE = 4614758
+$NSISBI_MTW_LZMA_DICTIONARY_SIZES = [uint32[]]@(2307891, 4614758)
 $NSIS_HEADER_OFFSET_LANG_TABLE_SIZE = 32
 $NSIS_HEADER_OFFSET_CODE_ON_INIT = 40
 $NSIS_HEADER_OFFSET_CODE_ON_INST_SUCCESS = 44
@@ -114,12 +147,19 @@ $NSIS_BLOCK_HEADER_SIZE_64 = 12
 $NSIS_ENTRY_SIZE = 28
 $NSISBI_ENTRY_SIZE = 36
 $NSIS_SECTION_OFFSET_NAME = 0
+$NSIS_SECTION_OFFSET_INSTALL_TYPES = 4
+$NSIS_SECTION_OFFSET_FLAGS = 8
 $NSIS_SECTION_OFFSET_CODE = 12
 $NSIS_SECTION_OFFSET_CODE_SIZE = 16
+$NSIS_SECTION_OFFSET_SIZE_KB = 20
 $NSIS_DEFAULT_LANGUAGE = 1033
 $NSIS_MAX_WATCHDOG_MULTIPLIER = 2
+$NSIS_MAX_BRANCH_PATHS = 16
+$NSIS_MAX_BRANCH_DEPTH = 8
 $NSIS_UNINSTALL_KEY_PATTERN = '(?i)^Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'
 $NSIS_UNPACKED_HEADER_SOLID_FLAG = [uint32]2147483648
+$NSISBI_PRE304_EXTERNAL_DATA_FLAG = [uint32]2147483648
+$NSISBI_PRE304_DATA_LENGTH_MASK = [uint32]2147483647
 
 $NSIS_PREDEFINED_VAR_CMDLINE = 20
 $NSIS_PREDEFINED_VAR_INSTDIR = 21
@@ -134,7 +174,10 @@ $NSIS_PREDEFINED_VAR_CLICK = 30
 $NSIS_PREDEFINED_VAR__OUTDIR = 31
 
 $NSIS_EXEC_FLAG_SHELL_VAR_CONTEXT = 1
+$NSIS_EXEC_FLAG_ERROR = 2
+$NSIS_EXEC_FLAG_SILENT = 8
 $NSIS_EXEC_FLAG_REG_VIEW = 12
+$NSIS_SECTION_FLAG_SELECTED = 1
 
 $NSIS_REG_ROOT_SHCTX = [uint32]0
 $NSIS_REG_ROOT_HKCR = [uint32]2147483648
@@ -158,7 +201,16 @@ $NSIS_OPCODE_IF_FILE_EXISTS = 12
 $NSIS_OPCODE_SET_FLAG = 13
 $NSIS_OPCODE_IF_FLAG = 14
 $NSIS_OPCODE_GET_FLAG = 15
+$NSIS_OPCODE_RENAME = 16
+$NSIS_OPCODE_GET_FULL_PATH_NAME = 17
+$NSIS_OPCODE_SEARCH_PATH = 18
+$NSIS_OPCODE_GET_TEMP_FILE_NAME = 19
 $NSIS_OPCODE_EXTRACT_FILE = 20
+$NSIS_OPCODE_DELETE_FILE = 21
+$NSIS_OPCODE_MESSAGE_BOX = 22
+$NSIS_OPCODE_REMOVE_DIRECTORY = 23
+$NSIS_OPCODE_EXTRACT_STUB_FILE = 1000
+$NSIS_OPCODE_VERIFY_EXTERNAL_FILE = 1001
 $NSIS_OPCODE_STR_LEN = 24
 $NSIS_OPCODE_ASSIGN_VAR = 25
 $NSIS_OPCODE_STR_CMP = 26
@@ -169,11 +221,23 @@ $NSIS_OPCODE_INT_FMT = 30
 $NSIS_OPCODE_PUSH_POP = 31
 $NSIS_OPCODE_SHELL_EXEC = 40
 $NSIS_OPCODE_EXECUTE = 41
+$NSIS_OPCODE_GET_FILE_TIME = 42
+$NSIS_OPCODE_GET_DLL_VERSION = 43
 $NSIS_OPCODE_DELETE_REG = 50
 $NSIS_OPCODE_WRITE_REG = 51
 $NSIS_OPCODE_READ_REG = 52
+$NSIS_OPCODE_ENUM_REG = 53
+$NSIS_OPCODE_FILE_CLOSE = 54
+$NSIS_OPCODE_FILE_OPEN = 55
+$NSIS_OPCODE_FILE_WRITE = 56
+$NSIS_OPCODE_FILE_READ = 57
+$NSIS_OPCODE_FILE_SEEK = 58
+$NSIS_OPCODE_FIND_CLOSE = 59
+$NSIS_OPCODE_FIND_NEXT = 60
+$NSIS_OPCODE_FIND_FIRST = 61
 $NSIS_OPCODE_WRITE_UNINSTALLER = 62
 $NSIS_OPCODE_SECTION_SET = 63
+$NSIS_OPCODE_INSTALL_TYPE_SET = 64
 $NSIS_OPCODE_GET_OS_INFO = 65
 $NSIS_OPCODE_RESERVED = 66
 $NSIS_OPCODE_FILE_WRITE_UTF16 = 68
@@ -183,8 +247,13 @@ $NSIS_OPCODE_FIND_PROC = 71
 $NSIS_OPCODE_GET_FONT_VERSION = 72
 $NSIS_OPCODE_GET_FONT_NAME = 73
 
+$NSIS_OPCODE_GET_DLG_ITEM = 35
+
 $NSIS_OPCODE_REGISTER_DLL = 44
-$NSIS_OPCODE_FILE_SEEK = 58
+$NSIS_OPCODE_CREATE_SHORTCUT = 45
+$NSIS_OPCODE_COPY_FILES = 46
+$NSIS_OPCODE_WRITE_INI = 48
+$NSIS_OPCODE_READ_INI = 49
 $NSIS_COMMAND_PARAMETER_COUNTS = [int[]]@(
   0, 0, 1, 1, 0, 2, 6, 1, 0, 2, 2, 3, 3, 4, 4, 2,
   4, 3, 2, 2, 6, 2, 6, 2, 2, 4, 5, 3, 6, 4, 4, 6,
@@ -192,6 +261,63 @@ $NSIS_COMMAND_PARAMETER_COUNTS = [int[]]@(
   5, 4, 5, 6, 5, 5, 1, 4, 3, 4, 4, 1, 2, 3, 4, 5,
   4, 6, 2, 1, 4, 4, 2, 2, 2, 2
 )
+
+function Get-NSISCatalogProfile {
+  <#
+  .SYNOPSIS
+    Resolve one immutable NSIS serialized-format profile by catalog ID.
+  .PARAMETER Id
+    Stable profile ID from NSISFormatCatalog.psd1.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The stable NSIS format profile ID')]
+    [string]$Id
+  )
+
+  # PowerShell's Where() method returns a collection even in First mode. Select
+  # the element explicitly; treating that collection as a hashtable silently
+  # projects null route properties and breaks opcode normalization.
+  $ProfileCandidates = @($Script:NSISFormatCatalog.Profiles).Where({ $_.Id -ceq $Id }, 'First')
+  if ($ProfileCandidates.Count -eq 0) { throw "Unknown NSIS format profile '$Id'." }
+  $CatalogProfile = $ProfileCandidates[0]
+
+  # Return a private projection so per-installer detection evidence never
+  # mutates the module-wide PowerShell data-file catalog.
+  $Result = [ordered]@{}
+  foreach ($Key in $CatalogProfile.Keys) { $Result[$Key] = $CatalogProfile[$Key] }
+  $Result.Edition = [string]$Script:NSISFormatCatalog.Editions[$CatalogProfile.EditionId]
+  return [pscustomobject]$Result
+}
+
+function Test-NSISFormatCatalog {
+  <#
+  .SYNOPSIS
+    Validate that every NSIS catalog profile resolves all parser routes.
+  #>
+  [OutputType([bool])]
+  param ()
+
+  $RequiredProperties = @(
+    'Id', 'EditionId', 'Generation', 'VersionRange', 'CharacterMode',
+    'CommandType', 'FirstHeaderRoute', 'HeaderRoute', 'EntryRoute',
+    'StringRoute', 'OpcodeRoute', 'VariableRoute', 'PayloadRoute',
+    'CompressionRoutes', 'ChecksumRoute', 'Supported'
+  )
+  $SeenIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  foreach ($CatalogProfile in @($Script:NSISFormatCatalog.Profiles)) {
+    foreach ($Property in $RequiredProperties) {
+      if (-not $CatalogProfile.ContainsKey($Property)) { throw "NSIS profile '$($CatalogProfile.Id)' is missing '$Property'." }
+    }
+    if (-not $SeenIds.Add([string]$CatalogProfile.Id)) { throw "Duplicate NSIS profile ID '$($CatalogProfile.Id)'." }
+    if (-not $Script:NSISFormatCatalog.Editions.ContainsKey($CatalogProfile.EditionId)) {
+      throw "NSIS profile '$($CatalogProfile.Id)' references unknown edition '$($CatalogProfile.EditionId)'."
+    }
+  }
+  return $true
+}
+
+$null = Test-NSISFormatCatalog
 
 # The simulator returns Continue/0 for most opcodes; reuse immutable results
 # instead of allocating a new PSCustomObject for every interpreted command.
@@ -215,8 +341,8 @@ $NSIS_IMAGE_FILE_MACHINE_I386 = 332
 $NSIS_IMAGE_FILE_MACHINE_AMD64 = 34404
 $NSIS_IMAGE_FILE_MACHINE_ARM64 = 43620
 
-$NSIS_WINDOWS_DIRECTORY = if ($env:windir) { $env:windir } else { 'C:\Windows' }
-$NSIS_SYSTEM_DIRECTORY = Join-Path $Script:NSIS_WINDOWS_DIRECTORY 'System32'
+$NSIS_WINDOWS_DIRECTORY = '%SystemRoot%'
+$NSIS_SYSTEM_DIRECTORY = '%SystemRoot%\System32'
 
 # Deterministic shell folder names adapted to the local machine paths used by task scripts.
 $NSIS_SHELL_STRINGS = @(
@@ -246,25 +372,25 @@ $NSIS_SHELL_STRINGS = @(
   'Programs',
   'Startup',
   'Desktop',
-  $env:APPDATA,
+  '%AppData%',
   'PrintHood',
-  $env:LOCALAPPDATA,
+  '%LocalAppData%',
   'ALTStartUp',
   'ALTStartUp',
   'Favorites',
   'InternetCache',
   'Cookies',
   'History',
-  $env:APPDATA,
+  '%AppData%',
   $Script:NSIS_WINDOWS_DIRECTORY,
   $Script:NSIS_WINDOWS_DIRECTORY,
-  $(if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }),
+  '%ProgramFiles%',
   'Pictures',
-  $env:USERPROFILE,
+  '%UserProfile%',
   $Script:NSIS_SYSTEM_DIRECTORY,
-  $(if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }),
-  $(if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { $env:CommonProgramFiles }),
-  $(if (${env:CommonProgramFiles(x86)}) { ${env:CommonProgramFiles(x86)} } else { $env:CommonProgramFiles }),
+  '%ProgramFiles(x86)%',
+  '%ProgramFiles%\Common Files',
+  '%ProgramFiles(x86)%\Common Files',
   'Templates',
   'Documents',
   'AdminTools',
@@ -350,62 +476,36 @@ function Get-BytePatternOffset {
   return [int]$Offset[0]
 }
 
-function Test-NSISPEHeaderBeforeArchiveStream {
+function Get-NSISPEStubOffsetStream {
   <#
   .SYNOPSIS
-    Validate a nearby PE stub without buffering the installer
+    Locate the PE stub whose alignment coordinate system owns an NSIS archive.
   .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+    Caller-owned seekable installer stream.
   .PARAMETER FirstHeaderOffset
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+    Absolute file offset of the validated NSIS first header.
+  .OUTPUTS
+    Absolute PE-stub offset, or -1 when no bounded valid stub exists.
   #>
-  [OutputType([bool])]
+  [OutputType([long])]
   param (
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [Parameter(Mandatory)][long]$FirstHeaderOffset
   )
 
-  # Ordinary installers begin with the PE stub at offset zero. Concatenated
-  # launchers are handled by a bounded, 512-byte-aligned backward search.
-  if (Get-PELayout -Stream $Stream) { return $true }
-  $MinimumOffset = [Math]::Max(0L, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
-  $StartOffset = $FirstHeaderOffset - ($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT)
-  for ($Offset = $StartOffset; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
-    if ($Offset -eq $FirstHeaderOffset -or $Offset + 64 -gt $Stream.Length) { continue }
-    $Candidate = New-BoundedReadStream -Stream $Stream -Offset $Offset -Length ($FirstHeaderOffset - $Offset) -LeaveOpen
-    try { if (Get-PELayout -Stream $Candidate) { return $true } } catch { } finally { $Candidate.Dispose() }
+  # Offset zero owns the archive only when the first header is aligned in that
+  # coordinate system. A resource-embedded inner PE can coexist with a valid
+  # outer PE, but its nonzero alignment remainder identifies the inner stub.
+  if (($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT) -eq 0) {
+    try { if (Get-PELayout -Stream $Stream) { return 0L } } catch { }
   }
-  return $false
-}
-
-function Test-NSISRelativePEStubStream {
-  <#
-  .SYNOPSIS
-    Validate that a non-file-aligned NSIS archive is aligned relative to a nearby PE stub
-  .DESCRIPTION
-    An installer embedded inside another executable, for example an NSIS
-    installer stored as a resource of an outer launcher, keeps its archive
-    512-byte aligned relative to its own stub rather than to the file start.
-    The stub start therefore shares the candidate's alignment remainder and is
-    found by stepping backward from the candidate in whole alignment blocks.
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER FirstHeaderOffset
-    Absolute byte offset of the candidate NSIS first header.
-  #>
-  [OutputType([bool])]
-  param (
-    [Parameter(Mandatory)][System.IO.Stream]$Stream,
-    [Parameter(Mandatory)][long]$FirstHeaderOffset
-  )
-
   $MinimumOffset = [Math]::Max(0L, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
   for ($Offset = $FirstHeaderOffset - $Script:NSIS_ARCHIVE_ALIGNMENT; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
     if ($Offset + 64 -gt $Stream.Length) { continue }
     $Candidate = New-BoundedReadStream -Stream $Stream -Offset $Offset -Length ($FirstHeaderOffset - $Offset) -LeaveOpen
-    try { if (Get-PELayout -Stream $Candidate) { return $true } } catch { } finally { $Candidate.Dispose() }
+    try { if (Get-PELayout -Stream $Candidate) { return [long]$Offset } } catch { } finally { $Candidate.Dispose() }
   }
-  return $false
+  return -1L
 }
 
 function Test-NSISPEHeaderAtOffset {
@@ -440,34 +540,199 @@ function Test-NSISPEHeaderAtOffset {
   return $OptionalHeaderSize -ge 96
 }
 
-function Test-NSISPEHeaderBeforeArchive {
+function Get-NSISPEStubOffsetBytes {
   <#
   .SYNOPSIS
-    Validate that an NSIS archive header belongs to a nearby PE stub
+    Locate the owning PE stub in a synthetic or already-bounded byte array.
   .PARAMETER Bytes
-    The installer bytes
+    Bytes containing the candidate PE and NSIS archive.
   .PARAMETER FirstHeaderOffset
-    The candidate NSIS first-header offset
+    Candidate first-header offset in Bytes.
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][int]$FirstHeaderOffset
+  )
+
+  if (($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT) -eq 0 -and (Test-NSISPEHeaderAtOffset -Bytes $Bytes -Offset 0)) { return 0 }
+  $MinimumOffset = [Math]::Max(0, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
+  for ($Offset = $FirstHeaderOffset - $Script:NSIS_ARCHIVE_ALIGNMENT; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
+    if (Test-NSISPEHeaderAtOffset -Bytes $Bytes -Offset $Offset) { return $Offset }
+  }
+  return -1
+}
+
+function Get-NSISFirstHeaderFlagInfo {
+  <#
+  .SYNOPSIS
+    Resolve standard, legacy NSISBI, and compact NSISBI 3.12 first-header flags.
+  .PARAMETER Flags
+    Little-endian first-header flags.
+  .PARAMETER DataBlockLow
+    First NSISBI data-block word at offset 0x1C.
+  .PARAMETER DataBlockHigh
+    Second NSISBI data-block word at offset 0x20.
+  .PARAMETER Pre304
+    Interpret the two trailing words using the NSISBI 3.03 ABI, whose stock
+    flag mask does not contain an NSISBI marker.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][uint32]$Flags,
+    [uint32]$DataBlockLow,
+    [uint32]$DataBlockHigh,
+    [switch]$Pre304
+  )
+
+  if ($Pre304) {
+    $HasExternalFile = ($DataBlockHigh -band $Script:NSISBI_PRE304_EXTERNAL_DATA_FLAG) -ne 0
+    $LengthHigh = $DataBlockHigh -band $Script:NSISBI_PRE304_DATA_LENGTH_MASK
+    return [pscustomobject]@{
+      IsNsisBi = $true; FlagRoute = 'nsisbi-pre-3.04.1'; FirstHeaderSize = $Script:NSISBI_FIRST_HEADER_SIZE
+      HasLongDataBlockOffsets = $true; HasLargeFileSource = $true; SupportsExternalFiles = $true
+      HasExternalFile = $HasExternalFile; IsStubInstaller = $false
+      ExternalFileCount = if ($HasExternalFile) { 1 } else { 0 }; ExternalSegmentSize = 0L
+      DataBlockLength = [uint64]$DataBlockLow -bor ([uint64]$LengthHigh -shl 32)
+    }
+  }
+
+  $IsNsisBi = ($Flags -band $Script:NSISBI_CURRENT_FLAG_FORMAT) -ne 0
+  if (-not $IsNsisBi) {
+    return [pscustomobject]@{
+      IsNsisBi = $false; FlagRoute = 'standard'; FirstHeaderSize = $Script:NSIS_FIRST_HEADER_SIZE
+      HasLongDataBlockOffsets = $false; HasLargeFileSource = $false; SupportsExternalFiles = $false
+      HasExternalFile = $false; IsStubInstaller = $false; ExternalFileCount = 0; ExternalSegmentSize = 0L
+      DataBlockLength = [uint64]0
+    }
+  }
+
+  # NSISBI <=3.10 always sets 0x10/0x20/0x40 and uses 0x80/0x100 for
+  # external/stub state. NSISBI 3.12 compacts those flags to 0x10/0x20/0x40.
+  # The otherwise ambiguous 0x70 form is separated by the two trailing words:
+  # legacy AIO stores a nonzero uint64 data-block length, while current stub
+  # mode stores zeroes or a small split count plus a MiB segment size.
+  $HasLegacyStateBits = ($Flags -band 0x180) -ne 0
+  $LooksCurrentSplit = $DataBlockLow -le 65535 -and $DataBlockHigh -gt 0 -and $DataBlockHigh -le 1048576
+  $LooksCurrentUnsplit = $DataBlockLow -eq 0 -and $DataBlockHigh -eq 0
+  $IsCurrent = -not $HasLegacyStateBits -and (($Flags -band 0x60) -ne 0) -and ($LooksCurrentSplit -or $LooksCurrentUnsplit)
+  if ($Flags -eq $Script:NSISBI_CURRENT_FLAG_FORMAT) { $IsCurrent = $true }
+
+  $FlagRoute = if ($IsCurrent) { 'nsisbi-compact-3.12' } else { 'nsisbi-legacy' }
+  $HasExternalFile = if ($IsCurrent) {
+    ($Flags -band $Script:NSISBI_CURRENT_FLAG_HAS_EXTERNAL_FILE) -ne 0
+  } else {
+    ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
+  }
+  $IsStubInstaller = if ($IsCurrent) {
+    ($Flags -band $Script:NSISBI_CURRENT_FLAG_IS_STUB_INSTALLER) -ne 0
+  } else {
+    ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
+  }
+
+  return [pscustomobject]@{
+    IsNsisBi                = $true
+    FlagRoute               = $FlagRoute
+    FirstHeaderSize         = $Script:NSISBI_FIRST_HEADER_SIZE
+    HasLongDataBlockOffsets = $IsCurrent -or (($Flags -band $Script:NSISBI_FLAG_LONG_DATA_BLOCK_OFFSET) -ne 0)
+    HasLargeFileSource      = $IsCurrent -or (($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0)
+    SupportsExternalFiles   = $true
+    HasExternalFile         = $HasExternalFile
+    IsStubInstaller         = $IsStubInstaller
+    ExternalFileCount       = if ($IsCurrent -and $HasExternalFile) { if ($DataBlockLow) { [int]$DataBlockLow } else { 1 } } else { 0 }
+    ExternalSegmentSize     = if ($IsCurrent -and $HasExternalFile -and $DataBlockHigh) { [long]$DataBlockHigh * 1MB } else { 0L }
+    DataBlockLength         = if ($IsCurrent -and $HasExternalFile) { [uint64]0 } else { [uint64]$DataBlockLow -bor ([uint64]$DataBlockHigh -shl 32) }
+  }
+}
+
+function Test-NSISPackedHeaderRecord {
+  <#
+  .SYNOPSIS
+    Test a stock 32-bit NSIS packed-header record without decompressing it.
+  .PARAMETER Bytes
+    Probe containing the candidate record.
+  .PARAMETER Offset
+    Probe-relative offset of the uint32 packed-size word.
+  .PARAMETER AvailableBytes
+    Bytes available from the packed-size word through the declared archive.
+  .PARAMETER ExpectedHeaderBytes
+    Uncompressed logical header size from the first header.
   #>
   [OutputType([bool])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The installer bytes')]
-    [byte[]]$Bytes,
-
-    [Parameter(Mandatory, HelpMessage = 'The candidate NSIS first-header offset')]
-    [int]$FirstHeaderOffset
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][int]$Offset,
+    [Parameter(Mandatory)][long]$AvailableBytes,
+    [Parameter(Mandatory)][uint32]$ExpectedHeaderBytes
   )
 
-  if (Test-NSISPEHeaderAtOffset -Bytes $Bytes -Offset 0) { return $true }
+  if ($Offset -lt 0 -or $Offset + 4 -gt $Bytes.Length -or $AvailableBytes -le 4) { return $false }
+  $Packed = [BitConverter]::ToUInt32($Bytes, $Offset)
+  $Size = [uint32]($Packed -band $Script:NSISBI_PRE304_DATA_LENGTH_MASK)
+  if ($Size -eq 0 -or $Size -gt $AvailableBytes - 4) { return $false }
+  return ($Packed -band $Script:NSISBI_PRE304_EXTERNAL_DATA_FLAG) -ne 0 -or $Size -eq $ExpectedHeaderBytes
+}
 
-  $MinimumOffset = [Math]::Max(0, $FirstHeaderOffset - $Script:NSIS_MAX_BACKWARD_PE_SCAN)
-  $StartOffset = $FirstHeaderOffset - ($FirstHeaderOffset % $Script:NSIS_ARCHIVE_ALIGNMENT)
-  for ($Offset = $StartOffset; $Offset -ge $MinimumOffset; $Offset -= $Script:NSIS_ARCHIVE_ALIGNMENT) {
-    if ($Offset -eq $FirstHeaderOffset) { continue }
-    if (Test-NSISPEHeaderAtOffset -Bytes $Bytes -Offset $Offset) { return $true }
-  }
+function Test-NSISCodecStart {
+  <#
+  .SYNOPSIS
+    Test whether a probe begins with a recognized solid NSIS codec stream.
+  .PARAMETER Bytes
+    Probe containing the candidate codec bytes.
+  .PARAMETER Offset
+    Probe-relative codec offset.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][int]$Offset
+  )
 
-  return $false
+  if ($Offset -lt 0 -or $Offset -ge $Bytes.Length) { return $false }
+  $Probe = [byte[]]$Bytes[$Offset..($Bytes.Length - 1)]
+  return (Get-NSISLzmaFilterLength -Bytes $Probe) -ge 0 -or
+  (Test-NSISBZip2Header -Bytes $Probe) -or
+  (Test-NSISZlibHeader -Bytes $Probe)
+}
+
+function Test-NSISPre304FirstHeader {
+  <#
+  .SYNOPSIS
+    Distinguish NSISBI 3.03's unmarked 36-byte first header from stock NSIS.
+  .DESCRIPTION
+    The legacy fork retained stock first-header flags. Its two extra data-size
+    words occupy the location where stock NSIS begins its compressed header.
+    Stock framing at +0x1C therefore wins; only a structurally valid record at
+    +0x24 or an external-data marker without stock framing selects NSISBI.
+  .PARAMETER Bytes
+    Probe beginning at the candidate first header.
+  .PARAMETER LengthOfHeader
+    Logical header length from first-header offset 0x14.
+  .PARAMETER LengthOfFollowingData
+    Declared archive length from first-header offset 0x18.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][uint32]$LengthOfHeader,
+    [Parameter(Mandatory)][uint32]$LengthOfFollowingData
+  )
+
+  if ($Bytes.Length -lt $Script:NSISBI_FIRST_HEADER_SIZE) { return $false }
+  $DataBlockLow = [BitConverter]::ToUInt32($Bytes, 28)
+  $DataBlockHigh = [BitConverter]::ToUInt32($Bytes, 32)
+  $StockAvailable = [long]$LengthOfFollowingData - $Script:NSIS_FIRST_HEADER_SIZE
+  $LooksStock = (Test-NSISPackedHeaderRecord -Bytes $Bytes -Offset 28 -AvailableBytes $StockAvailable -ExpectedHeaderBytes $LengthOfHeader) -or
+  (Test-NSISCodecStart -Bytes $Bytes -Offset 28)
+  if ($LooksStock) { return $false }
+
+  $HasExternalData = ($DataBlockHigh -band $Script:NSISBI_PRE304_EXTERNAL_DATA_FLAG) -ne 0
+  if ($HasExternalData) { return $true }
+  if ($DataBlockLow -ne 0 -or $DataBlockHigh -ne 0) { return $false }
+
+  $LegacyAvailable = [long]$LengthOfFollowingData - $Script:NSISBI_FIRST_HEADER_SIZE
+  return (Test-NSISPackedHeaderRecord -Bytes $Bytes -Offset 36 -AvailableBytes $LegacyAvailable -ExpectedHeaderBytes $LengthOfHeader) -or
+  (Test-NSISCodecStart -Bytes $Bytes -Offset 36)
 }
 
 function Get-NSISFirstHeaderCandidate {
@@ -499,7 +764,6 @@ function Get-NSISFirstHeaderCandidate {
       foreach ($SignatureOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:NSIS_FIRST_HEADER_SIGNATURE -StartOffset $SearchStart -Length $SearchLength -Maximum 256)) {
         $Offset = $SignatureOffset - 4
         if ($Offset -lt 0 -or $Offset + $Script:NSIS_FIRST_HEADER_SIZE -gt $Stream.Length) { continue }
-        $IsFileAligned = ($Offset % $Script:NSIS_ARCHIVE_ALIGNMENT) -eq 0
         $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Script:NSIS_FIRST_HEADER_SIZE
         $Flags = [BitConverter]::ToUInt32($Header, 0)
 
@@ -507,38 +771,43 @@ function Get-NSISFirstHeaderCandidate {
         # the more expensive nearby-PE invariant.
         $InvalidFlagMask = [uint32]([uint64]4294967295 - [uint64]$Script:NSISBI_FIRST_HEADER_FLAGS_MASK)
         if (($Flags -band $InvalidFlagMask) -ne 0) { continue }
-        $IsNsisBi = ($Flags -band (-bnot $Script:NSIS_FIRST_HEADER_FLAGS_MASK)) -ne 0
-        $FirstHeaderSize = if (($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0) { $Script:NSISBI_FIRST_HEADER_SIZE } else { $Script:NSIS_FIRST_HEADER_SIZE }
-        if ($Offset + $FirstHeaderSize -gt $Stream.Length) { continue }
+        # NSISBI 3.03 uses the stock flag mask. Its additional two words are
+        # zero for all-in-one output or carry an external length whose high bit
+        # marks the sidecar. A stock payload cannot begin with two zero words
+        # because its packed header is nonempty.
         $LengthOfHeader = [BitConverter]::ToUInt32($Header, 20)
         $LengthOfFollowingData = [BitConverter]::ToUInt32($Header, 24)
+        $ProbeLength = [int][Math]::Min(64L, $Stream.Length - $Offset)
+        $FirstHeaderProbe = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $ProbeLength
+        $PotentialDataBlockWords = if ($Offset + $Script:NSISBI_FIRST_HEADER_SIZE -le $Stream.Length) { [byte[]]$FirstHeaderProbe[28..35] } else { [byte[]]::new(8) }
+        $IsPre304 = ($Flags -band $Script:NSISBI_CURRENT_FLAG_FORMAT) -eq 0 -and (Test-NSISPre304FirstHeader -Bytes $FirstHeaderProbe -LengthOfHeader $LengthOfHeader -LengthOfFollowingData $LengthOfFollowingData)
+        $IsNsisBi = $IsPre304 -or ($Flags -band $Script:NSISBI_CURRENT_FLAG_FORMAT) -ne 0
+        $FirstHeaderSize = if ($IsNsisBi) { $Script:NSISBI_FIRST_HEADER_SIZE } else { $Script:NSIS_FIRST_HEADER_SIZE }
+        if ($Offset + $FirstHeaderSize -gt $Stream.Length) { continue }
+        $DataBlockWords = if ($IsNsisBi) { $PotentialDataBlockWords } else { [byte[]]::new(8) }
+        $FlagInfo = Get-NSISFirstHeaderFlagInfo -Flags $Flags -DataBlockLow ([BitConverter]::ToUInt32($DataBlockWords, 0)) -DataBlockHigh ([BitConverter]::ToUInt32($DataBlockWords, 4)) -Pre304:$IsPre304
         if ($LengthOfHeader -le 0 -or $LengthOfHeader -gt $Script:NSIS_MAX_HEADER_SIZE) { continue }
         if ($LengthOfFollowingData -le $FirstHeaderSize -or $LengthOfFollowingData -gt $Stream.Length - $Offset) { continue }
-        # A file-aligned archive belongs to the outer PE stub. A non-aligned
-        # archive is accepted only when it is aligned relative to an embedded
-        # stub found by the bounded backward search, such as an NSIS payload
-        # stored as a resource of an outer launcher.
-        if ($IsFileAligned) {
-          if (-not (Test-NSISPEHeaderBeforeArchiveStream -Stream $Stream -FirstHeaderOffset $Offset)) { continue }
-        } else {
-          if (-not (Test-NSISRelativePEStubStream -Stream $Stream -FirstHeaderOffset $Offset)) { continue }
-        }
-        $DataBlockLength = if ($FirstHeaderSize -eq $Script:NSISBI_FIRST_HEADER_SIZE) {
-          [BitConverter]::ToUInt64((Read-BinaryBytes -Stream $Stream -Offset ($Offset + 28) -Count 8), 0)
-        } else {
-          [uint64]0
-        }
+        # Record the owning stub offset for CRC verification. Stepping backward
+        # in 512-byte units handles ordinary, concatenated, and embedded NSIS
+        # coordinate systems without accepting an unrelated MZ byte sequence.
+        $StubOffset = Get-NSISPEStubOffsetStream -Stream $Stream -FirstHeaderOffset $Offset
+        if ($StubOffset -lt 0) { continue }
         return [pscustomobject]@{
           Offset                  = $Offset
+          StubOffset              = $StubOffset
           Flags                   = $Flags
           FirstHeaderSize         = $FirstHeaderSize
-          IsNsisBi                = $IsNsisBi
-          HasLongDataBlockOffsets = ($Flags -band $Script:NSISBI_FLAG_LONG_DATA_BLOCK_OFFSET) -ne 0
-          HasLargeFileSource      = ($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0
-          SupportsExternalFiles   = ($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0
-          HasExternalFile         = ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
-          IsStubInstaller         = ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
-          DataBlockLength         = $DataBlockLength
+          IsNsisBi                = $FlagInfo.IsNsisBi
+          FlagRoute               = $FlagInfo.FlagRoute
+          HasLongDataBlockOffsets = $FlagInfo.HasLongDataBlockOffsets
+          HasLargeFileSource      = $FlagInfo.HasLargeFileSource
+          SupportsExternalFiles   = $FlagInfo.SupportsExternalFiles
+          HasExternalFile         = $FlagInfo.HasExternalFile
+          IsStubInstaller         = $FlagInfo.IsStubInstaller
+          ExternalFileCount       = $FlagInfo.ExternalFileCount
+          ExternalSegmentSize     = $FlagInfo.ExternalSegmentSize
+          DataBlockLength         = $FlagInfo.DataBlockLength
           LengthOfHeader          = $LengthOfHeader
           LengthOfFollowingData   = $LengthOfFollowingData
         }
@@ -565,27 +834,40 @@ function Get-NSISFirstHeaderCandidate {
     $InvalidFlagMask = [uint32]([uint64]4294967295 - [uint64]$Script:NSISBI_FIRST_HEADER_FLAGS_MASK)
     if (($Flags -band $InvalidFlagMask) -ne 0) { continue }
 
-    $IsNsisBi = ($Flags -band (-bnot $Script:NSIS_FIRST_HEADER_FLAGS_MASK)) -ne 0
-    $FirstHeaderSize = if (($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0) { $Script:NSISBI_FIRST_HEADER_SIZE } else { $Script:NSIS_FIRST_HEADER_SIZE }
-    if ($Offset + $FirstHeaderSize -gt $Bytes.Length) { continue }
-
+    $PotentialDataBlockLow = if ($Offset + $Script:NSISBI_FIRST_HEADER_SIZE -le $Bytes.Length) { [BitConverter]::ToUInt32($Bytes, $Offset + 28) } else { [uint32]0 }
+    $PotentialDataBlockHigh = if ($Offset + $Script:NSISBI_FIRST_HEADER_SIZE -le $Bytes.Length) { [BitConverter]::ToUInt32($Bytes, $Offset + 32) } else { [uint32]0 }
     $LengthOfHeader = [System.BitConverter]::ToUInt32($Bytes, $Offset + 20)
     $LengthOfFollowingData = [System.BitConverter]::ToUInt32($Bytes, $Offset + 24)
+    $ProbeEnd = [Math]::Min($Offset + 63, $Bytes.Length - 1)
+    $FirstHeaderProbe = [byte[]]$Bytes[$Offset..$ProbeEnd]
+    $IsPre304 = ($Flags -band $Script:NSISBI_CURRENT_FLAG_FORMAT) -eq 0 -and (Test-NSISPre304FirstHeader -Bytes $FirstHeaderProbe -LengthOfHeader $LengthOfHeader -LengthOfFollowingData $LengthOfFollowingData)
+    $IsNsisBi = $IsPre304 -or ($Flags -band $Script:NSISBI_CURRENT_FLAG_FORMAT) -ne 0
+    $FirstHeaderSize = if ($IsNsisBi) { $Script:NSISBI_FIRST_HEADER_SIZE } else { $Script:NSIS_FIRST_HEADER_SIZE }
+    if ($Offset + $FirstHeaderSize -gt $Bytes.Length) { continue }
+    $DataBlockLow = if ($IsNsisBi) { [BitConverter]::ToUInt32($Bytes, $Offset + 28) } else { [uint32]0 }
+    $DataBlockHigh = if ($IsNsisBi) { [BitConverter]::ToUInt32($Bytes, $Offset + 32) } else { [uint32]0 }
+    $FlagInfo = Get-NSISFirstHeaderFlagInfo -Flags $Flags -DataBlockLow $DataBlockLow -DataBlockHigh $DataBlockHigh -Pre304:$IsPre304
+
     if ($LengthOfHeader -le 0 -or $LengthOfHeader -gt $Script:NSIS_MAX_HEADER_SIZE) { continue }
     if ($LengthOfFollowingData -le $FirstHeaderSize -or $LengthOfFollowingData -gt $Bytes.Length - $Offset) { continue }
-    if (-not (Test-NSISPEHeaderBeforeArchive -Bytes $Bytes -FirstHeaderOffset $Offset)) { continue }
+    $StubOffset = Get-NSISPEStubOffsetBytes -Bytes $Bytes -FirstHeaderOffset $Offset
+    if ($StubOffset -lt 0) { continue }
 
     return [pscustomobject]@{
       Offset                  = $Offset
+      StubOffset              = [long]$StubOffset
       Flags                   = $Flags
       FirstHeaderSize         = $FirstHeaderSize
-      IsNsisBi                = $IsNsisBi
-      HasLongDataBlockOffsets = ($Flags -band $Script:NSISBI_FLAG_LONG_DATA_BLOCK_OFFSET) -ne 0
-      HasLargeFileSource      = ($Flags -band $Script:NSISBI_FLAG_LARGE_FILE_SOURCE) -ne 0
-      SupportsExternalFiles   = ($Flags -band $Script:NSISBI_FLAG_EXTERNAL_FILE_SUPPORT) -ne 0
-      HasExternalFile         = ($Flags -band $Script:NSISBI_FLAG_HAS_EXTERNAL_FILE) -ne 0
-      IsStubInstaller         = ($Flags -band $Script:NSISBI_FLAG_IS_STUB_INSTALLER) -ne 0
-      DataBlockLength         = if ($FirstHeaderSize -eq $Script:NSISBI_FIRST_HEADER_SIZE) { [BitConverter]::ToUInt64($Bytes, $Offset + 28) } else { [uint64]0 }
+      IsNsisBi                = $FlagInfo.IsNsisBi
+      FlagRoute               = $FlagInfo.FlagRoute
+      HasLongDataBlockOffsets = $FlagInfo.HasLongDataBlockOffsets
+      HasLargeFileSource      = $FlagInfo.HasLargeFileSource
+      SupportsExternalFiles   = $FlagInfo.SupportsExternalFiles
+      HasExternalFile         = $FlagInfo.HasExternalFile
+      IsStubInstaller         = $FlagInfo.IsStubInstaller
+      ExternalFileCount       = $FlagInfo.ExternalFileCount
+      ExternalSegmentSize     = $FlagInfo.ExternalSegmentSize
+      DataBlockLength         = $FlagInfo.DataBlockLength
       LengthOfHeader          = $LengthOfHeader
       LengthOfFollowingData   = $LengthOfFollowingData
     }
@@ -724,11 +1006,14 @@ function Get-NSISMtwCompressionCandidate {
     Candidate bytes beginning with the three-byte MTW record length
   .PARAMETER CompressedSize
     Available bytes in the enclosing NSIS payload
+  .PARAMETER AllowLz4
+    Permit raw LZ4 as the signatureless final candidate for a confirmed NSISBI header.
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Mandatory)][byte[]]$Bytes,
-    [long]$CompressedSize = -1
+    [long]$CompressedSize = -1,
+    [switch]$AllowLz4
   )
 
   if ($Bytes.Length -lt ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + 2)) { return @() }
@@ -739,12 +1024,19 @@ function Get-NSISMtwCompressionCandidate {
   # A three-byte integer alone is weak evidence. Require the first wrapped
   # block to expose a source-backed codec signature before classifying MTW.
   $InnerBytes = $Bytes[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Bytes.Length - 1)]
-  # NSISBI initializes every MTW LZMA worker with MTW_BLOCK_BUF_SIZE as its
-  # dictionary. Unlike ordinary NSIS LZMA, that size is not a power of two.
+  # NSISBI initializes every MTW LZMA worker with its source-defined block
+  # buffer size as the dictionary. Older observed output used a 2 MiB block;
+  # 3.12.3 uses a 4 MiB block, so both non-power-of-two dictionary values are
+  # structural LZMA evidence.
   if ($InnerBytes.Length -ge 5 -and $InnerBytes[0] -lt (9 * 5 * 5) -and
-    [BitConverter]::ToUInt32($InnerBytes, 1) -eq $Script:NSISBI_MTW_BLOCK_BUFFER_SIZE) { return @('Lzma') }
+    [BitConverter]::ToUInt32($InnerBytes, 1) -in $Script:NSISBI_MTW_LZMA_DICTIONARY_SIZES) { return @('Lzma') }
   if (Test-NSISBZip2Header -Bytes $InnerBytes) { return @('BZip2') }
   if (Test-NSISZlibHeader -Bytes $InnerBytes) { return @('Zlib', 'Deflate') }
+
+  # Current NSISBI zlib workers emit raw DEFLATE, while raw LZ4 blocks have no
+  # magic. A confirmed MTW route therefore tries bounded DEFLATE first and LZ4
+  # second; the logical NSIS header and complete stream framing decide the tie.
+  if ($AllowLz4) { return @('Deflate', 'Lz4') }
   return @()
 }
 
@@ -756,14 +1048,17 @@ function Test-NSISMtwHeader {
     Candidate bytes beginning with a three-byte MTW record length
   .PARAMETER CompressedSize
     Available bytes in the enclosing NSIS payload
+  .PARAMETER AllowLz4
+    Permit raw LZ4 probing after the outer first header established NSISBI.
   #>
   [OutputType([bool])]
   param (
     [Parameter(Mandatory)][byte[]]$Bytes,
-    [long]$CompressedSize = -1
+    [long]$CompressedSize = -1,
+    [switch]$AllowLz4
   )
 
-  return (Get-NSISMtwCompressionCandidate -Bytes $Bytes -CompressedSize $CompressedSize).Count -gt 0
+  return (Get-NSISMtwCompressionCandidate -Bytes $Bytes -CompressedSize $CompressedSize -AllowLz4:$AllowLz4).Count -gt 0
 }
 
 function Read-NSISMtwBlock {
@@ -806,7 +1101,7 @@ function Read-NSISMtwBlock {
   $ProbeLength = [int][Math]::Min(24L, [long]$CompressedBlockSize)
   $Probe = Read-BinaryBytes -Stream $Stream -Offset $RecordOffset -Count ($Script:NSISBI_MTW_BLOCK_HEADER_SIZE + $ProbeLength)
   $Candidates = if ([string]::IsNullOrWhiteSpace($Compression)) {
-    @(Get-NSISMtwCompressionCandidate -Bytes $Probe -CompressedSize ($Stream.Length - $RecordOffset))
+    @(Get-NSISMtwCompressionCandidate -Bytes $Probe -CompressedSize ($Stream.Length - $RecordOffset) -AllowLz4)
   } else {
     @($Compression)
   }
@@ -820,11 +1115,18 @@ function Read-NSISMtwBlock {
     $Decoder = $null
     $BlockOutput = [System.IO.MemoryStream]::new($Script:NSISBI_MTW_BLOCK_DATA_SIZE)
     try {
-      $InnerProbe = $Probe[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Probe.Length - 1)]
-      $LzmaFilterLength = if ($Candidate -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $InnerProbe } else { -1 }
-      $Decoder = New-NSISDecoder -Compression $Candidate -PayloadStream $CompressedBlock `
-        -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
-      $null = Copy-BoundedStream -Source $Decoder -Destination $BlockOutput -MaximumBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+      if ($Candidate -eq 'Lz4') {
+        Import-NSISLz4Decoder
+        $CompressedBytes = Read-BinaryBytes -Stream $CompressedBlock -Offset 0 -Count $CompressedBlockSize
+        $DecodedBytes = [Dumplings.InstallerParsers.NSIS.NsisLz4BlockDecoder]::Decode($CompressedBytes, $Script:NSISBI_MTW_BLOCK_DATA_SIZE)
+        $BlockOutput.Write($DecodedBytes, 0, $DecodedBytes.Length)
+      } else {
+        $InnerProbe = $Probe[$Script:NSISBI_MTW_BLOCK_HEADER_SIZE..($Probe.Length - 1)]
+        $LzmaFilterLength = if ($Candidate -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $InnerProbe } else { -1 }
+        $Decoder = New-NSISDecoder -Compression $Candidate -PayloadStream $CompressedBlock `
+          -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+        $null = Copy-BoundedStream -Source $Decoder -Destination $BlockOutput -MaximumBytes $Script:NSISBI_MTW_BLOCK_DATA_SIZE
+      }
       if ($BlockOutput.Length -eq 0) { throw 'The NSISBI MTW block did not produce output' }
       $DecodedBlock = $BlockOutput.ToArray()
       $SelectedCompression = $Candidate
@@ -1028,6 +1330,57 @@ function New-NSISDecoder {
   }
 }
 
+function Get-NSISArchiveCrcInfo {
+  <#
+  .SYNOPSIS
+    Verify the stock NSIS archive checksum using the runtime's exact byte range.
+  .PARAMETER Stream
+    Caller-owned installer stream. The checksum helper restores its position.
+  .PARAMETER FirstHeader
+    Validated first-header candidate including archive and owning-stub offsets.
+  .OUTPUTS
+    Structured checksum presence, coverage range, expected value, and validity.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][pscustomobject]$FirstHeader
+  )
+
+  if (($FirstHeader.Flags -band 0x04) -ne 0) {
+    return [pscustomobject]@{ Status = 'NotPresent'; IsPresent = $false; IsVerified = $false; IsValid = $null; StartOffset = $null; Length = 0L; Expected = $null; Actual = $null }
+  }
+  if ($FirstHeader.IsNsisBi) {
+    # Legacy NSISBI checks a fork-specific header CRC rather than the stock
+    # continuous archive range. Keep that route explicit until each fork ABI is
+    # backed by compiler output and do not apply the stock algorithm to it.
+    return [pscustomobject]@{ Status = 'ForkSpecific'; IsPresent = $true; IsVerified = $false; IsValid = $null; StartOffset = $null; Length = 0L; Expected = $null; Actual = $null }
+  }
+
+  $ArchiveEnd = [long]$FirstHeader.Offset + [long]$FirstHeader.LengthOfFollowingData
+  $ChecksumOffset = $ArchiveEnd - 4
+  $ChecksumStart = [long]$FirstHeader.StubOffset + 512
+  if ($ChecksumStart -gt $ChecksumOffset -or $ChecksumOffset + 4 -gt $Stream.Length) {
+    throw 'The NSIS archive CRC32 range is outside the owning PE and declared archive.'
+  }
+
+  $Expected = [uint32](Read-BinaryInteger -Stream $Stream -Offset $ChecksumOffset -Size 4)
+  $ChecksumRange = New-BoundedReadStream -Stream $Stream -Offset $ChecksumStart -Length ($ChecksumOffset - $ChecksumStart) -LeaveOpen
+  try { $Actual = [uint32](Get-BinaryCrc32 -Stream $ChecksumRange -MaximumBytes $ChecksumRange.Length) }
+  finally { $ChecksumRange.Dispose() }
+
+  return [pscustomobject]@{
+    Status      = if ($Actual -eq $Expected) { 'Valid' } else { 'Invalid' }
+    IsPresent   = $true
+    IsVerified  = $true
+    IsValid     = $Actual -eq $Expected
+    StartOffset = $ChecksumStart
+    Length      = $ChecksumOffset - $ChecksumStart
+    Expected    = $Expected
+    Actual      = $Actual
+  }
+}
+
 function Get-NSISHeaderData {
   <#
   .SYNOPSIS
@@ -1052,10 +1405,17 @@ function Get-NSISHeaderData {
     $FirstHeaderOffset = $FirstHeader.Offset
     $LengthOfHeader = $FirstHeader.LengthOfHeader
     $LengthOfFollowingData = $FirstHeader.LengthOfFollowingData
+    $ArchiveCrcInfo = Get-NSISArchiveCrcInfo -Stream $InstallerStream -FirstHeader $FirstHeader
+    if ($ArchiveCrcInfo.IsVerified -and -not $ArchiveCrcInfo.IsValid) {
+      throw "The NSIS archive CRC32 does not match: expected $($ArchiveCrcInfo.Expected.ToString('X8')), got $($ArchiveCrcInfo.Actual.ToString('X8'))."
+    }
 
     $PayloadOffset = $FirstHeaderOffset + $FirstHeader.FirstHeaderSize
     $PayloadLength = [long]$LengthOfFollowingData - $FirstHeader.FirstHeaderSize
-    $PackedSizeWidth = if ($FirstHeader.HasLongDataBlockOffsets) { 8 } else { 4 }
+    # NSISBI 3.03 widens data-block offsets carried by EW_EXTRACTFILE, but its
+    # add_data/_dodecomp framing still stores a 32-bit packed-size prefix. Later
+    # NSISBI ABIs widen the record prefix as well.
+    $PackedSizeWidth = if ($FirstHeader.HasLongDataBlockOffsets -and $FirstHeader.FlagRoute -ne 'nsisbi-pre-3.04.1') { 8 } else { 4 }
     # Keep the comparison in Int64: large NSIS archives can legitimately carry
     # a payload whose declared length is greater than Int32.MaxValue.
     $ProbeLength = [int][Math]::Min(24L, [long]$PayloadLength)
@@ -1069,117 +1429,147 @@ function Get-NSISHeaderData {
     }
     $CompressedSizeMask = if ($PackedSizeWidth -eq 8) { [uint64]0x7FFFFFFFFFFFFFFF } else { [uint64]0x7FFFFFFF }
     $CompressedHeaderSize = $PackedHeaderSize -band $CompressedSizeMask
-    $IsSolid = $true
-    $CompressionCandidates = @()
-    $CandidateHeader = $Signature
-    $LzmaFilterLength = Get-NSISLzmaFilterLength -Bytes $Signature
-    $IsMtw = Test-NSISMtwHeader -Bytes $Signature -CompressedSize $PayloadLength
+    # NSISBI 3.03 still uses the stock NSIS compression framing. MTW/LZ4 was
+    # introduced by a later fork ABI, so probing it here would misinterpret an
+    # ordinary LZMA stream whose first bytes happen to satisfy an MTW record.
+    $AllowMtwLz4 = $FirstHeader.IsNsisBi -and $FirstHeader.FlagRoute -ne 'nsisbi-pre-3.04.1'
+    $PackedSizeMarker = if ($PackedSizeWidth -eq 8) { [uint64]::Parse('9223372036854775808') } else { [uint64]2147483648 }
+    $HasPackedHeaderPrefix = ($PackedHeaderSize -band $PackedSizeMarker) -ne 0
 
-    # Distinguish stored non-solid, solid codec streams, and packed-size-prefixed
-    # non-solid headers using the exact first bytes consumed by the NSIS stub.
-    if ($IsMtw) {
-      $CompressionCandidates = @('Mtw')
-    } elseif ($PackedHeaderSize -eq $LengthOfHeader) {
-      $IsSolid = $false
-      $CompressionCandidates = @('None')
-    } elseif ($LzmaFilterLength -ge 0) {
-      $CompressionCandidates = @('Lzma')
-    } elseif (Test-NSISBZip2Header -Bytes $Signature) {
-      $CompressionCandidates = @('BZip2')
-    } elseif (Test-NSISZlibHeader -Bytes $Signature) {
-      $CompressionCandidates = @('Zlib', 'Deflate')
-    } elseif ($Signature[$PackedSizeWidth - 1] -eq 0x80) {
-      $IsSolid = $false
-      if ($CompressedHeaderSize -eq 0 -or $CompressedHeaderSize -gt $PayloadLength - $PackedSizeWidth) { throw 'The NSIS packed header size is outside the archive data range' }
-      $CandidateHeader = $Signature[$PackedSizeWidth..($Signature.Length - 1)]
-      $CompressionCandidates = Get-NSISCompressionCandidates -Bytes $CandidateHeader -CompressedSize $CompressedHeaderSize -ExpectedUncompressedSize $LengthOfHeader
+    # A solid LZMA stream can begin with bytes that also form a plausible
+    # packed-size value (for example 5D 00 00 80). Keep both physical routes
+    # and let exact decompressed-header validation select the real one.
+    $HeaderRoutes = [System.Collections.Generic.List[object]]::new()
+    if ($PackedHeaderSize -eq $LengthOfHeader) {
+      $HeaderRoutes.Add([pscustomobject]@{ Name = 'stored-non-solid'; IsSolid = $false; CandidateHeader = $Signature; Compression = [string[]]@('None'); DataOffset = $PayloadOffset + $PackedSizeWidth; DataLength = [long]$LengthOfHeader })
     } else {
-      $CompressionCandidates = Get-NSISCompressionCandidates -Bytes $CandidateHeader -CompressedSize $PayloadLength -ExpectedUncompressedSize ($LengthOfHeader + 4)
-    }
+      $DirectCompression = if (Test-NSISMtwHeader -Bytes $Signature -CompressedSize $PayloadLength -AllowLz4:$AllowMtwLz4) {
+        [string[]]@('Mtw')
+      } elseif ((Get-NSISLzmaFilterLength -Bytes $Signature) -ge 0) {
+        [string[]]@('Lzma')
+      } elseif (Test-NSISBZip2Header -Bytes $Signature) {
+        [string[]]@('BZip2')
+      } elseif (Test-NSISZlibHeader -Bytes $Signature) {
+        [string[]]@('Zlib', 'Deflate')
+      } else {
+        [string[]]@()
+      }
+      if ($DirectCompression.Count -gt 0) {
+        $HeaderRoutes.Add([pscustomobject]@{ Name = 'solid-signature'; IsSolid = $true; CandidateHeader = $Signature; Compression = $DirectCompression; DataOffset = $PayloadOffset; DataLength = $PayloadLength })
+      }
 
-    # The solid form starts directly with the codec stream. Non-solid installers prefix it with a 32- or 64-bit packed size.
-    $PayloadDataOffset = $PayloadOffset + $(if ($IsSolid) { 0 } else { $PackedSizeWidth })
-    $AvailablePayloadDataLength = $PayloadOffset + $PayloadLength - $PayloadDataOffset
-    $PayloadDataLength = if (-not $IsSolid) { [long]$CompressedHeaderSize } else { $AvailablePayloadDataLength }
-    if ($PayloadDataLength -le 0 -or $PayloadDataLength -gt $AvailablePayloadDataLength) { throw 'The NSIS compressed header data range is invalid' }
+      if ($HasPackedHeaderPrefix -and $CompressedHeaderSize -gt 0 -and $CompressedHeaderSize -le $PayloadLength - $PackedSizeWidth) {
+        $PrefixedHeader = [byte[]]$Signature[$PackedSizeWidth..($Signature.Length - 1)]
+        $PrefixedCompression = if (Test-NSISMtwHeader -Bytes $PrefixedHeader -CompressedSize $CompressedHeaderSize -AllowLz4:$AllowMtwLz4) {
+          [string[]]@('Mtw')
+        } else {
+          [string[]]@(Get-NSISCompressionCandidates -Bytes $PrefixedHeader -CompressedSize $CompressedHeaderSize -ExpectedUncompressedSize $LengthOfHeader)
+        }
+        if ($PrefixedCompression.Count -gt 0) {
+          $HeaderRoutes.Add([pscustomobject]@{ Name = 'packed-non-solid'; IsSolid = $false; CandidateHeader = $PrefixedHeader; Compression = $PrefixedCompression; DataOffset = $PayloadOffset + $PackedSizeWidth; DataLength = [long]$CompressedHeaderSize })
+        }
+      }
+
+      if ($DirectCompression.Count -eq 0) {
+        $FallbackCompression = [string[]]@(Get-NSISCompressionCandidates -Bytes $Signature -CompressedSize $PayloadLength -ExpectedUncompressedSize ($LengthOfHeader + $PackedSizeWidth))
+        if ($FallbackCompression.Count -gt 0) {
+          $HeaderRoutes.Add([pscustomobject]@{ Name = 'solid-probed'; IsSolid = $true; CandidateHeader = $Signature; Compression = $FallbackCompression; DataOffset = $PayloadOffset; DataLength = $PayloadLength })
+        }
+      }
+    }
+    if ($HeaderRoutes.Count -eq 0) { throw 'The NSIS header compression and framing route could not be identified' }
+
     $LastError = $null
+    $AttemptedRoutes = [System.Collections.Generic.List[string]]::new()
 
     # Ambiguous DEFLATE framing is resolved by bounded decode plus exact header
     # length validation; a codec is accepted only when it produces the full header.
-    foreach ($Compression in $CompressionCandidates) {
-      $PayloadStream = New-BoundedReadStream -Stream $InstallerStream -Offset $PayloadDataOffset -Length $PayloadDataLength -LeaveOpen
-      $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $CandidateHeader } else { -1 }
-      $Decoder = $null
+    foreach ($HeaderRoute in $HeaderRoutes) {
+      $IsSolid = [bool]$HeaderRoute.IsSolid
+      $CandidateHeader = [byte[]]$HeaderRoute.CandidateHeader
+      $PayloadDataOffset = [long]$HeaderRoute.DataOffset
+      $PayloadDataLength = [long]$HeaderRoute.DataLength
+      foreach ($Compression in [string[]]$HeaderRoute.Compression) {
+        $AttemptedRoutes.Add("$($HeaderRoute.Name)/$Compression")
+        $PayloadStream = New-BoundedReadStream -Stream $InstallerStream -Offset $PayloadDataOffset -Length $PayloadDataLength -LeaveOpen
+        $LzmaFilterLength = if ($Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $CandidateHeader } else { -1 }
+        $Decoder = $null
 
-      try {
-        $EmbeddedSizeWidth = if ($IsSolid -and $Compression -ne 'None') { $PackedSizeWidth } else { 0 }
-        $RequiredOutputBytes = [int]$LengthOfHeader + $EmbeddedSizeWidth
-        $EffectiveCompression = $Compression
-        $MtwBlockCount = 0
-        if ($Compression -eq 'Mtw') {
-          $MtwResult = Read-NSISMtwHeaderData -Stream $PayloadStream -ExpectedOutputBytes $RequiredOutputBytes
-          $Decoder = [System.IO.MemoryStream]::new($MtwResult.Bytes, $false)
-          $EffectiveCompression = "Mtw-$($MtwResult.Compression)"
-          $MtwBlockCount = $MtwResult.BlockCount
-        } else {
-          $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $RequiredOutputBytes
-        }
-
-        if ($IsSolid -and $Compression -ne 'None') {
-          $HeaderSizeBytes = New-Object 'byte[]' $PackedSizeWidth
-          if ($Decoder.Read($HeaderSizeBytes, 0, $HeaderSizeBytes.Length) -ne $HeaderSizeBytes.Length) { throw 'The NSIS solid header length is truncated' }
-          $EmbeddedHeaderLength = if ($PackedSizeWidth -eq 8) {
-            [System.BitConverter]::ToUInt64($HeaderSizeBytes, 0)
+        try {
+          $EmbeddedSizeWidth = if ($IsSolid -and $Compression -ne 'None') { $PackedSizeWidth } else { 0 }
+          $RequiredOutputBytes = [int]$LengthOfHeader + $EmbeddedSizeWidth
+          $EffectiveCompression = $Compression
+          $MtwBlockCount = 0
+          if ($Compression -eq 'Mtw') {
+            $MtwResult = Read-NSISMtwHeaderData -Stream $PayloadStream -ExpectedOutputBytes $RequiredOutputBytes
+            $Decoder = [System.IO.MemoryStream]::new($MtwResult.Bytes, $false)
+            $EffectiveCompression = "Mtw-$($MtwResult.Compression)"
+            $MtwBlockCount = $MtwResult.BlockCount
           } else {
-            [uint64][System.BitConverter]::ToUInt32($HeaderSizeBytes, 0)
+            $Decoder = New-NSISDecoder -Compression $Compression -PayloadStream $PayloadStream -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes $RequiredOutputBytes
           }
-          if ($EmbeddedHeaderLength -ne $LengthOfHeader) { throw 'The NSIS solid header length does not match the first header' }
-        }
 
-        $HeaderBytes = New-Object 'byte[]' ([int]$LengthOfHeader)
-        $Read = 0
-        while ($Read -lt $HeaderBytes.Length) {
-          $ChunkSize = $Decoder.Read($HeaderBytes, $Read, $HeaderBytes.Length - $Read)
-          if ($ChunkSize -le 0) { break }
-          $Read += $ChunkSize
-        }
-        if ($Read -ne $HeaderBytes.Length) { throw 'The NSIS header stream is truncated' }
+          if ($IsSolid -and $Compression -ne 'None') {
+            $HeaderSizeBytes = New-Object 'byte[]' $PackedSizeWidth
+            if ($Decoder.Read($HeaderSizeBytes, 0, $HeaderSizeBytes.Length) -ne $HeaderSizeBytes.Length) { throw 'The NSIS solid header length is truncated' }
+            $EmbeddedHeaderLength = if ($PackedSizeWidth -eq 8) {
+              [System.BitConverter]::ToUInt64($HeaderSizeBytes, 0)
+            } else {
+              [uint64][System.BitConverter]::ToUInt32($HeaderSizeBytes, 0)
+            }
+            if ($EmbeddedHeaderLength -ne $LengthOfHeader) { throw 'The NSIS solid header length does not match the first header' }
+          }
 
-        return [pscustomobject]@{
-          Path                    = $InstallerPath
-          FirstHeaderOffset       = $FirstHeaderOffset
-          FirstHeaderFlags        = $FirstHeader.Flags
-          FirstHeaderSize         = $FirstHeader.FirstHeaderSize
-          IsNsisBi                = $FirstHeader.IsNsisBi
-          HasLongDataBlockOffsets = $FirstHeader.HasLongDataBlockOffsets
-          HasLargeFileSource      = $FirstHeader.HasLargeFileSource
-          SupportsExternalFiles   = $FirstHeader.SupportsExternalFiles
-          HasExternalFile         = $FirstHeader.HasExternalFile
-          IsStubInstaller         = $FirstHeader.IsStubInstaller
-          DataBlockLength         = $FirstHeader.DataBlockLength
-          ArchiveSize             = $LengthOfFollowingData
-          HeaderSize              = $LengthOfHeader
-          PayloadOffset           = $PayloadOffset
-          PayloadLength           = $PayloadLength
-          PayloadDataOffset       = $PayloadDataOffset
-          PayloadDataLength       = $PayloadDataLength
-          PackedSizeWidth         = $PackedSizeWidth
-          CompressedHeaderSize    = $CompressedHeaderSize
-          Compression             = $EffectiveCompression
-          MtwBlockCount           = $MtwBlockCount
-          IsSolid                 = $IsSolid
-          HeaderBytes             = $HeaderBytes
-          PEInfo                  = Get-PEInfo -Path $InstallerPath
+          $HeaderBytes = New-Object 'byte[]' ([int]$LengthOfHeader)
+          $Read = 0
+          while ($Read -lt $HeaderBytes.Length) {
+            $ChunkSize = $Decoder.Read($HeaderBytes, $Read, $HeaderBytes.Length - $Read)
+            if ($ChunkSize -le 0) { break }
+            $Read += $ChunkSize
+          }
+          if ($Read -ne $HeaderBytes.Length) { throw 'The NSIS header stream is truncated' }
+
+          return [pscustomobject]@{
+            Path                    = $InstallerPath
+            FirstHeaderOffset       = $FirstHeaderOffset
+            StubOffset              = $FirstHeader.StubOffset
+            FirstHeaderFlags        = $FirstHeader.Flags
+            FirstHeaderSize         = $FirstHeader.FirstHeaderSize
+            FirstHeaderFlagRoute    = $FirstHeader.FlagRoute
+            IsNsisBi                = $FirstHeader.IsNsisBi
+            HasLongDataBlockOffsets = $FirstHeader.HasLongDataBlockOffsets
+            HasLargeFileSource      = $FirstHeader.HasLargeFileSource
+            SupportsExternalFiles   = $FirstHeader.SupportsExternalFiles
+            HasExternalFile         = $FirstHeader.HasExternalFile
+            IsStubInstaller         = $FirstHeader.IsStubInstaller
+            ExternalFileCount       = $FirstHeader.ExternalFileCount
+            ExternalSegmentSize     = $FirstHeader.ExternalSegmentSize
+            DataBlockLength         = $FirstHeader.DataBlockLength
+            ArchiveSize             = $LengthOfFollowingData
+            ArchiveCrcInfo          = $ArchiveCrcInfo
+            HeaderSize              = $LengthOfHeader
+            PayloadOffset           = $PayloadOffset
+            PayloadLength           = $PayloadLength
+            PayloadDataOffset       = $PayloadDataOffset
+            PayloadDataLength       = $PayloadDataLength
+            PackedSizeWidth         = $PackedSizeWidth
+            CompressedHeaderSize    = $CompressedHeaderSize
+            Compression             = $EffectiveCompression
+            MtwBlockCount           = $MtwBlockCount
+            IsSolid                 = $IsSolid
+            HeaderBytes             = $HeaderBytes
+            PEInfo                  = Get-PEInfo -Path $InstallerPath
+          }
+        } catch {
+          $LastError = $_
+        } finally {
+          if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
+          $PayloadStream.Dispose()
         }
-      } catch {
-        $LastError = $_
-      } finally {
-        if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
-        $PayloadStream.Dispose()
       }
     }
 
-    throw "Failed to decode the NSIS header using $($CompressionCandidates -join ', '): $($LastError.Exception.Message)"
+    throw "Failed to decode the NSIS header using $($AttemptedRoutes -join ', '): $($LastError.Exception.Message)"
   } finally {
     $InstallerStream.Dispose()
   }
@@ -1366,8 +1756,237 @@ function ConvertFrom-NSISBiOpcode {
   )
 
   if ($Opcode -le $Script:NSIS_OPCODE_EXTRACT_FILE) { return [int]$Opcode }
-  if ($Opcode -le ($Script:NSIS_OPCODE_EXTRACT_FILE + 2)) { return [int]::MaxValue }
+  if ($Opcode -eq ($Script:NSIS_OPCODE_EXTRACT_FILE + 1)) { return $Script:NSIS_OPCODE_EXTRACT_STUB_FILE }
+  if ($Opcode -eq ($Script:NSIS_OPCODE_EXTRACT_FILE + 2)) { return $Script:NSIS_OPCODE_VERIFY_EXTERNAL_FILE }
   return [int]$Opcode - 2
+}
+
+function Get-NSISEntries {
+  <#
+  .SYNOPSIS
+    Parse fixed-width records from the compiled NSIS command table.
+  .PARAMETER HeaderBytes
+    Decompressed logical NSIS header containing the command block.
+  .PARAMETER BlockHeaders
+    Validated NSIS block table.
+  .PARAMETER VersionInfo
+    Optional resolved catalog profile used to normalize raw opcodes.
+  .PARAMETER IsNsisBi
+    Selects NSISBI's 36-byte record with eight operands instead of the
+    standard 28-byte record with six operands.
+  .PARAMETER HasNsisBiExternalOpcodes
+    Whether this NSISBI ABI inserted its two external-file opcodes after the
+    ordinary extraction command. NSISBI 3.03 predates those commands.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The decompressed NSIS header bytes')]
+    [byte[]]$HeaderBytes,
+
+    [Parameter(Mandatory, HelpMessage = 'The parsed NSIS block headers')]
+    [pscustomobject[]]$BlockHeaders,
+
+    [Parameter(HelpMessage = 'The resolved NSIS command layout')]
+    [pscustomobject]$VersionInfo,
+
+    [Parameter(HelpMessage = 'Whether the entry table uses eight NSISBI operands')]
+    [bool]$IsNsisBi = $false,
+
+    [Parameter(HelpMessage = 'Whether NSISBI external-file opcodes shift later commands')]
+    [bool]$HasNsisBiExternalOpcodes = $true
+  )
+
+  $EntryBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 2
+  if ($BlockHeaders[2].Count -gt $Script:NSIS_MAX_ENTRY_COUNT) { throw 'The NSIS entry table exceeds the supported parser limit' }
+  $EntryCount = [int]$BlockHeaders[2].Count
+  $EntrySize = if ($IsNsisBi) { $Script:NSISBI_ENTRY_SIZE } else { $Script:NSIS_ENTRY_SIZE }
+  $ValueCount = if ($IsNsisBi) { 9 } else { 7 }
+  if ($EntryBlock.Length -lt ($EntryCount * $EntrySize)) { throw 'The NSIS entry table is truncated' }
+
+  $Entries = [System.Collections.Generic.List[object]]::new($EntryCount)
+  for ($EntryIndex = 0; $EntryIndex -lt $EntryCount; $EntryIndex++) {
+    $Offset = $EntryIndex * $EntrySize
+    $Raw = [uint32[]]::new($ValueCount)
+    $Values = [int[]]::new($ValueCount)
+    for ($ValueIndex = 0; $ValueIndex -lt $ValueCount; $ValueIndex++) {
+      $ValueOffset = $Offset + ($ValueIndex * 4)
+      $Raw[$ValueIndex] = [System.BitConverter]::ToUInt32($EntryBlock, $ValueOffset)
+      $Values[$ValueIndex] = [System.BitConverter]::ToInt32($EntryBlock, $ValueOffset)
+    }
+
+    # NSISBI 3.04 and later insert two external-file commands after
+    # EW_EXTRACTFILE. The 3.03 ABI widens the record without shifting opcodes.
+    $LayoutOpcode = if ($IsNsisBi -and $HasNsisBiExternalOpcodes) { ConvertFrom-NSISBiOpcode -Opcode $Raw[0] } else { [int]$Raw[0] }
+    $Opcode = if ($VersionInfo) {
+      Get-NSISNormalizedOpcode -Opcode $LayoutOpcode -CatalogProfile $VersionInfo.Profile -LogCmdIsEnabled $VersionInfo.LogCmdIsEnabled
+    } else {
+      $LayoutOpcode
+    }
+    $Entries.Add([pscustomobject]@{
+        Opcode       = $Opcode
+        RawOpcode    = $Raw[0]
+        LayoutOpcode = $LayoutOpcode
+        Raw          = $Raw
+        Values       = $Values
+      })
+  }
+  return $Entries.ToArray()
+}
+
+function Get-NSISAnsiVariableIndexAtStringOffset {
+  <#
+  .SYNOPSIS
+    Decode an exact variable-only NSIS 2 ANSI string.
+  .PARAMETER StringsBlock
+    Raw ANSI strings block.
+  .PARAMETER Offset
+    Character/byte offset into the strings block.
+  #>
+  [OutputType([Nullable[int]])]
+  param (
+    [Parameter(Mandatory)][byte[]]$StringsBlock,
+    [Parameter(Mandatory)][int]$Offset
+  )
+
+  if ($Offset -lt 0 -or $Offset + 3 -ge $StringsBlock.Length) { return $null }
+  if ($StringsBlock[$Offset] -ne 253 -or $StringsBlock[$Offset + 3] -ne 0) { return $null }
+  return [int](($StringsBlock[$Offset + 1] -band 0x7F) -bor (($StringsBlock[$Offset + 2] -band 0x7F) -shl 7))
+}
+
+function Get-NSISLegacyVariableProfileEvidence {
+  <#
+  .SYNOPSIS
+    Distinguish source-backed NSIS variable-table generations through 2.25.
+  .DESCRIPTION
+    NSIS 2.04 added $_OUTDIR at index 29. NSIS 2.26 inserted EXEPATH and
+    EXEFILE, moving HWND_PARENT and $_OUTDIR to their current indexes. This
+    follows 7-Zip's DetectNsisType probes and does not infer a marketing
+    version from arbitrary strings.
+  .PARAMETER StringsBlock
+    Raw NSIS 2 ANSI strings block.
+  .PARAMETER Entries
+    Raw command records after NSISBI command-number normalization.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][byte[]]$StringsBlock,
+    [AllowEmptyCollection()]
+    [Parameter(Mandatory)][pscustomobject[]]$Entries
+  )
+
+  $IsLegacy225 = $false
+  $IsLegacy200 = $false
+  foreach ($Entry in $Entries) {
+    if ($Entry.LayoutOpcode -eq $Script:NSIS_OPCODE_GET_DLG_ITEM) {
+      $DialogVariable = Get-NSISAnsiVariableIndexAtStringOffset -StringsBlock $StringsBlock -Offset $Entry.Values[2]
+      if ($DialogVariable -eq 27) {
+        $IsLegacy225 = $true
+        if ($Entry.Values[1] -eq 29) { $IsLegacy200 = $true; break }
+      }
+      continue
+    }
+    if ($Entry.LayoutOpcode -eq $Script:NSIS_OPCODE_ASSIGN_VAR -and
+      $Entry.Values[1] -eq 29 -and $Entry.Values[3] -eq 0 -and $Entry.Values[4] -eq 0) {
+      $SourceVariable = Get-NSISAnsiVariableIndexAtStringOffset -StringsBlock $StringsBlock -Offset $Entry.Values[2]
+      if ($SourceVariable -eq $Script:NSIS_PREDEFINED_VAR_OUTDIR) { $IsLegacy225 = $true }
+    }
+  }
+
+  return [pscustomobject]@{
+    VariableRoute = if ($IsLegacy200) { 'legacy-200' } elseif ($IsLegacy225) { 'legacy-225' } else { 'current' }
+    IsLegacy200   = $IsLegacy200
+    IsLegacy225   = $IsLegacy225
+  }
+}
+
+function Resolve-NSISCatalogProfile {
+  <#
+  .SYNOPSIS
+    Resolve one catalog profile from validated string, command, and fork evidence.
+  .PARAMETER CommandType
+    Source-backed command ABI selected by candidate scoring.
+  .PARAMETER Unicode
+    Whether the strings table uses UTF-16LE code units.
+  .PARAMETER IsNsisBi
+    Whether the first header and command records use NSISBI extensions.
+  .PARAMETER StringsBlock
+    Raw strings block used for legacy variable-table detection.
+  .PARAMETER Entries
+    Parsed raw command records.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$CommandType,
+    [Parameter(Mandatory)][bool]$Unicode,
+    [Parameter(Mandatory)][bool]$IsNsisBi,
+    [Parameter(Mandatory)][byte[]]$StringsBlock,
+    [Parameter(Mandatory)][pscustomobject[]]$Entries
+  )
+
+  $CharacterMode = if ($Unicode) { 'Unicode' } else { 'Ansi' }
+  if ($IsNsisBi) {
+    if ($CommandType -cne 'NSIS3') { throw "NSISBI command layout '$CommandType' is not source-backed." }
+    return Get-NSISCatalogProfile -Id "nsisbi-nsis3-$($CharacterMode.ToLowerInvariant())"
+  }
+
+  if ($CommandType -like 'Park*') {
+    $ParkId = switch ($CommandType) {
+      'Park1' { 'park-2461-unicode' }
+      'Park2' { 'park-2462-unicode' }
+      'Park3' { 'park-2463-unicode' }
+      default { throw "Unknown Park Unicode command layout '$CommandType'." }
+    }
+    return Get-NSISCatalogProfile -Id $ParkId
+  }
+
+  if ($CommandType -ceq 'NSIS3') {
+    return Get-NSISCatalogProfile -Id "official-nsis3-$($CharacterMode.ToLowerInvariant())"
+  }
+
+  if ($Unicode) { throw 'The official NSIS 2 serialized format is ANSI; Unicode NSIS 2 installers require a Park profile.' }
+  $Legacy = Get-NSISLegacyVariableProfileEvidence -StringsBlock $StringsBlock -Entries $Entries
+  $ProfileId = switch ($Legacy.VariableRoute) {
+    'legacy-200' { 'official-legacy-200-ansi' }
+    'legacy-225' { 'official-legacy-225-ansi' }
+    default { 'official-nsis2-ansi' }
+  }
+  return Get-NSISCatalogProfile -Id $ProfileId
+}
+
+function Get-NSISCommandLayoutSemanticSignature {
+  <#
+  .SYNOPSIS
+    Describe how one candidate layout interprets the opcodes used by an installer.
+  .DESCRIPTION
+    NSIS permits compile-time command removal and source-level command-table
+    reordering. Structural arity checks can therefore leave several layouts
+    tied even though they assign different meanings to the same raw opcode.
+    This signature records only raw opcodes present in the installer, allowing
+    equivalent candidates to remain usable while rejecting semantic ambiguity.
+  .PARAMETER Entries
+    Raw NSIS command records before catalog normalization.
+  .PARAMETER Type
+    Candidate official or Park command generation.
+  .PARAMETER Unicode
+    Whether strings use the Unicode command ABI.
+  .PARAMETER LogCmdIsEnabled
+    Whether EW_LOG occupies its compile-time command-table slot.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][pscustomobject[]]$Entries,
+    [Parameter(Mandatory)][string]$Type,
+    [Parameter(Mandatory)][bool]$Unicode,
+    [Parameter(Mandatory)][bool]$LogCmdIsEnabled
+  )
+
+  $UsedOpcodes = [System.Collections.Generic.HashSet[uint32]]::new()
+  foreach ($Entry in $Entries) { $null = $UsedOpcodes.Add([uint32]$Entry.LayoutOpcode) }
+  $Mappings = foreach ($Opcode in @($UsedOpcodes | Sort-Object)) {
+    $CanonicalOpcode = Get-NSISNormalizedOpcode -Opcode $Opcode -Type $Type -Unicode $Unicode -LogCmdIsEnabled $LogCmdIsEnabled
+    '{0}={1}' -f $Opcode, $CanonicalOpcode
+  }
+  return [string]::Join(';', [string[]]$Mappings)
 }
 
 function Get-NSISVersionInfo {
@@ -1447,13 +2066,17 @@ function Get-NSISVersionInfo {
     }
   }
 
-  # Strong escape evidence constrains candidates; ambiguous blocks retain a
-  # deterministic fallback order that is scored against actual commands below.
-  $StrongPark = $Unicode -and -not $StrongNSIS3 -and ($ParkCount -gt 0 -or $NSIS3Count -eq 0)
-  $CandidateTypes = if ($StrongNSIS3) {
+  # Explicit control codes constrain the ABI. A Unicode table without any
+  # control codes is genuinely ambiguous, so retain official NSIS 3 and all
+  # Park generations for command-layout scoring instead of assuming Park1.
+  $CandidateTypes = if ($IsNsisBi) {
     @('NSIS3')
-  } elseif ($StrongPark) {
+  } elseif ($StrongNSIS3) {
+    @('NSIS3')
+  } elseif ($ParkCount -gt 0) {
     @('Park1', 'Park2', 'Park3')
+  } elseif ($Unicode -and $NSIS3Count -eq 0) {
+    @('NSIS3', 'Park1', 'Park2', 'Park3')
   } elseif ($NSIS3Count -gt $NSIS2Count) {
     @('NSIS3', 'NSIS2')
   } else {
@@ -1476,33 +2099,166 @@ function Get-NSISVersionInfo {
   # Log-enabled builds insert command-layout slots. Select the variant producing
   # the fewest impossible opcodes instead of assuming the upstream default.
   $BestCandidate = $Candidates[0]
+  $ScoredCandidates = @()
   if ($Entries.Count -gt 0) {
-    $BestCandidate = @($Candidates | ForEach-Object {
+    $LogEvidenceByType = @{}
+    foreach ($CandidateType in $CandidateTypes) {
+      $LogEvidenceByType[$CandidateType] = Test-NSISLogCommandEvidence -Entries $Entries -Type $CandidateType -Unicode $Unicode -StringsBlock $StringsBlock
+    }
+    $ScoredCandidates = @($Candidates | ForEach-Object {
         [pscustomobject]@{
-          Type            = $_.Type
-          LogCmdIsEnabled = $_.LogCmdIsEnabled
-          Priority        = $_.Priority
-          BadCommandCount = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
+          Type              = $_.Type
+          LogCmdIsEnabled   = $_.LogCmdIsEnabled
+          Priority          = $_.Priority
+          BadCommandCount   = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled -IsNsisBi:$IsNsisBi
+          SemanticPenalty   = if ($LogEvidenceByType[$_.Type] -and -not $_.LogCmdIsEnabled) { 1 } else { 0 }
+          SemanticSignature = Get-NSISCommandLayoutSemanticSignature -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
         }
-      } | Sort-Object -Property BadCommandCount, Priority | Select-Object -First 1)[0]
+      } | Sort-Object -Property BadCommandCount, SemanticPenalty, Priority)
+    $BestCandidate = $ScoredCandidates[0]
   } else {
     $BestCandidate | Add-Member -NotePropertyName BadCommandCount -NotePropertyValue 0 -Force
+    $BestCandidate | Add-Member -NotePropertyName SemanticPenalty -NotePropertyValue 0 -Force
+    $BestCandidate | Add-Member -NotePropertyName SemanticSignature -NotePropertyValue '' -Force
+    $ScoredCandidates = @($BestCandidate)
+  }
+
+  $CatalogProfile = Resolve-NSISCatalogProfile -CommandType $BestCandidate.Type -Unicode $Unicode -IsNsisBi $IsNsisBi -StringsBlock $StringsBlock -Entries $Entries
+  $BestScoreCandidates = @($ScoredCandidates | Where-Object {
+      $_.BadCommandCount -eq $BestCandidate.BadCommandCount -and $_.SemanticPenalty -eq $BestCandidate.SemanticPenalty
+    })
+  $BestScoreCount = $BestScoreCandidates.Count
+  $SemanticSignatures = @($BestScoreCandidates.SemanticSignature | Select-Object -Unique)
+  $HasSemanticAmbiguity = $SemanticSignatures.Count -gt 1
+  $DetectionConfidence = if ($HasSemanticAmbiguity) {
+    'UnsupportedAmbiguous'
+  } elseif ($StrongNSIS3 -or $ParkCount -gt 0 -or $IsNsisBi -or $CatalogProfile.VariableRoute -ne 'current') {
+    'Structural'
+  } elseif ($BestScoreCount -eq 1) {
+    'ValidatedHeuristic'
+  } else {
+    'Ambiguous'
   }
 
   return [pscustomobject]@{
-    Unicode          = $Unicode
-    Type             = $BestCandidate.Type
-    IsV3             = $BestCandidate.Type -eq 'NSIS3'
-    IsPark           = $BestCandidate.Type -like 'Park*'
-    IsNsisBi         = $IsNsisBi
-    LogCmdIsEnabled  = [bool]$BestCandidate.LogCmdIsEnabled
-    BadCommandCount  = [int]$BestCandidate.BadCommandCount
-    StringCodeCounts = [pscustomobject]@{
+    Unicode              = $Unicode
+    Type                 = $BestCandidate.Type
+    IsV3                 = $BestCandidate.Type -eq 'NSIS3'
+    IsPark               = $BestCandidate.Type -like 'Park*'
+    IsNsisBi             = $IsNsisBi
+    LogCmdIsEnabled      = [bool]$BestCandidate.LogCmdIsEnabled
+    BadCommandCount      = [int]$BestCandidate.BadCommandCount
+    Profile              = $CatalogProfile
+    CatalogProfileId     = $CatalogProfile.Id
+    EditionId            = $CatalogProfile.EditionId
+    Edition              = $CatalogProfile.Edition
+    CharacterMode        = $CatalogProfile.CharacterMode
+    Generation           = $CatalogProfile.Generation
+    VersionRange         = $CatalogProfile.VersionRange
+    CompilerVersion      = $null
+    DetectionConfidence  = $DetectionConfidence
+    HasSemanticAmbiguity = $HasSemanticAmbiguity
+    CandidateLayouts     = [pscustomobject[]]$ScoredCandidates
+    StringCodeCounts     = [pscustomobject]@{
       NSIS2 = $NSIS2Count
       NSIS3 = $NSIS3Count
       Park  = $ParkCount
     }
   }
+}
+
+function Test-NSISLogCommandEvidence {
+  <#
+  .SYNOPSIS
+    Test source-defined EW_LOG operand shapes for one candidate command layout.
+  .PARAMETER Entries
+    Raw command records before catalog normalization.
+  .PARAMETER Type
+    Candidate official or Park command generation.
+  .PARAMETER Unicode
+    Whether string offsets address UTF-16LE code units.
+  .PARAMETER StringsBlock
+    Raw string table used to bound LogText string operands.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][pscustomobject[]]$Entries,
+    [Parameter(Mandatory)][string]$Type,
+    [Parameter(Mandatory)][bool]$Unicode,
+    [Parameter(Mandatory)][byte[]]$StringsBlock
+  )
+
+  $MaximumStringOffset = if ($Unicode) { [Math]::Floor($StringsBlock.Length / 2) } else { $StringsBlock.Length }
+  $Found = $false
+  foreach ($Entry in $Entries) {
+    $Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.LayoutOpcode -Type $Type -Unicode $Unicode -LogCmdIsEnabled $true
+    if ($Opcode -ne $Script:NSIS_OPCODE_LOG) { continue }
+    $Mode = [int]$Entry.Raw[1]
+    if ($Mode -notin @(0, 1)) { return $false }
+    if ($Mode -eq 0 -and ([uint32]$Entry.Raw[2] -ge $MaximumStringOffset)) { return $false }
+    for ($Index = 3; $Index -le 6; $Index++) {
+      if ($Entry.Raw[$Index] -ne 0) { return $false }
+    }
+    $Found = $true
+  }
+  return $Found
+}
+
+function ConvertFrom-NSISParkOpcode {
+  <#
+  .SYNOPSIS
+    Normalize one Park Unicode opcode using its catalogued insertion count.
+  .PARAMETER Opcode
+    Raw command number from the Park command table.
+  .PARAMETER FontCommandCount
+    Number of font-query opcodes inserted before RegisterDLL: zero for Park1,
+    one for Park2, and two for Park3.
+  .PARAMETER LogCmdIsEnabled
+    Whether the build inserted EW_LOG before section commands.
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory)][uint32]$Opcode,
+    [Parameter(Mandatory)][ValidateRange(0, 2)][int]$FontCommandCount,
+    [Parameter(Mandatory)][bool]$LogCmdIsEnabled
+  )
+
+  $Value = [int]$Opcode
+  if ($Value -lt $Script:NSIS_OPCODE_REGISTER_DLL) { return $Value }
+  if ($FontCommandCount -ge 1) {
+    if ($Value -eq $Script:NSIS_OPCODE_REGISTER_DLL) { return $Script:NSIS_OPCODE_GET_FONT_VERSION }
+    $Value--
+  }
+  if ($FontCommandCount -ge 2) {
+    if ($Value -eq $Script:NSIS_OPCODE_REGISTER_DLL) { return $Script:NSIS_OPCODE_GET_FONT_NAME }
+    $Value--
+  }
+  if ($Value -lt $Script:NSIS_OPCODE_FILE_SEEK) { return $Value }
+
+  # Park Unicode inserts UTF-16 file operations at FSEEK and FINDPROC after
+  # them. Later commands can additionally be shifted by an optional LOG slot.
+  if ($Value -eq $Script:NSIS_OPCODE_FILE_SEEK) { return $Script:NSIS_OPCODE_FILE_WRITE_UTF16 }
+  if ($Value -eq ($Script:NSIS_OPCODE_FILE_SEEK + 1)) { return $Script:NSIS_OPCODE_FILE_READ_UTF16 }
+  $Value -= 2
+  if ($Value -ge $Script:NSIS_OPCODE_SECTION_SET -and $LogCmdIsEnabled) {
+    if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
+    return $Value - 1
+  }
+  if ($Value -eq $Script:NSIS_OPCODE_FILE_WRITE_UTF16) { return $Script:NSIS_OPCODE_FIND_PROC }
+  return $Value
+}
+
+$Script:NSIS_OPCODE_ROUTE_HANDLERS = @{
+  official = {
+    param([uint32]$Opcode, [bool]$LogCmdIsEnabled)
+    $Value = [int]$Opcode
+    if (-not $LogCmdIsEnabled -or $Value -lt $Script:NSIS_OPCODE_SECTION_SET) { return $Value }
+    if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
+    return $Value - 1
+  }
+  park1    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 0 -LogCmdIsEnabled $LogCmdIsEnabled }
+  park2    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 1 -LogCmdIsEnabled $LogCmdIsEnabled }
+  park3    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 2 -LogCmdIsEnabled $LogCmdIsEnabled }
 }
 
 function Get-NSISNormalizedOpcode {
@@ -1512,9 +2268,11 @@ function Get-NSISNormalizedOpcode {
   .PARAMETER Opcode
     The raw command opcode
   .PARAMETER Type
-    The detected NSIS command layout type
+    Compatibility input for the detected NSIS command layout type.
   .PARAMETER Unicode
-    Whether the installer stores Unicode strings
+    Compatibility input indicating Unicode string storage.
+  .PARAMETER CatalogProfile
+    Preferred catalog profile containing the opcode route.
   .PARAMETER LogCmdIsEnabled
     Whether a log opcode was inserted before section commands
   #>
@@ -1523,51 +2281,42 @@ function Get-NSISNormalizedOpcode {
     [Parameter(Mandatory, HelpMessage = 'The raw command opcode')]
     [uint32]$Opcode,
 
-    [Parameter(Mandatory, HelpMessage = 'The detected NSIS command layout type')]
+    [Parameter(HelpMessage = 'The detected NSIS command layout type')]
     [string]$Type,
 
-    [Parameter(Mandatory, HelpMessage = 'Whether the installer stores Unicode strings')]
+    [Parameter(HelpMessage = 'Whether the installer stores Unicode strings')]
     [bool]$Unicode,
+
+    [Alias('Profile')]
+    [Parameter(HelpMessage = 'The resolved NSIS catalog profile')]
+    [pscustomobject]$CatalogProfile,
 
     [Parameter(Mandatory, HelpMessage = 'Whether a log opcode was inserted before section commands')]
     [bool]$LogCmdIsEnabled
   )
 
-  $Value = [int]$Opcode
+  if ($Opcode -in @($Script:NSIS_OPCODE_EXTRACT_STUB_FILE, $Script:NSIS_OPCODE_VERIFY_EXTERNAL_FILE)) { return [int]$Opcode }
 
-  # Official NSIS layouts either insert LOG before section commands or, in Park
-  # variants, insert additional opcodes that shift later command numbers.
-  if ($Type -notlike 'Park*') {
-    if (-not $LogCmdIsEnabled) { return $Value }
-    if ($Value -lt $Script:NSIS_OPCODE_SECTION_SET) { return $Value }
-    if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
-    return $Value - 1
-  }
-
-  if ($Value -lt $Script:NSIS_OPCODE_REGISTER_DLL) { return $Value }
-  if ($Type -in @('Park2', 'Park3')) {
-    if ($Value -eq $Script:NSIS_OPCODE_REGISTER_DLL) { return $Script:NSIS_OPCODE_GET_FONT_VERSION }
-    $Value--
-  }
-  if ($Type -eq 'Park3') {
-    if ($Value -eq $Script:NSIS_OPCODE_REGISTER_DLL) { return $Script:NSIS_OPCODE_GET_FONT_NAME }
-    $Value--
-  }
-  if ($Value -ge $Script:NSIS_OPCODE_FILE_SEEK) {
-    if ($Unicode) {
-      if ($Value -eq $Script:NSIS_OPCODE_FILE_SEEK) { return $Script:NSIS_OPCODE_FILE_WRITE_UTF16 }
-      if ($Value -eq ($Script:NSIS_OPCODE_FILE_SEEK + 1)) { return $Script:NSIS_OPCODE_FILE_READ_UTF16 }
-      $Value -= 2
+  # Unicode is retained for callers of the pre-catalog API. The selected route
+  # now carries the character-mode decision.
+  $null = $Unicode
+  $Route = if ($CatalogProfile) {
+    [string]$CatalogProfile.OpcodeRoute
+  } else {
+    # Keep focused tests and external research scripts compatible while all
+    # parser paths use catalog profiles directly.
+    switch ($Type) {
+      'Park1' { 'park1' }
+      'Park2' { 'park2' }
+      'Park3' { 'park3' }
+      'NSIS2' { 'official' }
+      'NSIS3' { 'official' }
+      default { throw "Unknown NSIS command layout '$Type'." }
     }
-
-    if ($Value -ge $Script:NSIS_OPCODE_SECTION_SET -and $LogCmdIsEnabled) {
-      if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
-      return $Value - 1
-    }
-    if ($Value -eq $Script:NSIS_OPCODE_FILE_WRITE_UTF16) { return $Script:NSIS_OPCODE_FIND_PROC }
   }
-
-  return $Value
+  $Handler = $Script:NSIS_OPCODE_ROUTE_HANDLERS[$Route]
+  if (-not $Handler) { throw "NSIS opcode route '$Route' is not implemented." }
+  return [int](& $Handler $Opcode $LogCmdIsEnabled)
 }
 
 function Measure-NSISCommandLayoutCandidate {
@@ -1582,6 +2331,8 @@ function Measure-NSISCommandLayoutCandidate {
     Whether the installer stores Unicode strings
   .PARAMETER LogCmdIsEnabled
     Whether a log opcode was inserted before section commands
+  .PARAMETER IsNsisBi
+    Whether records use NSISBI's eight-operand command ABI.
   #>
   [OutputType([int])]
   param (
@@ -1595,7 +2346,10 @@ function Measure-NSISCommandLayoutCandidate {
     [bool]$Unicode,
 
     [Parameter(Mandatory, HelpMessage = 'Whether a log opcode was inserted before section commands')]
-    [bool]$LogCmdIsEnabled
+    [bool]$LogCmdIsEnabled,
+
+    [Parameter(HelpMessage = 'Whether the records use the NSISBI command ABI')]
+    [bool]$IsNsisBi = $false
   )
 
   $BadCommandCount = 0
@@ -1603,6 +2357,7 @@ function Measure-NSISCommandLayoutCandidate {
   # Score a layout by impossible opcode values and nonzero parameters beyond the
   # source-defined arity. The lowest score selects the command normalization.
   foreach ($Entry in $Entries) {
+    if ($Entry.LayoutOpcode -in @($Script:NSIS_OPCODE_EXTRACT_STUB_FILE, $Script:NSIS_OPCODE_VERIFY_EXTERNAL_FILE)) { continue }
     $Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.LayoutOpcode -Type $Type -Unicode $Unicode -LogCmdIsEnabled $LogCmdIsEnabled
     if ($Opcode -lt 0 -or $Opcode -ge $Script:NSIS_COMMAND_PARAMETER_COUNTS.Count) {
       $BadCommandCount++
@@ -1620,18 +2375,179 @@ function Measure-NSISCommandLayoutCandidate {
     }
 
     $LastNonZeroParameter = 0
-    for ($Index = 6; $Index -ge 1; $Index--) {
+    $MaximumOperand = if ($IsNsisBi) { 8 } else { 6 }
+    for ($Index = $MaximumOperand; $Index -ge 1; $Index--) {
       if ($Entry.Raw[$Index] -ne 0) {
         $LastNonZeroParameter = $Index
         break
       }
     }
-    if ($Script:NSIS_COMMAND_PARAMETER_COUNTS[$Opcode] -lt $LastNonZeroParameter) {
+    # Park's FindProc command requires an output/process operand. The upstream
+    # 7-Zip detector treats an all-zero record as impossible; without this
+    # invariant Park 2.46.3 LockWindow records also appear valid under the
+    # non-log layout and acquire a different canonical meaning.
+    if ($Opcode -eq $Script:NSIS_OPCODE_FIND_PROC -and $LastNonZeroParameter -eq 0) {
+      $BadCommandCount++
+      continue
+    }
+    # NSISBI widens registry data and uninstaller records to carry 64-bit data
+    # offsets plus per-file CRC values. Other canonical commands retain their
+    # upstream arity after the two fork opcodes are normalized away.
+    $ExpectedOperandCount = if ($IsNsisBi -and $Opcode -eq $Script:NSIS_OPCODE_EXTRACT_FILE) {
+      8
+    } elseif ($IsNsisBi -and $Opcode -eq $Script:NSIS_OPCODE_WRITE_REG) {
+      7
+    } elseif ($IsNsisBi -and $Opcode -eq $Script:NSIS_OPCODE_WRITE_UNINSTALLER) {
+      # NSISBI serializes offsets[0..6]: name, data offset low/high, icon
+      # length, full output path, icon CRC, and uninstaller-data CRC.
+      7
+    } else {
+      $Script:NSIS_COMMAND_PARAMETER_COUNTS[$Opcode]
+    }
+    if ($ExpectedOperandCount -lt $LastNonZeroParameter) {
       $BadCommandCount++
     }
   }
 
   return $BadCommandCount
+}
+
+function Get-NSISStubArchitecture {
+  <#
+  .SYNOPSIS
+    Map the NSIS executable stub machine to a readable architecture name.
+  .PARAMETER PEInfo
+    Parsed PE machine evidence from the NSIS stub.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][pscustomobject]$PEInfo)
+
+  if ($PEInfo.IsArm64) { return 'arm64' }
+  if ($PEInfo.IsAmd64) { return 'x64' }
+  if ($PEInfo.IsX86) { return 'x86' }
+  return $null
+}
+
+function Get-NSISFormatContext {
+  <#
+  .SYNOPSIS
+    Parse an NSIS installer once into its catalog-selected structural context.
+  .PARAMETER Path
+    Path to the NSIS installer. Used when HeaderData is not supplied.
+  .PARAMETER HeaderData
+    Previously decoded header result, allowing simulation and extraction to
+    reuse the same bounded archive read.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'HeaderData')][pscustomobject]$HeaderData
+  )
+
+  if ($PSCmdlet.ParameterSetName -eq 'Path') { $HeaderData = Get-NSISHeaderData -Path $Path }
+  $HeaderBytes = $HeaderData.HeaderBytes
+  $BlockHeaders = Get-NSISBlockHeaders -HeaderBytes $HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
+  $HeaderLayout = Get-NSISHeaderLayout -HeaderBytes $HeaderBytes -Is64Bit $HeaderData.PEInfo.Is64Bit
+  $StringsBlock = Get-NSISBlockBytes -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -Index 3
+  $HasNsisBiExternalOpcodes = $HeaderData.IsNsisBi -and $HeaderData.FirstHeaderFlagRoute -ne 'nsisbi-pre-3.04.1'
+  $Entries = Get-NSISEntries -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders -IsNsisBi $HeaderData.IsNsisBi -HasNsisBiExternalOpcodes:$HasNsisBiExternalOpcodes
+  $VersionInfo = Get-NSISVersionInfo -StringsBlock $StringsBlock -Entries $Entries -IsNsisBi $HeaderData.IsNsisBi
+
+  # Store only canonical opcodes after the profile has been selected. Raw and
+  # layout opcodes remain available for diagnostics and future catalog routes.
+  foreach ($Entry in $Entries) {
+    $Entry.Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.LayoutOpcode -CatalogProfile $VersionInfo.Profile -LogCmdIsEnabled $VersionInfo.LogCmdIsEnabled
+  }
+
+  $VersionInfo | Add-Member -NotePropertyName FirstHeaderRoute -NotePropertyValue $VersionInfo.Profile.FirstHeaderRoute
+  $VersionInfo | Add-Member -NotePropertyName FirstHeaderFlagRoute -NotePropertyValue $HeaderData.FirstHeaderFlagRoute
+  $VersionInfo | Add-Member -NotePropertyName HeaderRoute -NotePropertyValue $VersionInfo.Profile.HeaderRoute
+  $VersionInfo | Add-Member -NotePropertyName BlockHeaderRoute -NotePropertyValue $(if ($HeaderData.PEInfo.Is64Bit) { 'uint64-offset' } else { 'uint32-offset' })
+  $VersionInfo | Add-Member -NotePropertyName EntryRoute -NotePropertyValue $VersionInfo.Profile.EntryRoute
+  $VersionInfo | Add-Member -NotePropertyName StringRoute -NotePropertyValue $VersionInfo.Profile.StringRoute
+  $VersionInfo | Add-Member -NotePropertyName OpcodeRoute -NotePropertyValue $VersionInfo.Profile.OpcodeRoute
+  $VersionInfo | Add-Member -NotePropertyName VariableRoute -NotePropertyValue $VersionInfo.Profile.VariableRoute
+  $VersionInfo | Add-Member -NotePropertyName CompressionRoute -NotePropertyValue $HeaderData.Compression
+  $VersionInfo | Add-Member -NotePropertyName PayloadRoute -NotePropertyValue $(if ($HeaderData.Compression -like 'Mtw-*') { 'nsisbi-mtw' } elseif ($HeaderData.IsSolid) { 'solid' } else { 'non-solid' })
+  $VersionInfo | Add-Member -NotePropertyName ChecksumRoute -NotePropertyValue $VersionInfo.Profile.ChecksumRoute
+  # This is the uninstaller/loader stub architecture, not necessarily the
+  # architecture of the payload selected by the compiled script.
+  $VersionInfo | Add-Member -NotePropertyName StubArchitecture -NotePropertyValue (Get-NSISStubArchitecture -PEInfo $HeaderData.PEInfo)
+
+  return [pscustomobject]@{
+    HeaderData   = $HeaderData
+    HeaderBytes  = $HeaderBytes
+    BlockHeaders = $BlockHeaders
+    HeaderLayout = $HeaderLayout
+    StringsBlock = $StringsBlock
+    Entries      = $Entries
+    VersionInfo  = $VersionInfo
+  }
+}
+
+function ConvertTo-NSISFormatInfo {
+  <#
+  .SYNOPSIS
+    Project an internal NSIS format context into JSON-safe public evidence.
+  .PARAMETER Context
+    Catalog-selected context from Get-NSISFormatContext.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][pscustomobject]$Context)
+
+  $VersionInfo = $Context.VersionInfo
+  $HeaderData = $Context.HeaderData
+  $Warnings = [System.Collections.Generic.List[string]]::new()
+  if ($VersionInfo.HasSemanticAmbiguity) {
+    $Warnings.Add('Multiple equally valid NSIS command layouts assign different meanings to opcodes used by this installer. Static command simulation is disabled rather than guessing a compiler feature set or reordered command table.')
+  } elseif ($VersionInfo.DetectionConfidence -eq 'Ambiguous') {
+    $Warnings.Add('The installer does not contain decisive generation control codes; the selected command profile is the lowest-error structurally valid candidate.')
+  }
+  if ($VersionInfo.BadCommandCount -gt 0) {
+    $Warnings.Add("The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) that violate the source-defined opcode or arity table.")
+  }
+  if ($HeaderData.HasExternalFile) {
+    $Warnings.Add('The NSISBI installer references an external payload sidecar; embedded format evidence does not describe the complete payload set.')
+  }
+
+  return [pscustomobject][ordered]@{
+    Path                  = $HeaderData.Path
+    InstallerType         = 'Nullsoft'
+    EditionId             = $VersionInfo.EditionId
+    Edition               = $VersionInfo.Edition
+    CompilerVersion       = $VersionInfo.CompilerVersion
+    VersionRange          = $VersionInfo.VersionRange
+    Generation            = $VersionInfo.Generation
+    CharacterMode         = $VersionInfo.CharacterMode
+    StubArchitecture      = $VersionInfo.StubArchitecture
+    CatalogProfileId      = $VersionInfo.CatalogProfileId
+    FirstHeaderRoute      = $VersionInfo.FirstHeaderRoute
+    FirstHeaderFlagRoute  = $VersionInfo.FirstHeaderFlagRoute
+    HeaderRoute           = $VersionInfo.HeaderRoute
+    BlockHeaderRoute      = $VersionInfo.BlockHeaderRoute
+    EntryRoute            = $VersionInfo.EntryRoute
+    StringRoute           = $VersionInfo.StringRoute
+    OpcodeRoute           = $VersionInfo.OpcodeRoute
+    VariableRoute         = $VersionInfo.VariableRoute
+    CompressionRoute      = $VersionInfo.CompressionRoute
+    PayloadRoute          = $VersionInfo.PayloadRoute
+    ChecksumRoute         = $VersionInfo.ChecksumRoute
+    ArchiveCrcStatus      = $HeaderData.ArchiveCrcInfo.Status
+    ArchiveCrcVerified    = $HeaderData.ArchiveCrcInfo.IsVerified
+    LogCommandEnabled     = $VersionInfo.LogCmdIsEnabled
+    IsSolid               = $HeaderData.IsSolid
+    IsNsisBi              = $HeaderData.IsNsisBi
+    SupportsExternalFiles = $HeaderData.SupportsExternalFiles
+    HasExternalFile       = $HeaderData.HasExternalFile
+    IsStubInstaller       = $HeaderData.IsStubInstaller
+    ExternalFileCount     = $HeaderData.ExternalFileCount
+    ExternalSegmentSize   = $HeaderData.ExternalSegmentSize
+    DetectionConfidence   = $VersionInfo.DetectionConfidence
+    HasSemanticAmbiguity  = [bool]$VersionInfo.HasSemanticAmbiguity
+    CandidateLayouts      = $VersionInfo.CandidateLayouts
+    IsSupported           = [bool]$VersionInfo.Profile.Supported -and $VersionInfo.BadCommandCount -eq 0 -and -not $VersionInfo.HasSemanticAmbiguity
+    Warnings              = [string[]]$Warnings.ToArray()
+  }
 }
 
 function ConvertTo-NSISExtractionRelativePath {
@@ -1861,6 +2777,86 @@ function Set-NSISExtractedFileTime {
   try { [IO.File]::SetLastWriteTimeUtc($Path, [DateTime]::FromFileTimeUtc([long]$RawTime)) } catch { }
 }
 
+function Assert-NSISPayloadCrc32 {
+  <#
+  .SYNOPSIS
+    Verify a decoded solid-record CRC serialized by NSISBI extraction commands.
+  .PARAMETER Path
+    Extracted file containing the serialized record body after solid decoding.
+  .PARAMETER Expected
+    Optional uint32 CRC operand from EW_EXTRACTFILE/EW_EXTRACTSTUBFILE.
+  .PARAMETER PackedValue
+    Original unpacked length field whose little-endian bytes follow the body in
+    the NSISBI checksum calculation.
+  .PARAMETER PackedSizeWidth
+    Width of the serialized length field in bytes.
+  .PARAMETER IncludePackedSize
+    Apply the compact NSISBI 3.12 checksum suffix after the decoded body.
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [AllowNull()][Nullable[uint32]]$Expected,
+    [Parameter(Mandatory)][uint64]$PackedValue,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$PackedSizeWidth,
+    [switch]$IncludePackedSize
+  )
+
+  if ($null -eq $Expected) { return }
+  # PowerShell unboxes a populated Nullable[uint32] during parameter binding,
+  # so do not access Nullable.Value here. Normalize either representation to
+  # the serialized unsigned checksum before comparing it.
+  $ExpectedValue = [uint32]$Expected
+  $File = Get-Item -LiteralPath $Path -Force
+  $CrcArguments = @{ Path = $File.FullName; MaximumBytes = $File.Length }
+  if ($IncludePackedSize) {
+    $CrcArguments.SuffixBytes = if ($PackedSizeWidth -eq 8) { [BitConverter]::GetBytes($PackedValue) } else { [BitConverter]::GetBytes([uint32]$PackedValue) }
+  }
+  $Actual = Get-BinaryCrc32 @CrcArguments
+  if ($Actual -ne $ExpectedValue) {
+    Remove-Item -LiteralPath $File.FullName -Force -ErrorAction SilentlyContinue
+    throw "The NSISBI payload CRC32 does not match for '$Path': expected $($ExpectedValue.ToString('X8')), got $($Actual.ToString('X8'))."
+  }
+}
+
+function Assert-NSISSerializedPayloadCrc32 {
+  <#
+  .SYNOPSIS
+    Verify the source-defined NSISBI CRC over a non-solid serialized record.
+  .PARAMETER Stream
+    Caller-owned seekable data-block stream.
+  .PARAMETER BodyOffset
+    Absolute stream offset immediately after the packed-size field.
+  .PARAMETER BodyLength
+    Serialized compressed or stored body length.
+  .PARAMETER PackedValue
+    Original packed-size value, including its compressed flag.
+  .PARAMETER PackedSizeWidth
+    Width of the packed-size field in bytes.
+  .PARAMETER Expected
+    Optional uint32 checksum operand from the extraction command.
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][long]$BodyOffset,
+    [Parameter(Mandatory)][long]$BodyLength,
+    [Parameter(Mandatory)][uint64]$PackedValue,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$PackedSizeWidth,
+    [AllowNull()][Nullable[uint32]]$Expected
+  )
+
+  if ($null -eq $Expected) { return }
+  $ExpectedValue = [uint32]$Expected
+  $PackedBytes = if ($PackedSizeWidth -eq 8) { [BitConverter]::GetBytes($PackedValue) } else { [BitConverter]::GetBytes([uint32]$PackedValue) }
+  $Body = New-BoundedReadStream -Stream $Stream -Offset $BodyOffset -Length $BodyLength -LeaveOpen
+  try { $Actual = Get-BinaryCrc32 -Stream $Body -MaximumBytes $BodyLength -SuffixBytes $PackedBytes }
+  finally { $Body.Dispose() }
+  if ($Actual -ne $ExpectedValue) {
+    throw "The NSISBI serialized payload CRC32 does not match: expected $($ExpectedValue.ToString('X8')), got $($Actual.ToString('X8'))."
+  }
+}
+
 function Write-NSISPayloadStream {
   <#
   .SYNOPSIS
@@ -1897,6 +2893,64 @@ function Write-NSISPayloadStream {
   } finally {
     if ($Output) { $Output.Dispose() }
   }
+  [IO.File]::Move($PartialPath, $OutputPath, $true)
+  return Get-Item -LiteralPath $OutputPath -Force
+}
+
+function Write-NSISMtwRecordStream {
+  <#
+  .SYNOPSIS
+    Atomically decode one complete NSISBI MTW record to disk.
+  .PARAMETER Stream
+    Seekable bounded stream containing the MTW block sequence after the outer
+    packed-size field. The caller owns the stream and this function leaves it open.
+  .PARAMETER OutputPath
+    Safe absolute output path selected by the extraction map.
+  .PARAMETER MaximumBytes
+    Hard maximum number of decompressed bytes accepted for this file.
+  .PARAMETER Compression
+    Codec selected while decoding the NSIS header, without the Mtw- prefix.
+  #>
+  [OutputType([System.IO.FileInfo])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][string]$OutputPath,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes,
+    [Parameter(Mandatory)][ValidateSet('BZip2', 'Deflate', 'Lz4', 'Lzma', 'Zlib')][string]$Compression
+  )
+
+  if (-not $Stream.CanSeek) { throw 'NSISBI MTW record extraction requires a seekable bounded stream' }
+  $Directory = Split-Path -Path $OutputPath -Parent
+  $null = New-Item -Path $Directory -ItemType Directory -Force
+  $PartialPath = Join-Path $Directory ('.' + [IO.Path]::GetFileName($OutputPath) + '.partial-' + [Guid]::NewGuid().ToString('N'))
+  $Output = [IO.File]::Open($PartialPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $RecordOffset = 0L
+  $ExpandedBytes = 0L
+  try {
+    while ($true) {
+      $Block = Read-NSISMtwBlock -Stream $Stream -RecordOffset $RecordOffset -Compression $Compression
+      if ($Block.IsEnd) {
+        # The packed record length includes the MTW zero terminator. Reject
+        # trailing bytes so a corrupt size cannot bleed into the next record.
+        if ($Block.NextOffset -ne $Stream.Length) { throw 'The NSISBI MTW record contains trailing bytes after its end marker' }
+        break
+      }
+
+      if ($Block.Bytes.Length -gt $MaximumBytes - $ExpandedBytes) {
+        throw "The NSISBI MTW record exceeds the $MaximumBytes-byte output limit"
+      }
+      $Output.Write($Block.Bytes, 0, $Block.Bytes.Length)
+      $ExpandedBytes += $Block.Bytes.Length
+      $RecordOffset = $Block.NextOffset
+    }
+  } catch {
+    $Output.Dispose()
+    Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue
+    throw
+  } finally {
+    if ($Output) { $Output.Dispose() }
+  }
+
   [IO.File]::Move($PartialPath, $OutputPath, $true)
   return Get-Item -LiteralPath $OutputPath -Force
 }
@@ -1951,19 +3005,26 @@ function Expand-NSISNonSolidPayloads {
     Selected payload records with safe output paths.
   .PARAMETER MaximumExpandedBytes
     Hard total output limit across payloads and aliases.
+  .PARAMETER DataBlockOffset
+    Absolute stream offset of the data block. Defaults to the embedded block.
+  .PARAMETER DataBlockLength
+    Available data-block bytes. Defaults to the remainder of the embedded archive.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [Parameter(Mandatory)][pscustomobject]$HeaderData,
     [Parameter(Mandatory)][pscustomobject[]]$Payload,
-    [Parameter(Mandatory)][long]$MaximumExpandedBytes
+    [Parameter(Mandatory)][long]$MaximumExpandedBytes,
+    [long]$DataBlockOffset = -1,
+    [long]$DataBlockLength = -1
   )
 
   $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
   $ExpandedBytes = 0L
-  $ArchiveEnd = $HeaderData.FirstHeaderOffset + $HeaderData.ArchiveSize
-  $DataBlockOffset = $HeaderData.PayloadOffset + $HeaderData.PackedSizeWidth + $HeaderData.CompressedHeaderSize
+  if ($DataBlockOffset -lt 0) { $DataBlockOffset = $HeaderData.PayloadOffset + $HeaderData.PackedSizeWidth + $HeaderData.CompressedHeaderSize }
+  if ($DataBlockLength -lt 0) { $DataBlockLength = ($HeaderData.FirstHeaderOffset + $HeaderData.ArchiveSize) - $DataBlockOffset }
+  $ArchiveEnd = $DataBlockOffset + $DataBlockLength
   $Groups = $Payload | Group-Object -Property DataOffset | Sort-Object { [uint64]$_.Name }
   foreach ($Group in $Groups) {
     $Items = [pscustomobject[]]@($Group.Group)
@@ -1982,6 +3043,15 @@ function Expand-NSISNonSolidPayloads {
       throw "The NSIS payload body is outside the archive: $($Items[0].SourcePath)"
     }
 
+    # NSISBI checksums the serialized body first and the original packed-size
+    # field second. For compressed records this deliberately differs from the
+    # CRC of the extracted file.
+    $UsesSerializedCrc = $HeaderData.FirstHeaderFlagRoute -eq 'nsisbi-compact-3.12'
+    if ($UsesSerializedCrc) {
+      Assert-NSISSerializedPayloadCrc32 -Stream $Stream -BodyOffset ([long]$BodyOffset) -BodyLength ([long]$PackedLength) `
+        -PackedValue $PackedValue -PackedSizeWidth $HeaderData.PackedSizeWidth -Expected $Items[0].Crc32
+    }
+
     $Remaining = $MaximumExpandedBytes - $ExpandedBytes
     $PerOutputLimit = [long][Math]::Floor($Remaining / $Items.Count)
     $Body = New-BoundedReadStream -Stream $Stream -Offset ([long]$BodyOffset) -Length ([long]$PackedLength) -LeaveOpen
@@ -1989,18 +3059,32 @@ function Expand-NSISNonSolidPayloads {
     try {
       $Source = $Body
       $ExpectedBytes = [long]$PackedLength
-      if ($IsCompressed) {
+      if ($IsCompressed -and $HeaderData.Compression -like 'Mtw-*') {
+        # NSISBI non-solid records have two framing layers: the outer wide
+        # packed-size field and an inner sequence of three-byte MTW blocks.
+        # Decode the complete inner record instead of handing its framing to a
+        # stock single-codec stream.
+        $File = Write-NSISMtwRecordStream -Stream $Body -OutputPath $Items[0].OutputPath `
+          -MaximumBytes $PerOutputLimit -Compression ($HeaderData.Compression -replace '^Mtw-', '')
+      } elseif ($IsCompressed) {
         $Probe = Read-BinaryBytes -Stream $Body -Offset 0 -Count ([int][Math]::Min(24L, [long]$PackedLength))
         $LzmaFilterLength = if ($HeaderData.Compression -eq 'Lzma') { Get-NSISLzmaFilterLength -Bytes $Probe } else { -1 }
         $Decoder = New-NSISDecoder -Compression $HeaderData.Compression -PayloadStream $Body `
           -LzmaFilterLength $LzmaFilterLength -ExpectedOutputBytes -1
         $Source = $Decoder
         $ExpectedBytes = -1
+        $File = Write-NSISPayloadStream -Stream $Source -OutputPath $Items[0].OutputPath -MaximumBytes $PerOutputLimit -ExpectedBytes $ExpectedBytes
+      } else {
+        $File = Write-NSISPayloadStream -Stream $Source -OutputPath $Items[0].OutputPath -MaximumBytes $PerOutputLimit -ExpectedBytes $ExpectedBytes
       }
-      $File = Write-NSISPayloadStream -Stream $Source -OutputPath $Items[0].OutputPath -MaximumBytes $PerOutputLimit -ExpectedBytes $ExpectedBytes
     } finally {
       if ($Decoder -is [System.IDisposable]) { $Decoder.Dispose() }
       $Body.Dispose()
+    }
+
+    if (-not $UsesSerializedCrc) {
+      Assert-NSISPayloadCrc32 -Path $File.FullName -Expected $Items[0].Crc32 `
+        -PackedValue $PackedValue -PackedSizeWidth $HeaderData.PackedSizeWidth
     }
 
     Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Items[0].TimeLow -TimeHigh $Items[0].TimeHigh
@@ -2073,6 +3157,9 @@ function Expand-NSISSolidPayloads {
         -MaximumBytes ([long]$UnpackedLength) -ExpectedBytes ([long]$UnpackedLength)
       $LogicalPosition += [long]$UnpackedLength
       Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Items[0].TimeLow -TimeHigh $Items[0].TimeHigh
+      Assert-NSISPayloadCrc32 -Path $File.FullName -Expected $Items[0].Crc32 `
+        -PackedValue $UnpackedLength -PackedSizeWidth $HeaderData.PackedSizeWidth `
+        -IncludePackedSize:($HeaderData.FirstHeaderFlagRoute -eq 'nsisbi-compact-3.12')
       $Result.Add($File)
       $ExpandedBytes += $File.Length
       $Aliases = Copy-NSISPayloadAliases -SourcePath $File.FullName -Payload $Items -MaximumExpandedBytes ($MaximumExpandedBytes - $ExpandedBytes)
@@ -2157,6 +3244,9 @@ function Expand-NSISMtwPayloads {
         $Body.Dispose()
       }
       Set-NSISExtractedFileTime -Path $File.FullName -TimeLow $Items[0].TimeLow -TimeHigh $Items[0].TimeHigh
+      Assert-NSISPayloadCrc32 -Path $File.FullName -Expected $Items[0].Crc32 `
+        -PackedValue $UnpackedLength -PackedSizeWidth $HeaderData.PackedSizeWidth `
+        -IncludePackedSize:($HeaderData.FirstHeaderFlagRoute -eq 'nsisbi-compact-3.12')
       $Result.Add($File)
       $ExpandedBytes += $File.Length
       $Aliases = Copy-NSISPayloadAliases -SourcePath $File.FullName -Payload $Items -MaximumExpandedBytes ($MaximumExpandedBytes - $ExpandedBytes)
@@ -2168,6 +3258,68 @@ function Expand-NSISMtwPayloads {
     Remove-Item -LiteralPath $SpillPath -Force -ErrorAction SilentlyContinue
   }
   return $Result.ToArray()
+}
+
+function Resolve-NSISExternalDataFiles {
+  <#
+  .SYNOPSIS
+    Resolve legacy .nsisbin or current setupN.bin NSISBI payload sidecars.
+  .PARAMETER InstallerPath
+    Absolute path to the NSISBI executable.
+  .PARAMETER HeaderData
+    Parsed first-header route and split-file evidence.
+  .PARAMETER ExternalDataPath
+    Optional sidecar file or directory supplied by the caller.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory)][string]$InstallerPath,
+    [Parameter(Mandatory)][pscustomobject]$HeaderData,
+    [string[]]$ExternalDataPath
+  )
+
+  $Files = [System.Collections.Generic.List[string]]::new()
+  if ($ExternalDataPath) {
+    foreach ($Candidate in $ExternalDataPath) {
+      $Resolved = Resolve-InstallerFileSystemPath -Path $Candidate
+      if ([IO.Directory]::Exists($Resolved)) {
+        foreach ($Item in @(Get-ChildItem -LiteralPath $Resolved -File | Where-Object Name -Match '^setup\d+\.bin$' | Sort-Object { [int]([regex]::Match($_.Name, '\d+').Value) })) { $Files.Add($Item.FullName) }
+      } elseif ([IO.File]::Exists($Resolved)) { $Files.Add($Resolved) }
+    }
+  } elseif ($HeaderData.FirstHeaderFlagRoute -eq 'nsisbi-compact-3.12') {
+    $Directory = [IO.Path]::GetDirectoryName($InstallerPath)
+    $Count = [Math]::Max(1, [int]$HeaderData.ExternalFileCount)
+    for ($Index = 1; $Index -le $Count; $Index++) {
+      $Candidate = Join-Path $Directory "setup$Index.bin"
+      if (-not [IO.File]::Exists($Candidate)) { throw "The NSISBI external sidecar is missing: $Candidate" }
+      $Files.Add($Candidate)
+    }
+  } else {
+    $Candidate = "$InstallerPath.nsisbin"
+    if (-not [IO.File]::Exists($Candidate)) { throw "The NSISBI external sidecar is missing: $Candidate" }
+    $Files.Add($Candidate)
+  }
+
+  if ($Files.Count -eq 0) { throw 'No NSISBI external payload sidecar was resolved.' }
+  if ($HeaderData.ExternalFileCount -gt 0 -and $Files.Count -ne $HeaderData.ExternalFileCount) {
+    throw "The NSISBI first header declares $($HeaderData.ExternalFileCount) external segment(s), but $($Files.Count) were supplied."
+  }
+  return $Files.ToArray()
+}
+
+function New-NSISExternalDataStream {
+  <#
+  .SYNOPSIS
+    Open one logical seekable stream over resolved NSISBI sidecars.
+  .PARAMETER Path
+    Ordered absolute sidecar paths.
+  #>
+  [OutputType([System.IO.Stream])]
+  param ([Parameter(Mandatory)][string[]]$Path)
+
+  if ($Path.Count -eq 1) { return [IO.File]::Open($Path[0], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite) }
+  Import-NSISSegmentedReadStream
+  return [Dumplings.InstallerParsers.NSIS.NsisSegmentedReadStream]::new($Path)
 }
 
 function Expand-NSISPayload {
@@ -2185,9 +3337,11 @@ function Expand-NSISPayload {
   .PARAMETER CollisionAction
     Behavior when a payload path already exists or multiple File commands resolve to the same path.
   .PARAMETER StateInitializer
-    Facade-owned callback that creates the simulator state used to resolve compiled payload paths.
+    Facade-owned callback that creates simulator state from the shared catalog-selected context.
   .PARAMETER PayloadSelector
     Facade-owned callback that projects simulated File commands into extraction records.
+  .PARAMETER ExternalDataPath
+    Optional legacy .nsisbin file, current setupN.bin files, or their directory.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -2201,7 +3355,8 @@ function Expand-NSISPayload {
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES,
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [Parameter(Mandatory)][scriptblock]$StateInitializer,
-    [Parameter(Mandatory)][scriptblock]$PayloadSelector
+    [Parameter(Mandatory)][scriptblock]$PayloadSelector,
+    [string[]]$ExternalDataPath
   )
 
   process {
@@ -2213,26 +3368,43 @@ function Expand-NSISPayload {
     $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $ResolvedDestinationPath -AllowNonexistent
     $ResolvedDestinationPath = (New-Item -Path $ResolvedDestinationPath -ItemType Directory -Force).FullName
 
-    $HeaderData = Get-NSISHeaderData -Path $InstallerPath
-    if ($HeaderData.HasExternalFile) {
-      throw 'The NSISBI installer references an external payload sidecar; embedded-only extraction would be incomplete'
+    $FormatContext = Get-NSISFormatContext -Path $InstallerPath
+    $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
+    if (-not $FormatInfo.IsSupported) {
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
     }
-    $Initialized = & $StateInitializer $HeaderData
+    $HeaderData = $FormatContext.HeaderData
+    $Initialized = & $StateInitializer $FormatContext
     $Selected = & $PayloadSelector $Initialized.State $HeaderData $Name
     if ($Selected.Count -eq 0) { throw "No NSIS payload matched '$Name'" }
     $Mapped = New-NSISExtractionOutputMap -Payload $Selected -DestinationPath $ResolvedDestinationPath -CollisionAction $CollisionAction
     if ($Mapped.Count -eq 0) { return }
 
     $InstallerStream = [IO.File]::Open($InstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $ExternalStream = $null
     try {
       if (-not $HeaderData.IsSolid) {
-        return Expand-NSISNonSolidPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Mapped -MaximumExpandedBytes $MaximumExpandedBytes
+        $Results = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        $Embedded = [pscustomobject[]]@($Mapped | Where-Object DataSource -CEQ 'Embedded')
+        if ($Embedded.Count -gt 0) {
+          foreach ($File in @(Expand-NSISNonSolidPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Embedded -MaximumExpandedBytes $MaximumExpandedBytes)) { $Results.Add($File) }
+        }
+        $External = [pscustomobject[]]@($Mapped | Where-Object DataSource -CEQ 'External')
+        if ($External.Count -gt 0) {
+          $ExternalFiles = Resolve-NSISExternalDataFiles -InstallerPath $InstallerPath -HeaderData $HeaderData -ExternalDataPath $ExternalDataPath
+          $ExternalStream = New-NSISExternalDataStream -Path $ExternalFiles
+          $Remaining = $MaximumExpandedBytes - ($Results | Measure-Object Length -Sum).Sum
+          foreach ($File in @(Expand-NSISNonSolidPayloads -Stream $ExternalStream -HeaderData $HeaderData -Payload $External -MaximumExpandedBytes $Remaining -DataBlockOffset 0 -DataBlockLength $ExternalStream.Length)) { $Results.Add($File) }
+        }
+        return $Results.ToArray()
       }
+      if ($HeaderData.HasExternalFile) { throw 'NSISBI does not support solid compression with external payload sidecars.' }
       if ($HeaderData.Compression -like 'Mtw-*') {
         return Expand-NSISMtwPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Mapped -MaximumExpandedBytes $MaximumExpandedBytes
       }
       return Expand-NSISSolidPayloads -Stream $InstallerStream -HeaderData $HeaderData -Payload $Mapped -MaximumExpandedBytes $MaximumExpandedBytes
     } finally {
+      if ($ExternalStream) { $ExternalStream.Dispose() }
       $InstallerStream.Dispose()
     }
   }

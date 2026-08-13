@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param (
   [Parameter(Mandatory, HelpMessage = 'The installer parser action to invoke')]
-  [ValidateSet('NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
+  [ValidateSet('NSIS.GetFormatInfo', 'NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
   [string]$Action,
 
   [Parameter(HelpMessage = 'The path to the installer')]
@@ -37,6 +37,24 @@ param (
   [Parameter(HelpMessage = 'Directories or explicit files containing external Inno Setup disk slices')]
   [string[]]$DiskSourcePath,
 
+  [Parameter(HelpMessage = 'Legacy .nsisbin or current setupN.bin NSISBI sidecar paths')]
+  [string[]]$ExternalDataPath,
+
+  [Parameter(HelpMessage = 'Virtual NSIS target environment as a JSON object')]
+  [string]$EnvironmentJson,
+
+  [Parameter(HelpMessage = 'Virtual NSIS target filesystem facts as a JSON object')]
+  [string]$FileSystemJson,
+
+  [Parameter(HelpMessage = 'Treat unlisted virtual NSIS target paths as absent')]
+  [switch]$FileSystemComplete,
+
+  [Parameter(HelpMessage = 'Virtual NSIS command line')]
+  [string]$CommandLine,
+
+  [Parameter(HelpMessage = 'Explicit code page for ANSI NSIS strings')]
+  [int]$AnsiCodePage,
+
   [Parameter(HelpMessage = 'The maximum number of bytes written while expanding an installer')]
   [long]$MaximumExpandedBytes,
 
@@ -66,11 +84,20 @@ try {
   Import-Module (Join-Path $InfrastructurePath 'PE.psm1') -Force
   Import-Module (Join-Path $InfrastructurePath 'InstallerEvidence.psm1') -Force
   $Result = switch ($Action) {
+    'NSIS.GetFormatInfo' {
+      Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
+      Get-NSISFormatInfo -Path $Path
+    }
     'NSIS.GetInfo' {
       Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
       $Arguments = @{ Path = $Path }
       if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
       if (-not [string]::IsNullOrWhiteSpace($Scope)) { $Arguments.Scope = $Scope }
+      if (-not [string]::IsNullOrWhiteSpace($EnvironmentJson)) { $Arguments.Environment = ConvertFrom-Json -InputObject $EnvironmentJson -AsHashtable }
+      if (-not [string]::IsNullOrWhiteSpace($FileSystemJson)) { $Arguments.FileSystem = ConvertFrom-Json -InputObject $FileSystemJson -AsHashtable }
+      if ($FileSystemComplete) { $Arguments.FileSystemComplete = $true }
+      if ($PSBoundParameters.ContainsKey('CommandLine')) { $Arguments.CommandLine = $CommandLine }
+      if ($AnsiCodePage -gt 0) { $Arguments.AnsiCodePage = $AnsiCodePage }
       Get-NSISInfo @Arguments
     }
     'NSIS.Expand' {
@@ -82,6 +109,7 @@ try {
       if (-not [string]::IsNullOrWhiteSpace($Name)) { $ExpandArguments.Name = $Name }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
+      if ($ExternalDataPath) { $ExpandArguments.ExternalDataPath = $ExternalDataPath }
       @(Expand-NSISInstaller @ExpandArguments).ForEach({ $_.FullName })
     }
     'NSIS.GetElectronBuilderInfo' {
