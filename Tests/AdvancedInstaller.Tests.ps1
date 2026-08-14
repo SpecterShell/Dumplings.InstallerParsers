@@ -3,6 +3,7 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'AdvancedInstaller.psm1') -Force
@@ -27,30 +28,78 @@ BeforeAll {
       [string]$Name,
 
       [Parameter(Mandatory)]
-      [int]$FooterLength
+      [int]$FooterLength,
+
+      [ValidateSet('Ansi', 'Unicode')]
+      [string]$CharacterMode = 'Unicode',
+
+      [ValidateSet('V0', 'V1')]
+      [string]$CatalogVersion = 'V1',
+
+      [uint32]$StructureVersion = 100,
+
+      [uint32]$TransformFlag = 0,
+
+      [string]$ExternalName,
+
+      [uint32]$ExternalRole = 3,
+
+      [byte[]]$ExternalContent = [Text.Encoding]::UTF8.GetBytes("[GeneralOptions]`r`nAllPlatforms=false`r`n")
     )
 
     $FixturePath = Join-Path $Script:FixtureDirectory $Name
     $PayloadBytes = [byte[]]@(0x44, 0x55, 0x4d, 0x50)
     $EntryName = 'payload.bin'
-    $EntryNameBytes = [System.Text.Encoding]::Unicode.GetBytes($EntryName)
-    $EntryBytes = New-Object 'byte[]' 24
-    [System.BitConverter]::GetBytes([uint32]$PayloadBytes.Length).CopyTo($EntryBytes, 12)
-    [System.BitConverter]::GetBytes([uint32]0).CopyTo($EntryBytes, 16)
-    [System.BitConverter]::GetBytes([uint32]$EntryName.Length).CopyTo($EntryBytes, 20)
+    $EntryNameBytes = if ($CharacterMode -eq 'Unicode') {
+      [System.Text.Encoding]::Unicode.GetBytes($EntryName)
+    } else {
+      [System.Text.Encoding]::ASCII.GetBytes($EntryName)
+    }
+    $EntryBytes = New-Object 'byte[]' ($CatalogVersion -eq 'V0' ? 20 : 24)
+    if ($CatalogVersion -eq 'V0') {
+      [System.BitConverter]::GetBytes([uint32]$PayloadBytes.Length).CopyTo($EntryBytes, 8)
+      [System.BitConverter]::GetBytes([uint32]0).CopyTo($EntryBytes, 12)
+      [System.BitConverter]::GetBytes([uint32]$EntryName.Length).CopyTo($EntryBytes, 16)
+    } else {
+      [System.BitConverter]::GetBytes($TransformFlag).CopyTo($EntryBytes, 8)
+      [System.BitConverter]::GetBytes([uint32]$PayloadBytes.Length).CopyTo($EntryBytes, 12)
+      [System.BitConverter]::GetBytes([uint32]0).CopyTo($EntryBytes, 16)
+      [System.BitConverter]::GetBytes([uint32]$EntryName.Length).CopyTo($EntryBytes, 20)
+    }
 
     $InfoOffset = $PayloadBytes.Length
+    $CatalogEndOffset = $InfoOffset + $EntryBytes.Length + $EntryNameBytes.Length
+    $ExternalRecordBytes = [byte[]]@()
+    if (-not [string]::IsNullOrWhiteSpace($ExternalName)) {
+      $ExternalNameBytes = if ($CharacterMode -eq 'Unicode') {
+        [Text.Encoding]::Unicode.GetBytes($ExternalName)
+      } else {
+        [Text.Encoding]::ASCII.GetBytes($ExternalName)
+      }
+      $ExternalRecordBytes = New-Object 'byte[]' (8 + $ExternalNameBytes.Length)
+      [BitConverter]::GetBytes($ExternalRole).CopyTo($ExternalRecordBytes, 0)
+      [BitConverter]::GetBytes([uint32]$ExternalName.Length).CopyTo($ExternalRecordBytes, 4)
+      $ExternalNameBytes.CopyTo($ExternalRecordBytes, 8)
+      [IO.File]::WriteAllBytes((Join-Path $Script:FixtureDirectory $ExternalName), $ExternalContent)
+    }
+    $PhysicalFooterOffset = $CatalogEndOffset + $ExternalRecordBytes.Length
     $FooterBytes = New-Object 'byte[]' $FooterLength
-    [System.BitConverter]::GetBytes([uint32]1).CopyTo($FooterBytes, 4)
-    [System.BitConverter]::GetBytes([uint32]$InfoOffset).CopyTo($FooterBytes, 16)
-    [System.BitConverter]::GetBytes([uint32]0).CopyTo($FooterBytes, 20)
-    [System.Text.Encoding]::ASCII.GetBytes('ADVINSTSFX').CopyTo($FooterBytes, 60)
+    [System.BitConverter]::GetBytes([uint32]([string]::IsNullOrWhiteSpace($ExternalName) ? 0 : 1)).CopyTo($FooterBytes, 0)
+    [System.BitConverter]::GetBytes([uint32]$CatalogEndOffset).CopyTo($FooterBytes, 4)
+    [System.BitConverter]::GetBytes([uint32]1).CopyTo($FooterBytes, 8)
+    [System.BitConverter]::GetBytes($StructureVersion).CopyTo($FooterBytes, 12)
+    [System.BitConverter]::GetBytes([uint32]$PhysicalFooterOffset).CopyTo($FooterBytes, 16)
+    [System.BitConverter]::GetBytes([uint32]$InfoOffset).CopyTo($FooterBytes, 20)
+    [System.BitConverter]::GetBytes([uint32]0).CopyTo($FooterBytes, 24)
+    [System.Text.Encoding]::ASCII.GetBytes('00112233445546778899AABBCCDDEEFF').CopyTo($FooterBytes, 28)
+    [System.Text.Encoding]::ASCII.GetBytes('ADVINSTSFX').CopyTo($FooterBytes, 64)
 
     $Stream = [System.IO.File]::Open($FixturePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
     try {
       $Stream.Write($PayloadBytes, 0, $PayloadBytes.Length)
       $Stream.Write($EntryBytes, 0, $EntryBytes.Length)
       $Stream.Write($EntryNameBytes, 0, $EntryNameBytes.Length)
+      if ($ExternalRecordBytes.Length) { $Stream.Write($ExternalRecordBytes, 0, $ExternalRecordBytes.Length) }
       $Stream.Write($FooterBytes, 0, $FooterBytes.Length)
     } finally {
       $Stream.Close()
@@ -72,7 +121,12 @@ Describe 'Advanced Installer parser' {
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -Name 'ComputerLink.msi'
 
     $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.FormatProfileId | Should -Be 'classic-unicode-v1'
+    $Info.BuilderVersionRange | Should -Be '8.6-23.9'
+    $Info.ArchitectureSelectionEvidence.BaseMsiPath | Should -Be 'ComputerLink.msi'
     $Info.Files.Name | Should -Contain 'ComputerLink.msi'
+    $MsiInfo.InstallerBuilderVersion | Should -Be '10.3'
+    $MsiInfo.InstallerBuilderVersionSource | Should -Be 'SummaryInformation.CreatingApp'
     $MsiInfo.DisplayVersion | Should -Be '3.9.0.455'
     $MsiInfo.ProductCode | Should -Be '{6C5AC088-3136-4043-8985-8B0772A9580E}'
   }
@@ -220,13 +274,239 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should locate Advanced Installer footers ending at the ADVINSTSFX marker' {
-    $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-footer-at-eof.bin' -FooterLength 70
+    $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-footer-at-eof.bin' -FooterLength 74
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
 
     $Info.InstallerType | Should -Be 'AdvancedInstaller'
-    $Info.FooterOffset | Should -Be ((Get-Item -Path $Fixture).Length - 70)
+    $Info.FooterOffset | Should -Be ((Get-Item -Path $Fixture).Length - 74)
     $Info.FileCount | Should -Be 1
     $Info.Files.Name | Should -Contain 'payload.bin'
+    $Info.BootstrapperIdRoute | Should -Be 'ascii-guid-v4-n'
+    $Info.BootstrapperId | Should -Be '{00112233-4455-4677-8899-AABBCCDDEEFF}'
+  }
+
+  It 'Should route a completely consumed ANSI catalog through the historical profile' {
+    $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-ansi-footer.bin' -FooterLength 74 -CharacterMode Ansi -CatalogVersion V0
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    $Info.IsSupported | Should -BeTrue
+    $Info.FormatProfileId | Should -Be 'classic-ansi-v0'
+    $Info.CatalogRoute | Should -Be 'catalog-v0-ansi'
+    $Info.CharacterMode | Should -Be 'Ansi'
+    $Info.ValidationStatus | Should -Be 'PartiallyValidated'
+    $Info.ValidatedBuilderVersions | Should -Be '6.3'
+  }
+
+  It 'Should parse controlled Advanced Installer 6.3 ANSI embedded media' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\6.3\diehard-ansi-63.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.3 fixture is not present in the persistent cache.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be 'B1E949F307CFFDE7B7FBECDDE89C371A1F731659C523386E25788466A7A652B5'
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+
+    $Info.FormatProfileId | Should -Be 'classic-ansi-v0'
+    $Info.CatalogRoute | Should -Be 'catalog-v0-ansi'
+    $Info.MediaType | Should -Be 'CompressedSingleExe'
+    $Info.MsiPayloadSelection.SourceKind | Should -Be 'EmbeddedArchive'
+    $MsiInfo.InstallerBuilderVersion | Should -Be '6.3'
+    $MsiInfo.SelectedMsiPath | Should -Be '152EE16\diehard-exe-63.msi'
+  }
+
+  It 'Should parse and expand controlled Advanced Installer 6.3 external-resource media' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\6.3\diehard-external-63.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.3 external-media fixture is not present in the persistent cache.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be '2BF1FC4A485EC315954456656824DC76BC2873BD90304E60CAA8F2ED54191C5E'
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+
+    $Info.FormatProfileId | Should -Be 'classic-ansi-v0'
+    $Info.ExternalResourceCount | Should -Be 3
+    $Info.ExternalResources.Name | Should -Contain 'diehard-external-63.7z'
+    $Info.MediaType | Should -Be 'ExternalResources'
+    $Info.MsiPayloadSelection.SourceKind | Should -Be 'ExternalArchive'
+    $MsiInfo.InstallerBuilderVersion | Should -Be '6.3'
+    $MsiInfo.SelectedMsiPath | Should -Be 'diehard-external-63.msi'
+  }
+
+  It 'Should parse ANSI and Unicode external-resource tables without real media' -ForEach @(
+    @{ CharacterMode = 'Ansi'; CatalogRoute = 'catalog-v0-ansi'; ExternalRoute = 'external-v1-ansi' }
+    @{ CharacterMode = 'Unicode'; CatalogRoute = 'catalog-v0-unicode'; ExternalRoute = 'external-v1-unicode' }
+  ) {
+    $ExternalName = "synthetic-external-$CharacterMode.ini"
+    $Fixture = New-AdvancedInstallerFooterFixture -Name "synthetic-external-$CharacterMode.bin" -FooterLength 74 -CharacterMode $CharacterMode -CatalogVersion V0 -ExternalName $ExternalName
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    $Info.CatalogRoute | Should -Be $CatalogRoute
+    $Info.ExternalResourceRoute | Should -Be $ExternalRoute
+    $Info.ExternalResourceCount | Should -Be 1
+    $Info.ExternalResources[0].Name | Should -Be $ExternalName
+    $Info.ExternalResources[0].MissingExternal | Should -BeFalse
+    $Info.ConfigurationEntry | Should -Be $ExternalName
+  }
+
+  It 'Should distinguish the controlled Unicode v0 and v1 catalog generations' {
+    $V0Fixture = Join-Path $Script:FixtureDirectory 'Generated\6.4\diehard-unicode-64.exe'
+    $V1Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\diehard-86.exe'
+    if (-not (Test-Path -LiteralPath $V0Fixture -PathType Leaf) -or -not (Test-Path -LiteralPath $V1Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.4 and 8.6 fixtures are not both present in the persistent cache.'
+      return
+    }
+
+    $V0Info = Get-AdvancedInstallerInfo -Path $V0Fixture
+    $V1Info = Get-AdvancedInstallerInfo -Path $V1Fixture
+
+    $V0Info.FormatProfileId | Should -Be 'classic-unicode-v0'
+    $V0Info.CatalogRoute | Should -Be 'catalog-v0-unicode'
+    $V1Info.FormatProfileId | Should -Be 'classic-unicode-v1'
+    $V1Info.CatalogRoute | Should -Be 'catalog-v1-unicode'
+  }
+
+  It 'Should identify a controlled web installer without treating external archives as the selected MSI' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\Web\diehard-86.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 web fixture is not present in the persistent cache.'
+      return
+    }
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    $Info.MediaType | Should -Be 'WebInstaller'
+    $Info.MsiPayloadSelection.SourceKind | Should -Be 'Download'
+    $Info.MsiPayloadSelection.MainAppUrl | Should -Be 'https://example.invalid/diehard-exe-86.msi'
+    $Info.ExternalResources.ExternalRole | Should -Contain 6
+    $Info.ExternalResources.ExternalRole | Should -Contain 7
+  }
+
+  It 'Should project compressed prerequisite payload evidence from the outer catalog' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\prereq-lzma-86.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 prerequisite fixture is not present in the persistent cache.'
+      return
+    }
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    $Info.HasPrerequisitePayloads | Should -BeTrue
+    $Info.PrerequisitePayloads | Should -HaveCount 1
+    $Info.PrerequisitePayloads[0].Name | Should -Be 'prerequisite.exe'
+    $Info.PrerequisitePayloads[0].SelectorType | Should -Be 100
+    $Info.PrerequisitePayloads[0].SelectorGroup | Should -Be 9
+    $Info.PrerequisitePayloads[0].Compression | Should -Be 'Lzma'
+  }
+
+  It 'Should project controlled MSI/MSIX operating-system selection evidence' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\23.9\mixed-controlled-Msi.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 23.9 mixed MSI/MSIX fixture is not present in the persistent cache.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be '69DA24AA345F12F99FEBC14ABE4335FD9CA51B9A6BD5EB4C6D2D54B34C910C99'
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+
+    $Info.MediaType | Should -Be 'MsiMsixPlatformSelection'
+    $Info.MediaInfo.HasPlatformPayloadSelection | Should -BeTrue
+    $Info.PlatformPayloadSelection.SelectionMethod | Should -Be 'OperatingSystemVersion'
+    $Info.PlatformPayloadSelection.MinimumWindowsVersion | Should -Be '10.0.17763.0'
+    $Info.PlatformPayloadSelection.PackageFullName | Should -Be 'Caphyon.SparsePackage_1.0.0.0_x64__pm3gqw982fx6e'
+    $Info.PlatformPayloadSelection.PackageFamilyName | Should -Be 'Caphyon.SparsePackage_pm3gqw982fx6e'
+    $Info.PlatformPayloadSelection.PackageArchitecture | Should -Be 'x64'
+    $Info.PlatformPayloadSelection.LegacyMsiSelection.SourceEntryName | Should -Be 'mixed-controlled-Msi.msi'
+    $Info.PlatformPayloadSelection.ModernPayloads | Should -HaveCount 1
+    $Info.PlatformPayloadSelection.ModernPayloads[0].Name | Should -Be 'Sparse Package-x64.msix'
+    $Info.PlatformPayloadSelection.ModernPayloads[0].SelectorType | Should -Be 1
+    $Info.PlatformPayloadSelection.ModernPayloads[0].SelectorGroup | Should -Be 18
+    $Info.Warnings | Should -Contain 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems; analyze both nested packages before updating installed-state metadata.'
+
+    $Destination = Join-Path $TestDrive 'advanced-installer-mixed-platform'
+    Expand-AdvancedInstaller -Installer $Info -DestinationPath $Destination -CollisionAction Error | Out-Null
+    Test-Path -LiteralPath (Join-Path $Destination 'mixed-controlled-Msi.msi') -PathType Leaf | Should -BeTrue
+    Test-Path -LiteralPath (Join-Path $Destination 'Sparse Package-x64.msix') -PathType Leaf | Should -BeTrue
+  }
+
+  It 'Should reject an invalid physical-footer pointer in an otherwise valid footer' {
+    $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-invalid-catalog-end.bin' -FooterLength 74
+    $Bytes = [IO.File]::ReadAllBytes($Fixture)
+    $FooterOffset = $Bytes.Length - 74
+    [BitConverter]::GetBytes([uint32]($FooterOffset - 1)).CopyTo($Bytes, $FooterOffset + 16)
+    [IO.File]::WriteAllBytes($Fixture, $Bytes)
+
+    $Info = Get-AdvancedInstallerFormatInfo -Path $Fixture
+
+    $Info.IsAdvancedInstaller | Should -BeFalse
+    $Info.Warnings | Should -Not -BeNullOrEmpty
+  }
+
+  It 'Should reject a bare ADVINSTSFX marker without a valid footer and catalog' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'synthetic-bare-marker.bin'
+    [IO.File]::WriteAllBytes($Fixture, [Text.Encoding]::ASCII.GetBytes('prefix-ADVINSTSFX-suffix'))
+
+    $FormatInfo = Get-AdvancedInstallerFormatInfo -Path $Fixture
+
+    $FormatInfo.IsAdvancedInstaller | Should -BeFalse
+    $FormatInfo.IsSupported | Should -BeFalse
+    $FormatInfo.Warnings | Should -Not -BeNullOrEmpty
+  }
+
+  It 'Should resolve every catalog profile to registered routes' {
+    InModuleScope AdvancedInstaller {
+      $PreviousMaximum = $null
+      foreach ($FormatProfile in $Script:AdvancedInstallerCatalog.Profiles) {
+        $Script:AdvancedInstallerFooterHandlers.ContainsKey($FormatProfile.FooterRoute) | Should -BeTrue
+        $Script:AdvancedInstallerCatalogHandlers.ContainsKey($FormatProfile.CatalogRoute) | Should -BeTrue
+        $Script:AdvancedInstallerExternalResourceHandlers.ContainsKey($FormatProfile.ExternalResourceRoute) | Should -BeTrue
+        $Script:AdvancedInstallerConfigurationHandlers.ContainsKey($FormatProfile.ConfigurationRoute) | Should -BeTrue
+        $Script:AdvancedInstallerCatalog.PayloadRoutes.ContainsKey($FormatProfile.PayloadRoute) | Should -BeTrue
+        $Script:AdvancedInstallerCatalog.TransformRoutes.ContainsKey($FormatProfile.TransformRoute) | Should -BeTrue
+        $FormatProfile.BootstrapperIdRoute | Should -Be 'ascii-guid-v4-n'
+
+        $Minimum = [version]$FormatProfile.MinimumBuilderVersion
+        $Maximum = [version]$FormatProfile.MaximumBuilderVersion
+        $Maximum | Should -BeGreaterOrEqual $Minimum
+        if ($null -ne $PreviousMaximum) { $Minimum | Should -BeGreaterThan $PreviousMaximum }
+        $PreviousMaximum = $Maximum
+      }
+      $Script:AdvancedInstallerCatalog.PayloadRoutes['selector-v1'].MsixPackageSelector | Should -Be @(1, 18)
+    }
+  }
+
+  It 'Should use the compatibility route for explicit future builder versions' {
+    InModuleScope AdvancedInstaller {
+      $FormatProfile = Resolve-AdvancedInstallerFormatProfile -StructureVersion 100 -CharacterMode Unicode -CatalogRoute 'catalog-v1-unicode' -BuilderVersion '24.0'
+
+      $FormatProfile.Id | Should -Be 'classic-compatible-v1'
+      $FormatProfile.IsFallback | Should -BeTrue
+    }
+  }
+
+  It 'Should reject fallback media whose payload transform is unknown' {
+    $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-future-opaque.bin' -FooterLength 74 -StructureVersion 101 -TransformFlag 99
+    $Info = Get-AdvancedInstallerFormatInfo -Path $Fixture
+
+    $Info.IsAdvancedInstaller | Should -BeTrue
+    $Info.IsFallback | Should -BeTrue
+    $Info.IsSupported | Should -BeFalse
+    $Info.Warnings | Should -Contain 'One or more Advanced Installer payloads use an unsupported transform; format metadata is available but full extraction is not.'
+  }
+
+  It 'Should report AES-256 evidence and release the controlled encrypted payload' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\diehard-aes-86.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 AES fixture is not present in the persistent cache.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be '45FCDFB418893C783AE398CDC63D3ED452E1857B5BF722DBF5A9C254949F9762'
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    { Get-AdvancedInstallerMsiInfo -Installer $Info } | Should -Throw '*AES-256 encrypted*'
   }
 
   It 'Should locate signed Advanced Installer footers beyond the old 10 KB tail window' {

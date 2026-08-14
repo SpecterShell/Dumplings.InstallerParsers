@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param (
   [Parameter(Mandatory, HelpMessage = 'The installer parser action to invoke')]
-  [ValidateSet('NSIS.GetFormatInfo', 'NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
+  [ValidateSet('NSIS.GetFormatInfo', 'NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetFormatInfo', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
   [string]$Action,
 
   [Parameter(HelpMessage = 'The path to the installer')]
@@ -157,6 +157,10 @@ try {
       if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
 
       @(Expand-InnoInstaller @ExpandArguments).ForEach({ $_.FullName })
+    }
+    'AdvancedInstaller.GetFormatInfo' {
+      Import-Module (Join-Path $InstallerPath 'AdvancedInstaller.psm1') -Force
+      Get-AdvancedInstallerFormatInfo -Path $Path
     }
     'AdvancedInstaller.GetInfo' {
       Import-Module (Join-Path $InstallerPath 'AdvancedInstaller.psm1') -Force
