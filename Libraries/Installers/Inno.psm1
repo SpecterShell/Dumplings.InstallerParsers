@@ -51,6 +51,9 @@ $INNO_MAX_COMPILED_CODE_SIZE = 16777216
 $INNO_MAX_PASCAL_SCRIPT_ENTITY_COUNT = 262144
 $INNO_MAX_PASCAL_SCRIPT_DISASSEMBLY_INPUT_SIZE = 1048576
 $INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS = 4194304
+$INNO_MAX_PASCAL_SCRIPT_BRANCH_PATHS = 16
+$INNO_MAX_PASCAL_SCRIPT_BRANCH_DEPTH = 8
+$INNO_MAX_PASCAL_SCRIPT_WATCHDOG_MULTIPLIER = 4
 $INNO_LEAD_BYTES_SIZE = 32
 $INNO_CHUNK_MAGIC = [System.Text.Encoding]::ASCII.GetString([byte[]](0x7A, 0x6C, 0x62, 0x1A))
 $INNO_DISK_SLICE_ID_LEGACY = [byte[]](0x69, 0x64, 0x73, 0x6B, 0x61, 0x33, 0x32, 0x1A) # "idska32" + SUB
@@ -1806,6 +1809,8 @@ function Get-InnoBooleanDirectiveInfo {
     The serialized directive value from the setup header
   .PARAMETER Default
     The default value used by Inno Setup when the directive is omitted
+  .PARAMETER StaticReturnValues
+    Optional Pascal Script function return states used to evaluate directive checks.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1814,17 +1819,43 @@ function Get-InnoBooleanDirectiveInfo {
     [string]$Value,
 
     [Parameter(Mandatory, HelpMessage = 'The default value used by Inno Setup when the directive is omitted')]
-    [bool]$Default
+    [bool]$Default,
+
+    [System.Collections.IDictionary]$StaticReturnValues = @{}
   )
 
   if ([string]::IsNullOrWhiteSpace($Value)) {
     return [pscustomobject]@{ Value = $Default; IsResolved = $true; IsDefault = $true; IsDynamic = $false }
   }
 
-  switch -Regex ($Value.Trim()) {
+  $TrimmedValue = $Value.Trim()
+  switch -Regex ($TrimmedValue) {
     '^(?i:yes|true|1)$' { return [pscustomobject]@{ Value = $true; IsResolved = $true; IsDefault = $false; IsDynamic = $false } }
     '^(?i:no|false|0)$' { return [pscustomobject]@{ Value = $false; IsResolved = $true; IsDefault = $false; IsDynamic = $false } }
-    default { return [pscustomobject]@{ Value = $null; IsResolved = $false; IsDefault = $false; IsDynamic = $true } }
+  }
+
+  # Inno's EvalDirectiveCheck passes nonliteral values through TSimpleExpression.
+  # Translate its not/and/or spelling to the shared bounded three-valued parser;
+  # parameterized callbacks and unknown functions deliberately remain unknown.
+  $IdentifierStates = [ordered]@{}
+  foreach ($Entry in $StaticReturnValues.GetEnumerator()) {
+    if ($Entry.Value -is [bool]) { $IdentifierStates[[string]$Entry.Key] = $Entry.Value ? 'True' : 'False' }
+  }
+  $Expression = [regex]::Replace($TrimmedValue, '\bnot\b', '!', 'IgnoreCase,CultureInvariant')
+  $Expression = [regex]::Replace($Expression, '\band\b', '&&', 'IgnoreCase,CultureInvariant')
+  $Expression = [regex]::Replace($Expression, '\bor\b', '||', 'IgnoreCase,CultureInvariant')
+  $Expression = [regex]::Replace($Expression, '\byes\b', 'true', 'IgnoreCase,CultureInvariant')
+  $Expression = [regex]::Replace($Expression, '\bno\b', 'false', 'IgnoreCase,CultureInvariant')
+  $Result = Resolve-InstallerBooleanExpression -Expression $Expression -IdentifierState $IdentifierStates -MaximumTokenCount 256 -MaximumDepth 32
+  if ($Result.State -in @('True', 'False')) {
+    return [pscustomobject]@{
+      Value = $Result.State -ceq 'True'; IsResolved = $true; IsDefault = $false; IsDynamic = $true
+      Identifiers = $Result.Identifiers; UnknownIdentifiers = $Result.UnknownIdentifiers; Reasons = $Result.Reasons
+    }
+  }
+  return [pscustomobject]@{
+    Value = $null; IsResolved = $false; IsDefault = $false; IsDynamic = $true
+    Identifiers = $Result.Identifiers; UnknownIdentifiers = $Result.UnknownIdentifiers; Reasons = $Result.Reasons
   }
 }
 
@@ -1858,6 +1889,8 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     The parsed Inno Setup header strings
   .PARAMETER HeaderFixedData
     Fixed-header option evidence used by Inno Setup versions before 5.3.10
+  .PARAMETER StaticReturnValues
+    Optional proven Pascal Script return values used by directive-check expressions.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1870,7 +1903,9 @@ function Get-InnoAppsAndFeaturesEntryInfo {
 
     [Parameter(HelpMessage = 'Fixed-header option evidence used by Inno Setup versions before 5.3.10')]
     [AllowNull()]
-    [pscustomobject]$HeaderFixedData
+    [pscustomobject]$HeaderFixedData,
+
+    [System.Collections.IDictionary]$StaticReturnValues = @{}
   )
 
   $CreateUninstallRegKey = if ($HeaderValues.Count -gt 24) { $HeaderValues[24] } else { $null }
@@ -1886,7 +1921,7 @@ function Get-InnoAppsAndFeaturesEntryInfo {
       [pscustomobject]@{ Value = $null; IsResolved = $false; IsDefault = $false; IsDynamic = $false }
     }
   } else {
-    Get-InnoBooleanDirectiveInfo -Value $CreateUninstallRegKey -Default $true
+    Get-InnoBooleanDirectiveInfo -Value $CreateUninstallRegKey -Default $true -StaticReturnValues $StaticReturnValues
   }
   $UninstallableInfo = if ($null -ne $Layout.LegacyUninstallableOptionBit) {
     if ($null -ne $HeaderFixedData -and $null -ne $HeaderFixedData.LegacyUninstallable) {
@@ -1895,7 +1930,7 @@ function Get-InnoAppsAndFeaturesEntryInfo {
       [pscustomobject]@{ Value = $null; IsResolved = $false; IsDefault = $false; IsDynamic = $false }
     }
   } else {
-    Get-InnoBooleanDirectiveInfo -Value $Uninstallable -Default $true
+    Get-InnoBooleanDirectiveInfo -Value $Uninstallable -Default $true -StaticReturnValues $StaticReturnValues
   }
 
   if ($null -ne $Layout.LegacyCreateUninstallRegKeyOptionBit -and $CreateUninstallRegKeyInfo.IsResolved) {
@@ -2594,7 +2629,7 @@ function Get-InnoPascalScriptOperandConstant {
   .PARAMETER Operand
     IFPSLib operand to inspect.
   .PARAMETER State
-    Straight-line variable state keyed by variable kind and index.
+    Path-local variable state keyed by variable kind and index.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2626,14 +2661,92 @@ function Get-InnoPascalScriptOperandConstant {
   return [pscustomobject]@{ Resolved = $false; Value = $null }
 }
 
+function Copy-InnoPascalScriptConstantState {
+  <#
+  .SYNOPSIS
+    Clone one path-local IFPS constant environment before exploring a branch.
+  .PARAMETER State
+    Primitive constants keyed by IFPS variable kind and index.
+  #>
+  [OutputType([System.Collections.Generic.Dictionary[string, object]])]
+  param ([Parameter(Mandatory)][System.Collections.Generic.Dictionary[string, object]]$State)
+
+  $Copy = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+  foreach ($Entry in $State.GetEnumerator()) { $Copy[$Entry.Key] = $Entry.Value }
+  return $Copy
+}
+
+function ConvertTo-InnoPascalScriptBooleanConstant {
+  <#
+  .SYNOPSIS
+    Convert an IFPS primitive into the zero/nonzero condition used by branch opcodes.
+  .PARAMETER Value
+    A statically proven primitive operand value.
+  #>
+  [OutputType([pscustomobject])]
+  param ([AllowNull()][object]$Value)
+
+  if ($null -eq $Value) { return [pscustomobject]@{ Resolved = $true; Value = $false } }
+  if ($Value -is [bool]) { return [pscustomobject]@{ Resolved = $true; Value = [bool]$Value } }
+  if ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or
+    $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64] -or
+    $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) {
+    return [pscustomobject]@{ Resolved = $true; Value = $Value -ne 0 }
+  }
+  return [pscustomobject]@{ Resolved = $false; Value = $null }
+}
+
+function Test-InnoPascalScriptConstantEqual {
+  <#
+  .SYNOPSIS
+    Compare two proven IFPS primitive values without coercing string casing.
+  .PARAMETER Left
+    First primitive value.
+  .PARAMETER Right
+    Second primitive value.
+  #>
+  [OutputType([bool])]
+  param ([AllowNull()][object]$Left, [AllowNull()][object]$Right)
+
+  if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+  if ($Left -is [string] -or $Right -is [string] -or $Left -is [char] -or $Right -is [char]) {
+    return [string]$Left -ceq [string]$Right
+  }
+  return $Left -eq $Right
+}
+
+function Get-InnoPascalScriptBranchTargetIndex {
+  <#
+  .SYNOPSIS
+    Resolve an IFPSLib branch-target operand to its function-local instruction index.
+  .PARAMETER Operand
+    Immediate operand expected to contain an IFPSLib Instruction object.
+  .PARAMETER InstructionIndex
+    Reference-keyed instruction-to-index dictionary for the current function.
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory)][object]$Operand,
+    [Parameter(Mandatory)][System.Collections.Generic.Dictionary[object, int]]$InstructionIndex
+  )
+
+  if ([string]$Operand.Type -cne 'Immediate' -or $null -eq $Operand.Immediate -or
+    -not $InstructionIndex.ContainsKey($Operand.Immediate)) {
+    return -1
+  }
+  return $InstructionIndex[$Operand.Immediate]
+}
+
 function Get-InnoPascalScriptStaticReturnInfo {
   <#
   .SYNOPSIS
-    Prove a constant IFPS return value using bounded straight-line propagation.
+    Prove a constant IFPS return value across bounded control-flow alternatives.
   .DESCRIPTION
-    The evaluator accepts assignments and primitive operations only. Calls,
-    branches, exception flow, pointers, indexed values, and unknown opcodes make
-    the result unresolved instead of being simulated.
+    The evaluator propagates primitive constants through assignments, arithmetic,
+    comparisons, and direct branches. Unknown conditions fork isolated paths.
+    Calls, exception flow, pointers, indexed values, and unknown opcodes make only
+    the affected path unresolved. A value is returned only when every terminal
+    path completes within the configured bounds and agrees on the same constant.
   .PARAMETER Function
     IFPSLib script function to inspect.
   #>
@@ -2641,68 +2754,274 @@ function Get-InnoPascalScriptStaticReturnInfo {
   param ([Parameter(Mandatory)][object]$Function)
 
   if ($Function.GetType().FullName -cne 'IFPSLib.Emit.ScriptFunction' -or $null -eq $Function.ReturnArgument) {
-    return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'No script return value' }
-  }
-
-  $State = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
-  foreach ($Instruction in $Function.Instructions) {
-    $Code = [string]$Instruction.OpCode.Code
-    switch ($Code) {
-      'Assign' {
-        $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
-        if (-not $Destination) { return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Indirect assignment' } }
-        $Source = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $State
-        if ($Source.Resolved) { $State[$Destination] = $Source.Value } else { $State.Remove($Destination) }
-      }
-      { $_ -in @('Add', 'Sub', 'Mul', 'Div', 'Mod', 'Shl', 'Shr', 'And', 'Or', 'Xor') } {
-        $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
-        $Right = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $State
-        if (-not $Destination -or -not $State.ContainsKey($Destination) -or -not $Right.Resolved) {
-          return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Nonconstant arithmetic' }
-        }
-        try {
-          $LeftValue = $State[$Destination]
-          $State[$Destination] = switch ($Code) {
-            'Add' { $LeftValue -is [string] -or $Right.Value -is [string] ? ([string]$LeftValue + [string]$Right.Value) : ($LeftValue + $Right.Value) }
-            'Sub' { $LeftValue - $Right.Value }
-            'Mul' { $LeftValue * $Right.Value }
-            'Div' { $LeftValue / $Right.Value }
-            'Mod' { $LeftValue % $Right.Value }
-            'Shl' { [long]$LeftValue -shl [int]$Right.Value }
-            'Shr' { [long]$LeftValue -shr [int]$Right.Value }
-            'And' { [long]$LeftValue -band [long]$Right.Value }
-            'Or' { [long]$LeftValue -bor [long]$Right.Value }
-            'Xor' { [long]$LeftValue -bxor [long]$Right.Value }
-          }
-        } catch {
-          return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Invalid constant arithmetic' }
-        }
-      }
-      { $_ -in @('Neg', 'Not', 'Inc', 'Dec', 'SetZ') } {
-        $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
-        if (-not $Destination -or -not $State.ContainsKey($Destination)) {
-          return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Nonconstant unary operation' }
-        }
-        $State[$Destination] = switch ($Code) {
-          'Neg' { - $State[$Destination] }
-          'Not' { -bnot [long]$State[$Destination] }
-          'Inc' { $State[$Destination] + 1 }
-          'Dec' { $State[$Destination] - 1 }
-          'SetZ' { -not [bool]$State[$Destination] }
-        }
-      }
-      { $_ -in @('Push', 'PushVar', 'PushType', 'Pop', 'SetStackType', 'Nop', 'Ret') } { }
-      default {
-        return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = "Control flow or unsupported opcode: $Code" }
-      }
+    return [pscustomobject]@{
+      IsResolved = $false; Value = $null; Reason = 'No script return value'; ExploredPathCount = 0
+      ForkCount = 0; TruncatedPathCount = 0; BranchPredicates = [string[]]@(); ReturnValues = [object[]]@()
     }
   }
 
-  $ReturnKey = 'Argument:0'
-  if (-not $State.ContainsKey($ReturnKey)) {
-    return [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'Return variable is not constant' }
+  $InstructionCount = $Function.Instructions.Count
+  if ($InstructionCount -eq 0) {
+    return [pscustomobject]@{
+      IsResolved = $false; Value = $null; Reason = 'Return variable is not constant'; ExploredPathCount = 1
+      ForkCount = 0; TruncatedPathCount = 0; BranchPredicates = [string[]]@(); ReturnValues = [object[]]@()
+    }
   }
-  return [pscustomobject]@{ IsResolved = $true; Value = $State[$ReturnKey]; Reason = $null }
+  $InstructionIndex = [System.Collections.Generic.Dictionary[object, int]]::new([System.Collections.Generic.ReferenceEqualityComparer]::Instance)
+  for ($Index = 0; $Index -lt $InstructionCount; $Index++) { $InstructionIndex[$Function.Instructions[$Index]] = $Index }
+  $PathWatchdog = [Math]::Max($InstructionCount * $INNO_MAX_PASCAL_SCRIPT_WATCHDOG_MULTIPLIER, 1)
+  $AggregateWatchdog = $PathWatchdog * $INNO_MAX_PASCAL_SCRIPT_BRANCH_PATHS
+  $ReturnKey = 'Argument:0'
+  $Queue = [System.Collections.Generic.Queue[object]]::new()
+  $InitialState = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+  $Queue.Enqueue([pscustomobject]@{
+      Position = 0; Steps = 0; Depth = 0; State = $InitialState; JumpFlagResolved = $false; JumpFlag = $false
+      Predicates = [System.Collections.Generic.List[string]]::new()
+    })
+  $TerminalPaths = [System.Collections.Generic.List[object]]::new()
+  $BranchPredicates = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $CreatedPathCount = 1
+  $ForkCount = 0
+  $TotalSteps = 0
+
+  while ($Queue.Count -gt 0) {
+    $Path = $Queue.Dequeue()
+    $PathTerminated = $false
+    while ($Path.Position -ge 0 -and $Path.Position -lt $InstructionCount) {
+      $Instruction = $Function.Instructions[$Path.Position]
+      $Code = [string]$Instruction.OpCode.Code
+      $Path.Steps++
+      $TotalSteps++
+      if ($Path.Steps -gt $PathWatchdog -or $TotalSteps -gt $AggregateWatchdog) {
+        $TerminalPaths.Add([pscustomobject]@{
+            Resolved = $false; Value = $null; Reason = 'Bounded branch execution budget was exhausted'
+            Truncated = $true; Predicates = [string[]]$Path.Predicates.ToArray()
+          })
+        $PathTerminated = $true
+        break
+      }
+
+      $NextPosition = $Path.Position + 1
+      $ForkTargets = $null
+      $ForkReason = $null
+      switch ($Code) {
+        'Assign' {
+          $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+          if (-not $Destination) {
+            $TerminalPaths.Add([pscustomobject]@{ Resolved = $false; Value = $null; Reason = 'Indirect assignment'; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+            $PathTerminated = $true
+            break
+          }
+          $Source = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $Path.State
+          if ($Source.Resolved) { $Path.State[$Destination] = $Source.Value } else { $null = $Path.State.Remove($Destination) }
+        }
+        { $_ -in @('Add', 'Sub', 'Mul', 'Div', 'Mod', 'Shl', 'Shr', 'And', 'Or', 'Xor') } {
+          $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+          $Right = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $Path.State
+          if (-not $Destination -or -not $Path.State.ContainsKey($Destination) -or -not $Right.Resolved) {
+            if ($Destination) { $null = $Path.State.Remove($Destination) }
+            break
+          }
+          try {
+            $LeftValue = $Path.State[$Destination]
+            $Path.State[$Destination] = switch ($Code) {
+              'Add' { $LeftValue -is [string] -or $Right.Value -is [string] ? ([string]$LeftValue + [string]$Right.Value) : ($LeftValue + $Right.Value) }
+              'Sub' { $LeftValue - $Right.Value }
+              'Mul' { $LeftValue * $Right.Value }
+              'Div' { $LeftValue / $Right.Value }
+              'Mod' { $LeftValue % $Right.Value }
+              'Shl' { [long]$LeftValue -shl [int]$Right.Value }
+              'Shr' { [long]$LeftValue -shr [int]$Right.Value }
+              'And' { $LeftValue -is [bool] -and $Right.Value -is [bool] ? ($LeftValue -and $Right.Value) : ([long]$LeftValue -band [long]$Right.Value) }
+              'Or' { $LeftValue -is [bool] -and $Right.Value -is [bool] ? ($LeftValue -or $Right.Value) : ([long]$LeftValue -bor [long]$Right.Value) }
+              'Xor' { $LeftValue -is [bool] -and $Right.Value -is [bool] ? ($LeftValue -xor $Right.Value) : ([long]$LeftValue -bxor [long]$Right.Value) }
+            }
+          } catch {
+            $null = $Path.State.Remove($Destination)
+          }
+        }
+        { $_ -in @('Ge', 'Le', 'Gt', 'Lt', 'Ne', 'Eq') } {
+          $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+          $Left = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $Path.State
+          $Right = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[2] -State $Path.State
+          if (-not $Destination -or -not $Left.Resolved -or -not $Right.Resolved) {
+            if ($Destination) { $null = $Path.State.Remove($Destination) }
+            break
+          }
+          try {
+            $Path.State[$Destination] = switch ($Code) {
+              'Ge' { $Left.Value -ge $Right.Value }
+              'Le' { $Left.Value -le $Right.Value }
+              'Gt' { $Left.Value -gt $Right.Value }
+              'Lt' { $Left.Value -lt $Right.Value }
+              'Ne' { -not (Test-InnoPascalScriptConstantEqual -Left $Left.Value -Right $Right.Value) }
+              'Eq' { Test-InnoPascalScriptConstantEqual -Left $Left.Value -Right $Right.Value }
+            }
+          } catch {
+            $null = $Path.State.Remove($Destination)
+          }
+        }
+        { $_ -in @('Neg', 'Not', 'Inc', 'Dec', 'SetZ') } {
+          $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[0]
+          if (-not $Destination -or -not $Path.State.ContainsKey($Destination)) {
+            if ($Destination) { $null = $Path.State.Remove($Destination) }
+            break
+          }
+          try {
+            $CurrentValue = $Path.State[$Destination]
+            $Path.State[$Destination] = switch ($Code) {
+              'Neg' { - $CurrentValue }
+              'Not' { $CurrentValue -is [bool] ? (-not $CurrentValue) : (-bnot [long]$CurrentValue) }
+              'Inc' { $CurrentValue + 1 }
+              'Dec' { $CurrentValue - 1 }
+              'SetZ' {
+                $Condition = ConvertTo-InnoPascalScriptBooleanConstant -Value $CurrentValue
+                if (-not $Condition.Resolved) { throw 'Unsupported zero comparison' }
+                -not $Condition.Value
+              }
+            }
+          } catch {
+            $null = $Path.State.Remove($Destination)
+          }
+        }
+        { $_ -in @('SetFlagNZ', 'SetFlagZ') } {
+          $Operand = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[0] -State $Path.State
+          if ($Operand.Resolved) {
+            $Condition = ConvertTo-InnoPascalScriptBooleanConstant -Value $Operand.Value
+            $Path.JumpFlagResolved = $Condition.Resolved
+            if ($Condition.Resolved) { $Path.JumpFlag = $Code -ceq 'SetFlagNZ' ? $Condition.Value : -not $Condition.Value }
+          } else {
+            $Path.JumpFlagResolved = $false
+          }
+        }
+        'Jump' {
+          $Target = Get-InnoPascalScriptBranchTargetIndex -Operand $Instruction.Operands[0] -InstructionIndex $InstructionIndex
+          if ($Target -lt 0) {
+            $TerminalPaths.Add([pscustomobject]@{ Resolved = $false; Value = $null; Reason = 'Invalid direct branch target'; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+            $PathTerminated = $true
+          } else {
+            $NextPosition = $Target
+          }
+        }
+        { $_ -in @('JumpNZ', 'JumpZ') } {
+          $Target = Get-InnoPascalScriptBranchTargetIndex -Operand $Instruction.Operands[0] -InstructionIndex $InstructionIndex
+          $Operand = Get-InnoPascalScriptOperandConstant -Operand $Instruction.Operands[1] -State $Path.State
+          if ($Target -lt 0) {
+            $TerminalPaths.Add([pscustomobject]@{ Resolved = $false; Value = $null; Reason = 'Invalid conditional branch target'; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+            $PathTerminated = $true
+          } elseif ($Operand.Resolved) {
+            $Condition = ConvertTo-InnoPascalScriptBooleanConstant -Value $Operand.Value
+            if ($Condition.Resolved) {
+              $ShouldJump = $Code -ceq 'JumpNZ' ? $Condition.Value : -not $Condition.Value
+              if ($ShouldJump) { $NextPosition = $Target }
+            } else {
+              $ForkTargets = [int[]]@($Target, $NextPosition)
+            }
+          } else {
+            $ForkTargets = [int[]]@($Target, $NextPosition)
+          }
+          $ForkReason = "$Code at IFPS instruction $($Path.Position)"
+        }
+        'JumpF' {
+          $Target = Get-InnoPascalScriptBranchTargetIndex -Operand $Instruction.Operands[0] -InstructionIndex $InstructionIndex
+          if ($Target -lt 0) {
+            $TerminalPaths.Add([pscustomobject]@{ Resolved = $false; Value = $null; Reason = 'Invalid flag branch target'; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+            $PathTerminated = $true
+          } elseif ($Path.JumpFlagResolved) {
+            if ($Path.JumpFlag) { $NextPosition = $Target }
+          } else {
+            $ForkTargets = [int[]]@($Target, $NextPosition)
+          }
+          $ForkReason = "JumpF at IFPS instruction $($Path.Position)"
+        }
+        'Ret' {
+          if ($Path.State.ContainsKey($ReturnKey)) {
+            $TerminalPaths.Add([pscustomobject]@{ Resolved = $true; Value = $Path.State[$ReturnKey]; Reason = $null; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+          } else {
+            $TerminalPaths.Add([pscustomobject]@{ Resolved = $false; Value = $null; Reason = 'Return variable is not constant'; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+          }
+          $PathTerminated = $true
+        }
+        'SetStackType' {
+          # Historical IFPS reinitializes the selected variable with the new
+          # type, so any value proven before this instruction is no longer valid.
+          $Destination = Get-InnoPascalScriptVariableKey -Operand $Instruction.Operands[1]
+          if ($Destination) { $null = $Path.State.Remove($Destination) }
+        }
+        { $_ -in @('Push', 'PushVar', 'PushType', 'Pop', 'Nop') } { }
+        default {
+          $TerminalPaths.Add([pscustomobject]@{ Resolved = $false; Value = $null; Reason = "Unsupported opcode: $Code"; Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray() })
+          $PathTerminated = $true
+        }
+      }
+
+      if ($PathTerminated) { break }
+      if ($null -ne $ForkTargets) {
+        $Targets = [int[]]@($ForkTargets | Select-Object -Unique)
+        if ($Targets.Count -gt 1 -and $Path.Depth -lt $INNO_MAX_PASCAL_SCRIPT_BRANCH_DEPTH -and
+          $CreatedPathCount + $Targets.Count - 1 -le $INNO_MAX_PASCAL_SCRIPT_BRANCH_PATHS) {
+          $CreatedPathCount += $Targets.Count - 1
+          $ForkCount++
+          $null = $BranchPredicates.Add($ForkReason)
+          foreach ($Target in $Targets) {
+            $Predicates = [System.Collections.Generic.List[string]]::new()
+            $Predicates.AddRange([string[]]$Path.Predicates.ToArray())
+            $Predicates.Add("$ForkReason -> $Target")
+            $Queue.Enqueue([pscustomobject]@{
+                Position = $Target; Steps = $Path.Steps; Depth = $Path.Depth + 1
+                State = Copy-InnoPascalScriptConstantState -State $Path.State
+                JumpFlagResolved = $Path.JumpFlagResolved; JumpFlag = $Path.JumpFlag; Predicates = $Predicates
+              })
+          }
+        } else {
+          $TerminalPaths.Add([pscustomobject]@{
+              Resolved = $false; Value = $null; Reason = 'Branch exploration reached the configured path or depth limit'
+              Truncated = $true; Predicates = [string[]]$Path.Predicates.ToArray()
+            })
+        }
+        $PathTerminated = $true
+        break
+      }
+      $Path.Position = $NextPosition
+    }
+
+    if (-not $PathTerminated) {
+      $TerminalPaths.Add([pscustomobject]@{
+          Resolved = $Path.State.ContainsKey($ReturnKey); Value = $Path.State.ContainsKey($ReturnKey) ? $Path.State[$ReturnKey] : $null
+          Reason = $Path.State.ContainsKey($ReturnKey) ? $null : 'Return variable is not constant'
+          Truncated = $false; Predicates = [string[]]$Path.Predicates.ToArray()
+        })
+    }
+  }
+
+  $ResolvedPaths = @($TerminalPaths | Where-Object Resolved)
+  $TruncatedPathCount = @($TerminalPaths | Where-Object Truncated).Count
+  $IsResolved = $TerminalPaths.Count -gt 0 -and $ResolvedPaths.Count -eq $TerminalPaths.Count
+  $Value = $IsResolved ? $ResolvedPaths[0].Value : $null
+  if ($IsResolved) {
+    foreach ($ResolvedPath in $ResolvedPaths | Select-Object -Skip 1) {
+      if (-not (Test-InnoPascalScriptConstantEqual -Left $Value -Right $ResolvedPath.Value)) {
+        $IsResolved = $false
+        $Value = $null
+        break
+      }
+    }
+  }
+  $Reason = if ($IsResolved) {
+    $null
+  } elseif ($TruncatedPathCount -gt 0) {
+    'One or more branch paths exceeded the static-analysis bounds'
+  } elseif ($ResolvedPaths.Count -eq $TerminalPaths.Count -and $ResolvedPaths.Count -gt 1) {
+    'Branch paths return different constants'
+  } else {
+    [string](@($TerminalPaths | Where-Object { -not $_.Resolved } | Select-Object -First 1).Reason)
+  }
+  return [pscustomobject]@{
+    IsResolved = $IsResolved; Value = $Value; Reason = $Reason; ExploredPathCount = $CreatedPathCount
+    ForkCount = $ForkCount; TruncatedPathCount = $TruncatedPathCount
+    BranchPredicates = [string[]]@($BranchPredicates | Sort-Object)
+    ReturnValues = [object[]]@($ResolvedPaths.Value)
+  }
 }
 
 function Get-InnoPascalScriptEffectCategory {
@@ -2728,14 +3047,41 @@ function Get-InnoPascalScriptEffectCategory {
   }
 }
 
+function Get-InnoPascalScriptReturnMap {
+  <#
+  .SYNOPSIS
+    Index statically proven primitive Pascal Script returns by function name.
+  .PARAMETER PascalScriptInfo
+    Detailed result from ConvertTo-InnoPascalScriptInfo.
+  #>
+  [OutputType([System.Collections.IDictionary])]
+  param ([AllowNull()][pscustomobject]$PascalScriptInfo)
+
+  $Map = [ordered]@{}
+  if ($null -eq $PascalScriptInfo -or $null -eq $PascalScriptInfo.PSObject.Properties['StaticReturnValues']) {
+    return $Map
+  }
+  foreach ($Return in @($PascalScriptInfo.StaticReturnValues)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$Return.Function)) {
+      $Value = $Return.Value
+      if ([string]$Return.ReturnType -ieq 'BOOLEAN') {
+        $Boolean = ConvertTo-InnoPascalScriptBooleanConstant -Value $Value
+        if ($Boolean.Resolved) { $Value = $Boolean.Value }
+      }
+      $Map[[string]$Return.Function] = $Value
+    }
+  }
+  return $Map
+}
+
 function Get-InnoPascalScriptConstantMap {
   <#
   .SYNOPSIS
     Map header {code:Function} constants to statically proven string returns.
   .DESCRIPTION
-    Only functions whose complete straight-line body resolves to one constant
-    return value are accepted. The map is limited to constants actually present
-    in the supplied header strings, including parameterized constant spellings.
+    Only functions whose complete bounded control-flow graph resolves to one
+    constant string return are accepted. The map is limited to constants actually
+    present in the supplied header strings, including parameterized spellings.
   .PARAMETER PascalScriptInfo
     Detailed result from ConvertTo-InnoPascalScriptInfo.
   .PARAMETER Values
@@ -2754,10 +3100,8 @@ function Get-InnoPascalScriptConstantMap {
   }
 
   $Returns = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
-  foreach ($Return in @($PascalScriptInfo.StaticReturnValues)) {
-    if (-not [string]::IsNullOrWhiteSpace([string]$Return.Function) -and $Return.Value -is [string]) {
-      $Returns[[string]$Return.Function] = [string]$Return.Value
-    }
+  foreach ($Return in (Get-InnoPascalScriptReturnMap -PascalScriptInfo $PascalScriptInfo).GetEnumerator()) {
+    if ($Return.Value -is [string]) { $Returns[[string]$Return.Key] = [string]$Return.Value }
   }
   if ($Returns.Count -eq 0) { return $Map }
 
@@ -2795,10 +3139,11 @@ function ConvertTo-InnoPascalScriptInfo {
   $Header = Read-InnoPascalScriptHeader -Bytes $Bytes
   if (-not $Header.Present) {
     return [pscustomobject][ordered]@{
-      Present = $false; ByteLength = 0; FileVersion = $null; EntryPoint = $null
+      Present = $false; AnalysisStatus = 'Absent'; ByteLength = 0; FileVersion = $null; EntryPoint = $null
       TypeCount = 0; FunctionCount = 0; ScriptFunctionCount = 0; ExternalFunctionCount = 0
       GlobalVariableCount = 0; InstructionCount = 0; IndirectCallCount = 0
       UnknownOpcodeCount = 0; UsesExtendedType = $false
+      StaticReturnExploredPathCount = 0; StaticReturnForkCount = 0; StaticReturnTruncatedPathCount = 0
       ScriptFunctions = [string[]]@(); ExportedFunctions = [string[]]@()
       ExternalFunctions = [pscustomobject[]]@(); DllImports = [pscustomobject[]]@()
       Types = [pscustomobject[]]@(); GlobalVariables = [pscustomobject[]]@()
@@ -2823,6 +3168,9 @@ function ConvertTo-InnoPascalScriptInfo {
   $InstructionCount = 0
   $IndirectCallCount = 0
   $UnknownOpcodeCount = 0
+  $StaticReturnExploredPathCount = 0
+  $StaticReturnForkCount = 0
+  $StaticReturnTruncatedPathCount = 0
 
   for ($TypeIndex = 0; $TypeIndex -lt $PascalScript.Types.Count; $TypeIndex++) {
     $Type = $PascalScript.Types[$TypeIndex]
@@ -2852,15 +3200,25 @@ function ConvertTo-InnoPascalScriptInfo {
     $FunctionInstructionCount = 0
     $Calls = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $FunctionConstants = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $StaticReturnInfo = [pscustomobject]@{ IsResolved = $false; Value = $null; Reason = 'External function' }
+    $StaticReturnInfo = [pscustomobject]@{
+      IsResolved = $false; Value = $null; Reason = 'External function'; ExploredPathCount = 0
+      ForkCount = 0; TruncatedPathCount = 0; BranchPredicates = [string[]]@(); ReturnValues = [object[]]@()
+    }
     if ($FunctionType -ceq 'IFPSLib.Emit.ScriptFunction') {
       $FunctionKind = 'Script'
       $ScriptFunctions.Add([string]$Function.Name)
       $FunctionInstructionCount = $Function.Instructions.Count
       $InstructionCount += $FunctionInstructionCount
       $StaticReturnInfo = Get-InnoPascalScriptStaticReturnInfo -Function $Function
+      $StaticReturnExploredPathCount += $StaticReturnInfo.ExploredPathCount
+      $StaticReturnForkCount += $StaticReturnInfo.ForkCount
+      $StaticReturnTruncatedPathCount += $StaticReturnInfo.TruncatedPathCount
       if ($StaticReturnInfo.IsResolved) {
-        $StaticReturnValues.Add([pscustomobject]@{ Function = [string]$Function.Name; Value = $StaticReturnInfo.Value })
+        $StaticReturnValues.Add([pscustomobject]@{
+            Function = [string]$Function.Name; ReturnType = [string]$Function.ReturnArgument.Name; Value = $StaticReturnInfo.Value
+            ExploredPathCount = $StaticReturnInfo.ExploredPathCount; ForkCount = $StaticReturnInfo.ForkCount
+            BranchPredicates = $StaticReturnInfo.BranchPredicates
+          })
       }
 
       foreach ($Instruction in $Function.Instructions) {
@@ -2933,19 +3291,23 @@ function ConvertTo-InnoPascalScriptInfo {
       }
     }
     $FunctionDetails.Add([pscustomobject][ordered]@{
-        Index                = $FunctionIndex
-        Name                 = [string]$Function.Name
-        Kind                 = $FunctionKind
-        Exported             = [bool]$Function.Exported
-        ReturnType           = $null -ne $Function.ReturnArgument ? [string]$Function.ReturnArgument.Name : $null
-        Arguments            = [pscustomobject[]]$ArgumentDetails.ToArray()
-        Attributes           = [string[]]@($Function.Attributes | ForEach-Object { [string]$_.ToString() })
-        InstructionCount     = $FunctionInstructionCount
-        Calls                = [string[]]@($Calls)
-        StringConstants      = [string[]]@($FunctionConstants)
-        StaticReturnResolved = [bool]$StaticReturnInfo.IsResolved
-        StaticReturnValue    = $StaticReturnInfo.Value
-        StaticReturnReason   = [string]$StaticReturnInfo.Reason
+        Index                          = $FunctionIndex
+        Name                           = [string]$Function.Name
+        Kind                           = $FunctionKind
+        Exported                       = [bool]$Function.Exported
+        ReturnType                     = $null -ne $Function.ReturnArgument ? [string]$Function.ReturnArgument.Name : $null
+        Arguments                      = [pscustomobject[]]$ArgumentDetails.ToArray()
+        Attributes                     = [string[]]@($Function.Attributes | ForEach-Object { [string]$_.ToString() })
+        InstructionCount               = $FunctionInstructionCount
+        Calls                          = [string[]]@($Calls)
+        StringConstants                = [string[]]@($FunctionConstants)
+        StaticReturnResolved           = [bool]$StaticReturnInfo.IsResolved
+        StaticReturnValue              = $StaticReturnInfo.Value
+        StaticReturnReason             = [string]$StaticReturnInfo.Reason
+        StaticReturnExploredPathCount  = [int]$StaticReturnInfo.ExploredPathCount
+        StaticReturnForkCount          = [int]$StaticReturnInfo.ForkCount
+        StaticReturnTruncatedPathCount = [int]$StaticReturnInfo.TruncatedPathCount
+        StaticReturnBranchPredicates   = [string[]]$StaticReturnInfo.BranchPredicates
       })
   }
 
@@ -2976,34 +3338,38 @@ function ConvertTo-InnoPascalScriptInfo {
   }
 
   return [pscustomobject][ordered]@{
-    Present               = $true
-    ByteLength            = $Bytes.Length
-    FileVersion           = $PascalScript.FileVersion
-    EntryPoint            = $null -ne $PascalScript.EntryPoint ? [string]$PascalScript.EntryPoint.Name : $null
-    TypeCount             = $PascalScript.Types.Count
-    FunctionCount         = $PascalScript.Functions.Count
-    ScriptFunctionCount   = $ScriptFunctions.Count
-    ExternalFunctionCount = $ExternalFunctions.Count
-    GlobalVariableCount   = $PascalScript.GlobalVariables.Count
-    InstructionCount      = $InstructionCount
-    IndirectCallCount     = $IndirectCallCount
-    UnknownOpcodeCount    = $UnknownOpcodeCount
-    UsesExtendedType      = $UsesExtendedType
-    ScriptFunctions       = [string[]]$ScriptFunctions.ToArray()
-    ExportedFunctions     = [string[]]$ExportedFunctions.ToArray()
-    ExternalFunctions     = [pscustomobject[]]$ExternalFunctions.ToArray()
-    DllImports            = [pscustomobject[]]$DllImports.ToArray()
-    Types                 = [pscustomobject[]]$TypeDetails.ToArray()
-    GlobalVariables       = [pscustomobject[]]$GlobalDetails.ToArray()
-    Functions             = [pscustomobject[]]$FunctionDetails.ToArray()
-    StringConstants       = [string[]]@($StringConstants)
-    RuntimeEffects        = [pscustomobject[]]$RuntimeEffects.ToArray()
-    StaticReturnValues    = [pscustomobject[]]$StaticReturnValues.ToArray()
-    Disassembly           = $Disassembly
-    DisassemblyTruncated  = $DisassemblyTruncated
-    Warnings              = [string[]]$Warnings.ToArray()
-    Parser                = 'IFPSTools.NET IFPSLib'
-    ParserVersion         = [IFPSLib.Script].Assembly.GetName().Version.ToString()
+    Present                        = $true
+    AnalysisStatus                 = 'Analyzed'
+    ByteLength                     = $Bytes.Length
+    FileVersion                    = $PascalScript.FileVersion
+    EntryPoint                     = $null -ne $PascalScript.EntryPoint ? [string]$PascalScript.EntryPoint.Name : $null
+    TypeCount                      = $PascalScript.Types.Count
+    FunctionCount                  = $PascalScript.Functions.Count
+    ScriptFunctionCount            = $ScriptFunctions.Count
+    ExternalFunctionCount          = $ExternalFunctions.Count
+    GlobalVariableCount            = $PascalScript.GlobalVariables.Count
+    InstructionCount               = $InstructionCount
+    IndirectCallCount              = $IndirectCallCount
+    UnknownOpcodeCount             = $UnknownOpcodeCount
+    UsesExtendedType               = $UsesExtendedType
+    StaticReturnExploredPathCount  = $StaticReturnExploredPathCount
+    StaticReturnForkCount          = $StaticReturnForkCount
+    StaticReturnTruncatedPathCount = $StaticReturnTruncatedPathCount
+    ScriptFunctions                = [string[]]$ScriptFunctions.ToArray()
+    ExportedFunctions              = [string[]]$ExportedFunctions.ToArray()
+    ExternalFunctions              = [pscustomobject[]]$ExternalFunctions.ToArray()
+    DllImports                     = [pscustomobject[]]$DllImports.ToArray()
+    Types                          = [pscustomobject[]]$TypeDetails.ToArray()
+    GlobalVariables                = [pscustomobject[]]$GlobalDetails.ToArray()
+    Functions                      = [pscustomobject[]]$FunctionDetails.ToArray()
+    StringConstants                = [string[]]@($StringConstants)
+    RuntimeEffects                 = [pscustomobject[]]$RuntimeEffects.ToArray()
+    StaticReturnValues             = [pscustomobject[]]$StaticReturnValues.ToArray()
+    Disassembly                    = $Disassembly
+    DisassemblyTruncated           = $DisassemblyTruncated
+    Warnings                       = [string[]]$Warnings.ToArray()
+    Parser                         = 'IFPSTools.NET IFPSLib'
+    ParserVersion                  = [IFPSLib.Script].Assembly.GetName().Version.ToString()
   }
 }
 
@@ -3072,12 +3438,25 @@ function Get-InnoInfo {
     $ExtractionHeader = $ParsedLayout.ExtractionHeader
     $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBytes -Layout $Layout
     $HeaderArchitectureData = Get-InnoHeaderArchitectureData -HeaderValues $HeaderValues -PEInfo $PEInfo -HeaderFixedData $HeaderFixedData -Layout $Layout
-    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -Layout $Layout -HeaderFixedData $HeaderFixedData
     $Warnings = [System.Collections.Generic.List[string]]::new()
     foreach ($Warning in $HeaderArchitectureData.Warnings) { $Warnings.Add($Warning) }
     $PascalScriptInfo = $null
+    $HeaderFields = $Layout.HeaderFields
+    $ManifestHeaderValues = [string[]]@(
+      $HeaderValues[$HeaderFields.AppName], $HeaderValues[$HeaderFields.AppVerName], $HeaderValues[$HeaderFields.AppId]
+      $HeaderValues[$HeaderFields.Publisher], $HeaderValues[$HeaderFields.AppVersion], $HeaderValues[$HeaderFields.DefaultDirName]
+      $HeaderValues[$HeaderFields.UninstallDisplayName]
+    )
+    $HasCodeConstant = @($ManifestHeaderValues | Where-Object { $_ -match '(?i)\{code:' }).Count -gt 0
+    $HasDynamicDirectiveCheck = @(
+      if ($null -eq $Layout.LegacyCreateUninstallRegKeyOptionBit -and $HeaderValues.Count -gt 24 -and
+        -not [string]::IsNullOrWhiteSpace($HeaderValues[24]) -and $HeaderValues[24] -notmatch '^(?i:yes|no|true|false|0|1)$') { $HeaderValues[24] }
+      if ($null -eq $Layout.LegacyUninstallableOptionBit -and $HeaderValues.Count -gt 25 -and
+        -not [string]::IsNullOrWhiteSpace($HeaderValues[25]) -and $HeaderValues[25] -notmatch '^(?i:yes|no|true|false|0|1)$') { $HeaderValues[25] }
+    ).Count -gt 0
+    $RequiresDetailedPascalAnalysis = $IncludePascalScriptAnalysis -or $IncludeDisassembly -or $HasCodeConstant -or $HasDynamicDirectiveCheck
     try {
-      if ($IncludePascalScriptAnalysis -or $IncludeDisassembly) {
+      if ($RequiresDetailedPascalAnalysis) {
         $PascalScriptInfo = ConvertTo-InnoPascalScriptInfo -Bytes $ParsedLayout.CompiledCodeBytes `
           -IncludeDisassembly:$IncludeDisassembly -MaximumDisassemblyCharacters $MaximumDisassemblyCharacters
       } else {
@@ -3090,6 +3469,10 @@ function Get-InnoInfo {
       # optional script analysis fatal to ordinary manifest parsing.
       $Warnings.Add("Compiled Pascal Script analysis failed: $($_.Exception.Message)")
     }
+    $PascalScriptReturnMap = Get-InnoPascalScriptReturnMap -PascalScriptInfo $PascalScriptInfo
+    $PascalScriptConstantMap = Get-InnoPascalScriptConstantMap -PascalScriptInfo $PascalScriptInfo -Values $HeaderValues
+    $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -Layout $Layout `
+      -HeaderFixedData $HeaderFixedData -StaticReturnValues $PascalScriptReturnMap
     if ($HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Files') {
       $Warnings.Add('The installer payload files are encrypted; static metadata is available, but extraction requires the setup password.')
     }
@@ -3126,8 +3509,6 @@ function Get-InnoInfo {
       $Warnings.Add('One or more Inno registry entries are conditional on components, tasks, languages, or Pascal expressions; emitted registry evidence may not apply to every installation path.')
     }
 
-    $HeaderFields = $Layout.HeaderFields
-    $PascalScriptConstantMap = Get-InnoPascalScriptConstantMap -PascalScriptInfo $PascalScriptInfo -Values $HeaderValues
     $AppNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppName] -ConstantMap $PascalScriptConstantMap
     $AppVerNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppVerName] -ConstantMap $PascalScriptConstantMap
     $RawAppId = $HeaderValues[$HeaderFields.AppId]
@@ -3318,6 +3699,9 @@ function Get-InnoInfo {
         OffsetTableVersion            = $OffsetTable.Version
         PascalScriptByteLength        = $ParsedLayout.CompiledCodeBytes.Length
         PascalScriptVersion           = $null -ne $PascalScriptInfo ? $PascalScriptInfo.FileVersion : $null
+        PascalScriptStaticReturnPaths = $null -ne $PascalScriptInfo -and $null -ne $PascalScriptInfo.PSObject.Properties['StaticReturnExploredPathCount'] ? $PascalScriptInfo.StaticReturnExploredPathCount : 0
+        PascalScriptStaticReturnForks = $null -ne $PascalScriptInfo -and $null -ne $PascalScriptInfo.PSObject.Properties['StaticReturnForkCount'] ? $PascalScriptInfo.StaticReturnForkCount : 0
+        PascalScriptTruncatedPaths    = $null -ne $PascalScriptInfo -and $null -ne $PascalScriptInfo.PSObject.Properties['StaticReturnTruncatedPathCount'] ? $PascalScriptInfo.StaticReturnTruncatedPathCount : 0
       }
     }
   }

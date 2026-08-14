@@ -835,7 +835,7 @@ Describe 'Inno parser' {
     $Info.Warnings | Should -Contain 'The IFPS disassembly was truncated at 2048 characters.'
   }
 
-  It 'Should resolve only a straight-line constant Pascal Script return' {
+  It 'Should resolve a straight-line constant Pascal Script return' {
     InModuleScope Inno {
       Import-InnoPascalScriptDependency
       $Function = [IFPSLib.Emit.ScriptFunction]::new()
@@ -858,6 +858,143 @@ Describe 'Inno parser' {
         }) -Values @('{code:StaticInstallPath}', '{code:StaticInstallPath|ignored parameter}')
       $Map['code:StaticInstallPath'] | Should -Be 'C:\StaticPath'
       $Map['code:StaticInstallPath|ignored parameter'] | Should -Be 'C:\StaticPath'
+    }
+  }
+
+  It 'Should merge unknown Pascal Script branches that return the same constant' {
+    InModuleScope Inno {
+      Import-InnoPascalScriptDependency
+      $Function = [IFPSLib.Emit.ScriptFunction]::new()
+      $Function.Name = 'ConvergentBranch'
+      $Function.ReturnArgument = [IFPSLib.Types.PrimitiveType]::Create[string]()
+      $ReturnVariable = $Function.CreateReturnVariable()
+      $UnknownCondition = [IFPSLib.Emit.LocalVariable]::Create(0)
+      $Return = [IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Ret)
+      $BranchAssignment = [IFPSLib.Emit.Instruction]::Create(
+        [IFPSLib.Emit.OpCodes]::Assign,
+        [IFPSLib.Emit.Operand]::Create($ReturnVariable),
+        [IFPSLib.Emit.Operand]::Create('same value')
+      )
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::JumpNZ,
+          $BranchAssignment,
+          [IFPSLib.Emit.Operand]::Create($UnknownCondition)
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::Assign,
+          [IFPSLib.Emit.Operand]::Create($ReturnVariable),
+          [IFPSLib.Emit.Operand]::Create('same value')
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Jump, $Return))
+      $Function.Instructions.Add($BranchAssignment)
+      $Function.Instructions.Add($Return)
+
+      $Result = Get-InnoPascalScriptStaticReturnInfo -Function $Function
+
+      $Result.IsResolved | Should -BeTrue
+      $Result.Value | Should -Be 'same value'
+      $Result.ExploredPathCount | Should -Be 2
+      $Result.ForkCount | Should -Be 1
+      $Result.TruncatedPathCount | Should -Be 0
+      $Result.BranchPredicates | Should -HaveCount 1
+    }
+  }
+
+  It 'Should reject divergent Pascal Script branch returns' {
+    InModuleScope Inno {
+      Import-InnoPascalScriptDependency
+      $Function = [IFPSLib.Emit.ScriptFunction]::new()
+      $Function.Name = 'DivergentBranch'
+      $Function.ReturnArgument = [IFPSLib.Types.PrimitiveType]::Create[string]()
+      $ReturnVariable = $Function.CreateReturnVariable()
+      $UnknownCondition = [IFPSLib.Emit.LocalVariable]::Create(0)
+      $Return = [IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Ret)
+      $BranchAssignment = [IFPSLib.Emit.Instruction]::Create(
+        [IFPSLib.Emit.OpCodes]::Assign,
+        [IFPSLib.Emit.Operand]::Create($ReturnVariable),
+        [IFPSLib.Emit.Operand]::Create('branch value')
+      )
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::JumpZ,
+          $BranchAssignment,
+          [IFPSLib.Emit.Operand]::Create($UnknownCondition)
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::Assign,
+          [IFPSLib.Emit.Operand]::Create($ReturnVariable),
+          [IFPSLib.Emit.Operand]::Create('fallthrough value')
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Jump, $Return))
+      $Function.Instructions.Add($BranchAssignment)
+      $Function.Instructions.Add($Return)
+
+      $Result = Get-InnoPascalScriptStaticReturnInfo -Function $Function
+
+      $Result.IsResolved | Should -BeFalse
+      $Result.Reason | Should -Be 'Branch paths return different constants'
+      $Result.ReturnValues | Should -Contain 'branch value'
+      $Result.ReturnValues | Should -Contain 'fallthrough value'
+    }
+  }
+
+  It 'Should follow a resolved Pascal Script comparison without forking' {
+    InModuleScope Inno {
+      Import-InnoPascalScriptDependency
+      $Function = [IFPSLib.Emit.ScriptFunction]::new()
+      $Function.Name = 'ResolvedComparison'
+      $Function.ReturnArgument = [IFPSLib.Types.PrimitiveType]::Create[byte]()
+      $ReturnVariable = $Function.CreateReturnVariable()
+      $Condition = [IFPSLib.Emit.LocalVariable]::Create(0)
+      $FalseReturn = [IFPSLib.Emit.Instruction]::Create(
+        [IFPSLib.Emit.OpCodes]::Assign,
+        [IFPSLib.Emit.Operand]::Create($ReturnVariable),
+        [IFPSLib.Emit.Operand]::Create([byte]0)
+      )
+      $Return = [IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Ret)
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::Eq,
+          [IFPSLib.Emit.Operand]::Create($Condition),
+          [IFPSLib.Emit.Operand]::Create(7),
+          [IFPSLib.Emit.Operand]::Create(7)
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::JumpZ,
+          $FalseReturn,
+          [IFPSLib.Emit.Operand]::Create($Condition)
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create(
+          [IFPSLib.Emit.OpCodes]::Assign,
+          [IFPSLib.Emit.Operand]::Create($ReturnVariable),
+          [IFPSLib.Emit.Operand]::Create([byte]1)
+        ))
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Jump, $Return))
+      $Function.Instructions.Add($FalseReturn)
+      $Function.Instructions.Add($Return)
+
+      $Result = Get-InnoPascalScriptStaticReturnInfo -Function $Function
+
+      $Result.IsResolved | Should -BeTrue
+      $Result.Value | Should -Be 1
+      $Result.ForkCount | Should -Be 0
+      (Get-InnoBooleanDirectiveInfo -Value 'not ResolvedComparison' -Default $true -StaticReturnValues @{ ResolvedComparison = $true }).Value | Should -BeFalse
+    }
+  }
+
+  It 'Should bound looping Pascal Script paths' {
+    InModuleScope Inno {
+      Import-InnoPascalScriptDependency
+      $Function = [IFPSLib.Emit.ScriptFunction]::new()
+      $Function.Name = 'LoopingReturn'
+      $Function.ReturnArgument = [IFPSLib.Types.PrimitiveType]::Create[string]()
+      $LoopTarget = [IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Nop)
+      $Function.Instructions.Add($LoopTarget)
+      $Function.Instructions.Add([IFPSLib.Emit.Instruction]::Create([IFPSLib.Emit.OpCodes]::Jump, $LoopTarget))
+
+      $Result = Get-InnoPascalScriptStaticReturnInfo -Function $Function
+
+      $Result.IsResolved | Should -BeFalse
+      $Result.TruncatedPathCount | Should -Be 1
+      $Result.Reason | Should -Be 'One or more branch paths exceeded the static-analysis bounds'
     }
   }
 
@@ -966,6 +1103,7 @@ Describe 'Inno parser' {
     $Info.ParserVersionInfo.FileLocationStartOffsetSize | Should -Be 8
     $Info.ParserVersionInfo.UsesInt64BlockHeader | Should -BeTrue
     $Info.ParserVersionInfo.OffsetTableVersion | Should -Be 2
+    $Info.PascalScriptInfo.AnalysisStatus | Should -Be 'Analyzed'
     $Info.Warnings | Should -Contain 'CreateUninstallRegKey or Uninstallable is a dynamic expression, so Apps & Features registration cannot be determined statically.'
   }
 
