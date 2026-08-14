@@ -1769,6 +1769,40 @@ Describe 'NSIS parser' {
     $Info.ParserVersionInfo.LogCmdIsEnabled | Should -BeTrue
   }
 
+  It 'Should distinguish log-enabled SectionSet records from non-log InstallTypeSet records' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      # SectionSetSize stores SECTION_FIELD_SET(size_kb) as -6 in offsets[2].
+      # The same raw opcode would be EW_INSTTYPESET without the inserted log
+      # slot, but that command accepts only operation selectors 0 and 1.
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]64
+        Raw          = [uint32[]]@(64, 104, 3202, ([uint32]::MaxValue - 5), 0, 0, 0)
+      }
+      [pscustomobject]@{
+        WithoutLog = Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $false
+        WithLog    = Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $true
+      }
+    }
+
+    $Result.WithoutLog | Should -Be 1
+    $Result.WithLog | Should -Be 0
+  }
+
+  It 'Should parse Google Antigravity through its source-backed log-enabled command layout' {
+    $FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\NSIS'
+    $Fixture = Get-DumplingsTestFixture -Directory $FixtureDirectory -Name 'Google-Antigravity-2.8.1-x64.exe' -Uri 'https://storage.googleapis.com/antigravity-public/antigravity-hub/2.8.1-6512087774658560/windows-x64/Antigravity-x64.exe' -Sha256 '05085047994932949BB6777765710CDC28ADB61C804851167995A3C285ACCA47'
+    $Format = Get-NSISFormatInfo -Path $Fixture
+    $Info = Get-NSISInfo -Path $Fixture
+
+    $Format.CatalogProfileId | Should -Be 'official-nsis3-unicode'
+    $Format.LogCommandEnabled | Should -BeTrue
+    $Format.HasSemanticAmbiguity | Should -BeFalse
+    $Format.IsSupported | Should -BeTrue
+    $Info.ProductCode | Should -Be '121a0be4-63bd-531e-acf8-fc3924c7e984'
+    $Info.DisplayName | Should -Be 'Antigravity 2.8.1'
+  }
+
   It 'Should model the source-backed x64.nsh System plug-in architecture probes' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {

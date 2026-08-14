@@ -2374,6 +2374,20 @@ function Measure-NSISCommandLayoutCandidate {
       continue
     }
 
+    # EW_INSTTYPESET offsets[2] selects either install-type text (0) or the
+    # current install type (1). A negative section-structure field selector is
+    # emitted only by EW_SECTIONSET. This distinguishes official stubs with an
+    # inserted EW_LOG slot even when the script contains no LogText/LogSet
+    # instruction. Electron-builder's SectionSetSize output exercises this
+    # route in Google Antigravity.
+    if ($Opcode -eq $Script:NSIS_OPCODE_INSTALL_TYPE_SET) {
+      $Operation = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$Entry.Raw[3]), 0)
+      if ($Operation -notin @(0, 1)) {
+        $BadCommandCount++
+        continue
+      }
+    }
+
     $LastNonZeroParameter = 0
     $MaximumOperand = if ($IsNsisBi) { 8 } else { 6 }
     for ($Index = $MaximumOperand; $Index -ge 1; $Index--) {
