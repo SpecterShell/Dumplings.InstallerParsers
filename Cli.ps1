@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param (
   [Parameter(Mandatory, HelpMessage = 'The installer parser action to invoke')]
-  [ValidateSet('NSIS.GetFormatInfo', 'NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetFormatInfo', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
+  [ValidateSet('NSIS.GetFormatInfo', 'NSIS.GetInfo', 'NSIS.Expand', 'NSIS.GetInstallerSwitchInfo', 'NSIS.TestElectronBuilder', 'NSIS.GetElectronBuilderInfo', 'Inno.GetFormatInfo', 'Inno.GetInfo', 'Inno.GetPascalScriptInfo', 'Inno.Expand', 'AdvancedInstaller.GetFormatInfo', 'AdvancedInstaller.GetInfo', 'AdvancedInstaller.Expand', 'QtInstallerFramework.GetFormatInfo', 'QtInstallerFramework.GetInfo', 'QtInstallerFramework.Expand', 'SetupFactory.GetInfo', 'SetupFactory.Expand')]
   [string]$Action,
 
   [Parameter(HelpMessage = 'The path to the installer')]
@@ -176,6 +176,11 @@ try {
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
 
       Expand-AdvancedInstaller @ExpandArguments
+    }
+    'QtInstallerFramework.GetFormatInfo' {
+      Import-Module (Join-Path $InstallerPath 'QtInstallerFramework.psm1') -Force
+      Get-QtInstallerFrameworkFormatInfo -Path $Path
+      break
     }
     'QtInstallerFramework.GetInfo' {
       Import-Module (Join-Path $InstallerPath 'QtInstallerFramework.psm1') -Force

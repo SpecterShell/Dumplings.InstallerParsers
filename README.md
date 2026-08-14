@@ -58,6 +58,7 @@ Do not write informational output to standard output in parser modules because i
 | `Inno.Expand` | Expand selected Inno payload files statically, including external disk slices supplied by the caller. | `Path`, optional `DestinationPath`, `Name`, `Language`, `CollisionAction`, `DiskSourcePath`, `MaximumExpandedBytes` |
 | `AdvancedInstaller.GetInfo` | Parse the Advanced Installer bootstrapper catalog and nested MSI selection evidence. | `Path` |
 | `AdvancedInstaller.Expand` | Expand catalog-selected payloads. | `Path`, optional `DestinationPath`, `Name`, `CollisionAction` |
+| `QtInstallerFramework.GetFormatInfo` | Identify the Qt IFW generation, framework version, media role, capabilities, and selected parser routes. | `Path` |
 | `QtInstallerFramework.GetInfo` | Parse Qt Installer Framework trailer, metadata, packages, operations, scope, and identity. | `Path` |
 | `QtInstallerFramework.Expand` | Expand selected Qt IFW resources and archives. | `Path`, optional `DestinationPath`, `Name`, `CollisionAction`, `MaximumExpandedBytes` |
 | `SetupFactory.GetInfo` | Parse Setup Factory 7-9 session variables, uninstall configuration, registry evidence, and payload catalog. | `Path` |
@@ -148,7 +149,7 @@ Licensing is file-specific:
 
 | Files | License |
 | --- | --- |
-| `Cli.ps1`, `Libraries/Installers/{NSIS,NSISFormat,NSISSimulation,Inno,QtInstallerFramework,SetupFactory}.psm1`, `Libraries/Installers/NSISFormatCatalog.psd1` | [GPL-3.0-or-later](LICENSE) |
+| `Cli.ps1`, `Libraries/Installers/{NSIS,NSISFormat,NSISSimulation,Inno,QtInstallerFramework,SetupFactory}.psm1`, `Libraries/Installers/{NSIS,Inno,QtInstallerFramework}FormatCatalog.psd1` | [GPL-3.0-or-later](LICENSE) |
 | `Libraries/Installers/AdvancedInstaller.psm1` | [GPL-2.0](LICENSE.GPL2) |
 | `Libraries/Infrastructure/{Runtime,Binary,FileSystem,Archive,PE,InstallerEvidence}.psm1` and shared infrastructure sources | MIT, as marked in each file |
 

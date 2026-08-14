@@ -2,7 +2,7 @@ BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
@@ -44,6 +44,17 @@ BeforeAll {
     param([System.Collections.Generic.List[byte]]$Bytes, [int64]$Value)
 
     $Bytes.AddRange([System.BitConverter]::GetBytes($Value))
+  }
+
+  function Add-TestQtByteArray {
+    param(
+      [System.Collections.Generic.List[byte]]$Bytes,
+      [string]$Value
+    )
+
+    $Data = [Text.Encoding]::UTF8.GetBytes($Value)
+    Add-TestInt64LE -Bytes $Bytes -Value $Data.Length
+    $Bytes.AddRange($Data)
   }
 
   function Add-TestQtRccName {
@@ -106,12 +117,21 @@ BeforeAll {
     param(
       [string]$Name,
       [string]$InstallerXml,
-      [switch]$GuiOnly
+      [switch]$GuiOnly,
+      [string]$FrameworkVersion,
+      [object[]]$Operation = @(),
+      [ValidateSet('Installer', 'Uninstaller', 'Updater', 'PackageManager')]
+      [string]$MediaRole = 'Installer',
+      [ValidateSet('Executable', 'Data')]
+      [string]$CookieKind = 'Executable'
     )
 
     $FixturePath = Join-Path $Script:FixtureDirectory $Name
     $Bytes = [System.Collections.Generic.List[byte]]::new()
     $Bytes.AddRange([byte[]](0x4d, 0x5a))
+    if ($FrameworkVersion) {
+      $Bytes.AddRange([Text.Encoding]::ASCII.GetBytes("IFW Version: $FrameworkVersion, built with Qt 6.8.0.`0"))
+    }
     if (-not $GuiOnly) {
       $Bytes.AddRange([System.Text.Encoding]::ASCII.GetBytes("accept-licenses`0default-answer`0confirm-command`0check-updates`0create-offline`0clear-cache`0"))
     }
@@ -123,8 +143,12 @@ BeforeAll {
     $Bytes.AddRange([byte[]]$MetaBytes)
 
     $OperationsStart = $Bytes.Count
-    Add-TestInt64LE -Bytes $Bytes -Value 0
-    Add-TestInt64LE -Bytes $Bytes -Value 0
+    Add-TestInt64LE -Bytes $Bytes -Value $Operation.Count
+    foreach ($OperationItem in $Operation) {
+      Add-TestQtByteArray -Bytes $Bytes -Value $OperationItem.Name
+      Add-TestQtByteArray -Bytes $Bytes -Value $OperationItem.Data
+    }
+    Add-TestInt64LE -Bytes $Bytes -Value $Operation.Count
     $OperationsLength = $Bytes.Count - $OperationsStart
 
     Add-TestInt64LE -Bytes $Bytes -Value 0
@@ -143,8 +167,15 @@ BeforeAll {
 
     $BinaryContentSize = ($Bytes.Count + 24) - $EndOfExecutable
     Add-TestInt64LE -Bytes $Bytes -Value $BinaryContentSize
-    Add-TestInt64LE -Bytes $Bytes -Value 0x12023233
-    $Bytes.AddRange([byte[]](0xf8, 0x68, 0xd6, 0x99, 0x1c, 0x0a, 0x63, 0xc2))
+    $Marker = switch ($MediaRole) {
+      'Installer' { 0x12023233 }
+      'Uninstaller' { 0x12023234 }
+      'Updater' { 0x12023235 }
+      'PackageManager' { 0x12023236 }
+    }
+    Add-TestInt64LE -Bytes $Bytes -Value $Marker
+    $CookieFirstByte = if ($CookieKind -eq 'Data') { 0xf9 } else { 0xf8 }
+    $Bytes.AddRange([byte[]]($CookieFirstByte, 0x68, 0xd6, 0x99, 0x1c, 0x0a, 0x63, 0xc2))
 
     [System.IO.File]::WriteAllBytes($FixturePath, $Bytes.ToArray())
     return $FixturePath
@@ -152,8 +183,170 @@ BeforeAll {
 }
 
 Describe 'Qt Installer Framework parser' {
+  It 'Should expose a complete catalog with resolvable package-index routes' {
+    $Module = Get-Module QtInstallerFramework | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Catalog = & $Module { $Script:QtInstallerFrameworkCatalog }
+    $Handlers = & $Module { $Script:QtInstallerFrameworkRouteHandlers }
+
+    @($Catalog.Profiles).Count | Should -Be 5
+    @($Catalog.Profiles.Id | Select-Object -Unique).Count | Should -Be 5
+    $Profiles = @($Catalog.Profiles | Sort-Object { [version]$_.MinimumVersion })
+    $Profiles[0].MinimumVersion | Should -Be '1.2.0'
+    for ($Index = 0; $Index -lt $Profiles.Count - 1; $Index++) {
+      $Profiles[$Index].MaximumVersionExclusive | Should -Be $Profiles[$Index + 1].MinimumVersion
+    }
+    $Profiles[-1].MaximumVersionExclusive | Should -Be '4.12.0'
+    foreach ($Profile in @($Catalog.Profiles) + @($Catalog.CompatibilityProfiles.Values)) {
+      $Handlers.Trailer.ContainsKey($Profile.TrailerRoute) | Should -BeTrue
+      $Handlers.Metadata.ContainsKey($Profile.MetadataRoute) | Should -BeTrue
+      $Handlers.PackageIndex.ContainsKey($Profile.PackageIndexRoute) | Should -BeTrue
+      $Handlers.Payload.ContainsKey($Profile.PayloadRoute) | Should -BeTrue
+      $Handlers.Config.ContainsKey($Profile.ConfigRoute) | Should -BeTrue
+      $Handlers.Interface.ContainsKey($Profile.InterfaceRoute) | Should -BeTrue
+    }
+  }
+
+  It 'Should select legacy, current, and future-compatible catalog profiles' {
+    $Legacy = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-1.5.exe' -FrameworkVersion '1.5.0' -GuiOnly -InstallerXml @'
+<Installer><Name>Example.Legacy</Name><Version>1.0</Version><UninstallerName>legacytool</UninstallerName></Installer>
+'@
+    $Current = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-4.11.exe' -FrameworkVersion '4.11.0' -InstallerXml @'
+<Installer><Name>Example.Current</Name><Version>1.0</Version><ProductUUID>{11111111-2222-3333-4444-555555555555}</ProductUUID></Installer>
+'@
+    $Future = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-4.12.exe' -FrameworkVersion '4.12.0' -InstallerXml @'
+<Installer><Name>Example.Future</Name><Version>1.0</Version><ProductUUID>{11111111-2222-3333-4444-555555555555}</ProductUUID></Installer>
+'@
+
+    $LegacyInfo = Get-QtInstallerFrameworkInfo -Path $Legacy
+    $LegacyInfo.FormatGeneration | Should -Be 'LegacyComponentIndex'
+    $LegacyInfo.FormatProfileId | Should -Be 'ifw-1.x-legacy'
+    $LegacyInfo.ProductCode | Should -Be 'Example.Legacy'
+    $LegacyInfo.MaintenanceToolName | Should -Be 'legacytool'
+
+    $CurrentInfo = Get-QtInstallerFrameworkFormatInfo -Path $Current
+    $CurrentInfo.FormatProfileId | Should -Be 'ifw-4.2-current-libarchive'
+    $CurrentInfo.FrameworkVersion | Should -Be '4.11.0'
+    $CurrentInfo.QtRuntimeVersion | Should -Be '6.8.0'
+    $CurrentInfo.CatalogVersion | Should -Be 1
+    $CurrentInfo.SupportsProductUuid | Should -BeTrue
+    $CurrentInfo.SupportsCommandLineInterface | Should -BeTrue
+    $CurrentInfo.SupportsLibArchive | Should -BeTrue
+    $CurrentInfo.VersionEvidenceRoute | Should -Be 'embedded-ifw-and-pe-version-v1'
+
+    $FutureInfo = Get-QtInstallerFrameworkFormatInfo -Path $Future
+    $FutureInfo.IsFallback | Should -BeTrue
+    $FutureInfo.FormatProfileId | Should -Be 'ifw-modern-compatible'
+    $FutureInfo.Warnings | Should -Contain 'The Qt IFW media uses a structurally compatible fallback profile; release-specific capabilities require review.'
+  }
+
+  It 'Should resolve the source-defined unversioned Qt IFW 1.2 layout without treating it as a future fallback' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-1.2.exe' -GuiOnly -InstallerXml @'
+<Installer><Name>Example.IFW12</Name><Version>1.0</Version><UninstallerName>uninstall</UninstallerName></Installer>
+'@
+
+    $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
+
+    $Info.FrameworkVersion | Should -BeNullOrEmpty
+    $Info.FrameworkVersionRange | Should -Be '1.2-1.x'
+    $Info.FormatProfileId | Should -Be 'ifw-1.x-legacy'
+    $Info.IsFallback | Should -BeFalse
+    $Info.Warnings | Should -Contain 'No source-defined Qt IFW version marker was found; the framework version is reported as a structurally validated range.'
+  }
+
+  It 'Should reject an unversioned package index when configuration evidence cannot distinguish 1.x from 2.0+' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-ambiguous.exe' -GuiOnly -InstallerXml '<Installer><Name>Example.Ambiguous</Name><Version>1.0</Version></Installer>'
+
+    $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
+
+    $Info.IsQtInstallerFramework | Should -BeTrue
+    $Info.IsSupported | Should -BeFalse
+    $Info.Warnings -join ' ' | Should -BeLike '*structurally ambiguous between legacy and modern routes*'
+  }
+
+  It 'Should diagnose every media marker and executable or DAT cookie' -ForEach @(
+    @{ Role = 'Installer'; Cookie = 'Executable' }
+    @{ Role = 'Uninstaller'; Cookie = 'Executable' }
+    @{ Role = 'Updater'; Cookie = 'Data' }
+    @{ Role = 'PackageManager'; Cookie = 'Data' }
+  ) {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name "synthetic-ifw-$Role-$Cookie.bin" -FrameworkVersion '4.11.0' -MediaRole $Role -CookieKind $Cookie -InstallerXml '<Installer><Name>Example.Media</Name><Version>1.0</Version></Installer>'
+    $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
+    $Info.MediaRole | Should -Be $Role
+    $Info.CookieKind | Should -Be $Cookie
+    if ($Role -ne 'Installer') { { Get-QtInstallerFrameworkInfo -Path $Fixture } | Should -Throw '*is not an installer*' }
+  }
+
+  It 'Should return structured unsupported evidence for a malformed package index' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-malformed-index.exe' -FrameworkVersion '4.11.0' -InstallerXml '<Installer><Name>Example.Malformed</Name><Version>1.0</Version></Installer>'
+    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $Fixture
+    $Stream = [IO.File]::Open($Fixture, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+      $Stream.Position = $Layout.PrimaryIndexSegment.End - 8
+      $Bytes = [BitConverter]::GetBytes([int64]1)
+      $Stream.Write($Bytes, 0, $Bytes.Length)
+    } finally { $Stream.Dispose() }
+
+    $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
+    $Info.IsQtInstallerFramework | Should -BeTrue
+    $Info.IsSupported | Should -BeFalse
+    $Info.Warnings -join ' ' | Should -BeLike '*format route is unsupported or malformed*'
+    { Get-QtInstallerFrameworkInfo -Path $Fixture } | Should -Throw '*unsupported or malformed*'
+  }
+
+  It 'Should reject a mismatched performed-operation count footer' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-malformed-operations.exe' -FrameworkVersion '4.11.0' -Operation @([pscustomobject]@{ Name = 'CreateShortcut'; Data = '<operation />' }) -InstallerXml '<Installer><Name>Example.MalformedOperation</Name><Version>1.0</Version></Installer>'
+    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $Fixture
+    $Stream = [IO.File]::Open($Fixture, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+      $Stream.Position = $Layout.OperationsSegment.End - 8
+      $Bytes = [BitConverter]::GetBytes([int64]2)
+      $Stream.Write($Bytes, 0, $Bytes.Length)
+    } finally { $Stream.Dispose() }
+
+    $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
+
+    $Info.IsSupported | Should -BeFalse
+    $Info.Warnings -join ' ' | Should -BeLike '*performed-operation count footer*'
+  }
+
+  It 'Should parse official Windows media at catalog capability boundaries' {
+    $Cases = @(
+      @{ Name = 'qt-ifw-1.3.0.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/1.3.0/qt-installer-framework-1.3.0.exe'; Version = '1.3.0'; Generation = 'LegacyComponentIndex'; Profile = 'ifw-1.x-legacy' }
+      @{ Name = 'qt-ifw-1.5.0.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/1.5.0/qt-installer-framework-opensource-1.5.0-x86.exe'; Version = '1.5.0'; Generation = 'LegacyComponentIndex'; Profile = 'ifw-1.x-legacy' }
+      @{ Name = 'qt-ifw-2.0.5.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/2.0.5/QtInstallerFramework-win-x86.exe'; Version = '2.0.5'; Generation = 'BinaryContent'; Profile = 'ifw-2.x-3.1-binary-content' }
+      @{ Name = 'qt-ifw-3.2.2.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/3.2.2/QtInstallerFramework-win-x86.exe'; Version = '3.2.2'; Generation = 'BinaryContent'; Profile = 'ifw-3.1.2-3.x-binary-content' }
+      @{ Name = 'qt-ifw-4.0.0.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/4.0.0/QtInstallerFramework-win-x86.exe'; Version = '4.0.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.0-4.1-cli' }
+      @{ Name = 'qt-ifw-4.2.0.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/4.2.0/QtInstallerFramework-windows-x86-4.2.0.exe'; Version = '4.2.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.2-current-libarchive' }
+      @{ Name = 'qt-ifw-4.11.0.exe'; Url = 'https://download.qt.io/archive/online_installers/4.11/qt-online-installer-windows-x64-4.11.0.exe'; Version = '4.11.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.2-current-libarchive'; Payload = 'ExternalOrUnavailable' }
+    )
+    foreach ($Case in $Cases) {
+      $Fixture = Get-InstallerFixture -Name $Case.Name -Url $Case.Url
+      $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
+      $Info.FrameworkVersion | Should -Be $Case.Version
+      $Info.FormatGeneration | Should -Be $Case.Generation
+      $Info.FormatProfileId | Should -Be $Case.Profile
+      $Info.IsSupported | Should -BeTrue
+      if ($Case.ContainsKey('Payload')) {
+        $Info.PayloadAvailability | Should -Be $Case.Payload
+        $Info.Evidence.EmbeddedPackageArchiveCount | Should -Be 0
+        $Info.Warnings | Should -Contain 'No embedded package archive was indexed; package data is external, downloadable, or unavailable in this media.'
+      }
+    }
+  }
+
+  It 'Should extract a selected file through the legacy component archive route' {
+    $Fixture = Get-InstallerFixture -Name 'qt-ifw-1.5.0.exe' -Url 'https://download.qt.io/archive/qt-installer-framework/1.5.0/qt-installer-framework-opensource-1.5.0-x86.exe'
+    $Destination = Join-Path $TestDrive 'legacy-component-extraction'
+
+    $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $Destination -Name 'binarycreator.exe' -CollisionAction Rename
+
+    $Result | Should -Be $Destination
+    $Extracted = Get-Item -LiteralPath (Join-Path $Destination 'packages\org.qtproject.ifw.binaries\1.5.0data\bin\binarycreator.exe')
+    $Extracted.Length | Should -BeGreaterThan 0
+  }
+
   It 'Should read static metadata from IFW binary-content resources' {
-    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw.exe' -InstallerXml @'
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw.exe' -Operation @([pscustomobject]@{ Name = 'CreateShortcut'; Data = '<operation><arguments><argument>Example.lnk</argument></arguments></operation>' }) -InstallerXml @'
 <Installer>
   <Name>Example.QtIFW</Name>
   <Version>1.2.3</Version>
@@ -177,6 +370,8 @@ Describe 'Qt Installer Framework parser' {
     $Info.ProductCode | Should -Be '{11111111-2222-3333-4444-555555555555}'
     $Info.MaintenanceToolName | Should -Be 'example-maintenance'
     $Info.InstallerConfigSource | Should -Be ':/installer-config/config.xml'
+    $Info.OperationCount | Should -Be 1
+    $Info.Operations[0].Name | Should -Be 'CreateShortcut'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.InterfaceVariant | Should -Be 'CLI'
     $Info.CommandLineInterface | Should -Be 'Enabled'
@@ -203,7 +398,7 @@ Describe 'Qt Installer Framework parser' {
   }
 
   It 'Should warn when IFW ProductUUID is generated at install time' {
-    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-random-productuuid.exe' -InstallerXml @'
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-random-productuuid.exe' -FrameworkVersion '4.11.0' -InstallerXml @'
 <Installer>
   <Name>Example.RandomCode</Name>
   <Version>4.5.6</Version>
@@ -298,7 +493,7 @@ Describe 'Qt Installer Framework parser' {
   }
 
   It 'Should expand files from embedded IFW metadata resources' {
-    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-expand.exe' -InstallerXml @'
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-expand.exe' -FrameworkVersion '4.11.0' -InstallerXml @'
 <Installer>
   <Name>Example.Expand</Name>
   <Version>1.0.0</Version>

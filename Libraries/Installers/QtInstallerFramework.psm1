@@ -1,20 +1,23 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # Format sources: https://github.com/qtproject/installer-framework
 #
-# Binary structure consumed by this parser (trailer fields are int64 LE):
+# Binary structures consumed by this parser (trailer fields are int64 LE):
 #
-#   PE installerbase -> appended binary content
-#     +-- resource collection
-#     +-- metadata/resource/archive ranges
-#     `-- trailer ending in F8 68 D6 99 1C 0A 63 C2 (installer cookie)
+#   Qt IFW 1.x
+#   PE installerbase -> metadata RCCs -> operations -> component data
+#     -> component index -> trailer -> cookie
 #
-#   [ResourceCollection:offset,length][MetaRange:offset,length]*
+#   Qt IFW 2.0+
+#   PE installerbase -> metadata RCCs -> operations -> resource collections
+#     -> collection index -> trailer -> cookie
+#
+#   [PrimaryIndex:offset,length][MetaRange:offset,length]*
 #   [Operations:offset,length][ResourceCount][BinaryContentSize]
 #   [MagicMarker][Cookie:8]
 #
-# Segment offsets are relative to the binary-content base until adjusted by
-# EndOfExecutable. Metadata may contain Qt RCC trees; payloads may be 7z archives.
-# Count, range, RCC-node, archive, and expanded-output limits are enforced.
+# PrimaryIndex is a ComponentIndex in 1.x and a ResourceCollection index in
+# 2.0+. Segment offsets are relative to the binary-content base until adjusted
+# by EndOfExecutable. Count, range, RCC-node, archive, and output limits apply.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -33,6 +36,9 @@ $QTIFW_MAX_COOKIE_SEARCH_BYTES = 1048576
 $QTIFW_MAX_META_RESOURCE_COUNT = 512
 $QTIFW_MAX_RESOURCE_COLLECTION_COUNT = 512
 $QTIFW_MAX_RESOURCE_COUNT = 4096
+$QTIFW_MAX_COMPONENT_COUNT = 4096
+$QTIFW_MAX_OPERATION_COUNT = 16384
+$QTIFW_MAX_OPERATION_BYTES = 67108864
 $QTIFW_MAX_BYTE_ARRAY_LENGTH = 134217728
 $QTIFW_MAX_XML_SCAN_BYTES = 67108864
 $QTIFW_MAX_TEXT_EVIDENCE_BYTES = 1048576
@@ -42,6 +48,63 @@ $QTIFW_RCC_FLAG_COMPRESSED = 0x01
 $QTIFW_RCC_FLAG_DIRECTORY = 0x02
 $QTIFW_MAX_EXPANDED_BYTES = 17179869184
 $QTIFW_MAX_EXPANDED_FILES = 200000
+$QTIFW_PACKAGE_ARCHIVE_PATTERN = '(?i)\.(7z|qbsp|zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$'
+
+$Script:QtInstallerFrameworkCatalog = Import-PowerShellDataFile -Path (Join-Path $PSScriptRoot 'QtInstallerFrameworkFormatCatalog.psd1')
+$Script:QtInstallerFrameworkRouteHandlers = @{
+  Trailer      = @{
+    'legacy-component-index-v1' = 'Get-QtInstallerFrameworkBinaryLayout'
+    'resource-collections-v1'   = 'Get-QtInstallerFrameworkBinaryLayout'
+  }
+  Metadata     = @{
+    'rcc-meta-resources-v1'           = 'Get-QtInstallerFrameworkMetadataResource'
+    'rcc-and-resource-collections-v1' = 'Get-QtInstallerFrameworkMetadataResource'
+  }
+  PackageIndex = @{
+    'component-index-v1'     = 'Get-QtInstallerFrameworkLegacyComponentCollection'
+    'resource-collection-v1' = 'Get-QtInstallerFrameworkResourceCollection'
+  }
+  Payload      = @{
+    'legacy-7z-v1'  = 'Expand-QtInstallerFrameworkPackageArchive'
+    'libarchive-v1' = 'Expand-QtInstallerFrameworkPackageArchive'
+  }
+  Config       = @{
+    'legacy-config-v1'     = 'ConvertFrom-QtInstallerFrameworkInstallerXml'
+    'modern-config-v1'     = 'ConvertFrom-QtInstallerFrameworkInstallerXml'
+    'modern-config-cli-v1' = 'ConvertFrom-QtInstallerFrameworkInstallerXml'
+  }
+  Interface    = @{
+    'gui-launcher-v1'         = 'Get-QtInstallerFrameworkInterfaceInfo'
+    'cli-capable-launcher-v1' = 'Get-QtInstallerFrameworkInterfaceInfo'
+  }
+}
+
+function Get-QtInstallerFrameworkRouteHandler {
+  <#
+  .SYNOPSIS
+    Resolve a catalog route to its implementation function.
+  .PARAMETER Category
+    Route category such as Trailer, Metadata, PackageIndex, Payload, Config, or Interface.
+  .PARAMETER Route
+    Catalog route identifier within the selected category.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)]
+    [ValidateSet('Trailer', 'Metadata', 'PackageIndex', 'Payload', 'Config', 'Interface')]
+    [string]$Category,
+
+    [Parameter(Mandatory)]
+    [string]$Route
+  )
+
+  $CategoryHandlers = $Script:QtInstallerFrameworkRouteHandlers[$Category]
+  $Handler = if ($CategoryHandlers) { $CategoryHandlers[$Route] } else { $null }
+  if ([string]::IsNullOrWhiteSpace([string]$Handler)) {
+    throw "Qt Installer Framework route '$Category/$Route' has no implementation handler"
+  }
+  return [string]$Handler
+}
 
 function Import-QtInstallerFrameworkSharpCompress {
   <#
@@ -392,7 +455,9 @@ function Get-QtInstallerFrameworkBinaryLayout {
         MetaResourceCount          = $MetaResourceCount
         ResourceCount              = $ResourceCount
         MetaResourceSegments       = @($AdjustedMetaSegments)
+        PrimaryIndexSegment        = $AdjustedResourceCollectionSegment
         ResourceCollectionsSegment = $AdjustedResourceCollectionSegment
+        ComponentIndexSegment      = $AdjustedResourceCollectionSegment
         OperationsSegment          = $AdjustedOperationsSegment
       }
     } finally {
@@ -409,6 +474,9 @@ function Read-QtInstallerFrameworkByteArray {
     The file stream to read from
   .PARAMETER Cursor
     The current read cursor, updated after the read
+  .PARAMETER MaximumOffset
+    Exclusive end offset of the enclosing trailer, index, or record segment. The
+    reader validates the complete length-prefixed value before allocating it.
   #>
   [OutputType([byte[]])]
   param (
@@ -416,14 +484,23 @@ function Read-QtInstallerFrameworkByteArray {
     [System.IO.Stream]$Stream,
 
     [Parameter(Mandatory, HelpMessage = 'The current read cursor, updated after the read')]
-    [ref]$Cursor
+    [ref]$Cursor,
+
+    [Parameter(Mandatory, HelpMessage = 'The exclusive end offset of the enclosing segment')]
+    [long]$MaximumOffset
   )
 
+  if ($Cursor.Value -lt 0 -or $Cursor.Value + 8 -gt $MaximumOffset) {
+    throw 'The Qt Installer Framework byte-array length is outside its enclosing segment'
+  }
   $Length = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
-  $Cursor.Value += 8
   if ($Length -lt 0 -or $Length -gt $QTIFW_MAX_BYTE_ARRAY_LENGTH) {
     throw "Invalid Qt Installer Framework byte-array length: $Length"
   }
+  if ($Length -gt $MaximumOffset - $Cursor.Value - 8) {
+    throw 'The Qt Installer Framework byte array extends beyond its enclosing segment'
+  }
+  $Cursor.Value += 8
   $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Cursor.Value -Count $Length
   $Cursor.Value += $Length
   return , $Bytes
@@ -461,7 +538,7 @@ function Get-QtInstallerFrameworkResourceCollection {
 
     $Collections = [System.Collections.Generic.List[object]]::new()
     for ($CollectionIndex = 0; $CollectionIndex -lt $CollectionCount; $CollectionIndex++) {
-      $NameBytes = Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor
+      $NameBytes = Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor -MaximumOffset $Layout.ResourceCollectionsSegment.End
       $Name = [System.Text.Encoding]::UTF8.GetString($NameBytes)
       $CollectionDataSegment = Read-QtInstallerFrameworkRange -Stream $Stream -Offset $Cursor.Value
       $Cursor.Value += 16
@@ -478,7 +555,7 @@ function Get-QtInstallerFrameworkResourceCollection {
 
       $Resources = [System.Collections.Generic.List[object]]::new()
       for ($ResourceIndex = 0; $ResourceIndex -lt $ResourceCount; $ResourceIndex++) {
-        $ResourceNameBytes = Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $DataCursor
+        $ResourceNameBytes = Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $DataCursor -MaximumOffset $CollectionDataSegment.End
         $ResourceSegment = Read-QtInstallerFrameworkRange -Stream $Stream -Offset $DataCursor.Value
         $DataCursor.Value += 16
         $ResourceSegment = Move-QtInstallerFrameworkRange -Range $ResourceSegment -Offset $Layout.EndOfExecutable
@@ -496,7 +573,131 @@ function Get-QtInstallerFrameworkResourceCollection {
         })
     }
 
+    if ($Cursor.Value + 8 -ne $Layout.ResourceCollectionsSegment.End) {
+      throw "The Qt Installer Framework resource-collection index was not consumed exactly: cursor=$($Cursor.Value) end=$($Layout.ResourceCollectionsSegment.End)"
+    }
+    $TrailingCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    if ($TrailingCount -ne $CollectionCount) { throw 'The Qt Installer Framework resource-collection count footer does not match its header' }
+
     return $Collections.ToArray()
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
+function Get-QtInstallerFrameworkLegacyComponentCollection {
+  <#
+  .SYNOPSIS
+    Read the component and archive index emitted by Qt IFW 1.x.
+  .PARAMETER Path
+    Path to the Qt IFW binary.
+  .PARAMETER Layout
+    Validated common trailer layout whose primary segment is a ComponentIndex.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  try {
+    $IndexSegment = $Layout.ComponentIndexSegment
+    if ($IndexSegment.Length -lt 16) { throw 'The Qt IFW 1.x component index is truncated' }
+    $Cursor = [ref][int64]$IndexSegment.Start
+    $ComponentCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $Cursor.Value += 8
+    if ($ComponentCount -lt 0 -or $ComponentCount -gt $QTIFW_MAX_COMPONENT_COUNT) {
+      throw "Invalid Qt Installer Framework component count: $ComponentCount"
+    }
+
+    $Components = [System.Collections.Generic.List[object]]::new()
+    for ($ComponentIndex = 0; $ComponentIndex -lt $ComponentCount; $ComponentIndex++) {
+      $Name = [Text.Encoding]::UTF8.GetString((Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor -MaximumOffset $IndexSegment.End))
+      if ($Cursor.Value + 16 -gt $IndexSegment.End) { throw 'The Qt IFW 1.x component index entry is truncated' }
+      $ComponentSegment = Move-QtInstallerFrameworkRange -Range (Read-QtInstallerFrameworkRange -Stream $Stream -Offset $Cursor.Value) -Offset $Layout.EndOfExecutable
+      $Cursor.Value += 16
+      Assert-QtInstallerFrameworkRange -Range $ComponentSegment -FileLength $Stream.Length -Name 'legacy component data'
+
+      $DataCursor = [ref][int64]$ComponentSegment.Start
+      $ArchiveCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $DataCursor.Value
+      $DataCursor.Value += 8
+      if ($ArchiveCount -lt 0 -or $ArchiveCount -gt $QTIFW_MAX_RESOURCE_COUNT) {
+        throw "Invalid Qt Installer Framework archive count: $ArchiveCount"
+      }
+
+      $Archives = [System.Collections.Generic.List[object]]::new()
+      for ($ArchiveIndex = 0; $ArchiveIndex -lt $ArchiveCount; $ArchiveIndex++) {
+        $ArchiveName = [Text.Encoding]::UTF8.GetString((Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $DataCursor -MaximumOffset $ComponentSegment.End))
+        if ($DataCursor.Value + 16 -gt $ComponentSegment.End) { throw 'The Qt IFW 1.x archive descriptor is truncated' }
+        $ArchiveSegment = Move-QtInstallerFrameworkRange -Range (Read-QtInstallerFrameworkRange -Stream $Stream -Offset $DataCursor.Value) -Offset $Layout.EndOfExecutable
+        $DataCursor.Value += 16
+        Assert-QtInstallerFrameworkRange -Range $ArchiveSegment -FileLength $Stream.Length -Name 'legacy component archive'
+        if ($ArchiveSegment.Start -lt $ComponentSegment.Start -or $ArchiveSegment.End -gt $ComponentSegment.End) {
+          throw "The Qt IFW 1.x archive '$ArchiveName' is outside its component data range"
+        }
+        $Archives.Add([pscustomobject]@{ Name = $ArchiveName; Segment = $ArchiveSegment })
+      }
+
+      $Components.Add([pscustomobject]@{
+          Name      = $Name
+          Kind      = 'LegacyComponent'
+          Segment   = $ComponentSegment
+          Resources = $Archives.ToArray()
+        })
+    }
+
+    if ($Cursor.Value + 8 -ne $IndexSegment.End) { throw 'The Qt IFW 1.x component index was not consumed exactly' }
+    $TrailingCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    if ($TrailingCount -ne $ComponentCount) { throw 'The Qt IFW 1.x component index count footer does not match its header' }
+    return $Components.ToArray()
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
+function Get-QtInstallerFrameworkOperation {
+  <#
+  .SYNOPSIS
+    Read the performed-operation records stored in a Qt IFW maintenance content block.
+  .PARAMETER Path
+    Path to the Qt IFW executable or DAT binary.
+  .PARAMETER Layout
+    Validated binary-content layout containing the absolute operations segment.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $Segment = $Layout.OperationsSegment
+  if ($Segment.Length -eq 0) { return @() }
+  if ($Segment.Length -lt 16 -or $Segment.Length -gt $QTIFW_MAX_OPERATION_BYTES) {
+    throw "Invalid Qt Installer Framework operations segment length: $($Segment.Length)"
+  }
+
+  $Stream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $Cursor = [ref][int64]$Segment.Start
+    $Count = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $Cursor.Value += 8
+    if ($Count -lt 0 -or $Count -gt $QTIFW_MAX_OPERATION_COUNT) {
+      throw "Invalid Qt Installer Framework performed-operation count: $Count"
+    }
+
+    $Operations = [Collections.Generic.List[object]]::new()
+    for ($Index = 0; $Index -lt $Count; $Index++) {
+      $Name = [Text.Encoding]::UTF8.GetString((Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor -MaximumOffset $Segment.End))
+      $Data = [Text.Encoding]::UTF8.GetString((Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor -MaximumOffset $Segment.End))
+      $Operations.Add([pscustomobject]@{ Index = $Index; Name = $Name; Data = $Data })
+    }
+    if ($Cursor.Value + 8 -ne $Segment.End) {
+      throw "The Qt Installer Framework operations segment was not consumed exactly: cursor=$($Cursor.Value) end=$($Segment.End)"
+    }
+    $TrailingCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    if ($TrailingCount -ne $Count) { throw 'The Qt Installer Framework performed-operation count footer does not match its header' }
+    return $Operations.ToArray()
   } finally {
     $Stream.Dispose()
   }
@@ -758,7 +959,11 @@ function Get-QtInstallerFrameworkMetadataResource {
     [string]$Path,
 
     [Parameter(Mandatory, HelpMessage = 'The parsed IFW binary-content layout')]
-    [pscustomobject]$Layout
+    [pscustomobject]$Layout,
+
+    [object[]]$Collection,
+
+    [string]$PackageIndexRoute = 'resource-collection-v1'
   )
 
   $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
@@ -777,12 +982,13 @@ function Get-QtInstallerFrameworkMetadataResource {
 
     # Some older builders place metadata beside package archives. Ignore 7z payloads here to keep
     # metadata discovery bounded and leave archive traversal to Expand-*.
-    foreach ($Collection in Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) {
-      foreach ($Resource in @($Collection.Resources)) {
-        if ([System.IO.Path]::GetExtension([string]$Resource.Name) -ieq '.7z') { continue }
+    $Collections = if ($PSBoundParameters.ContainsKey('Collection')) { @($Collection) } elseif ($PackageIndexRoute -eq 'resource-collection-v1') { @(Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) } else { @() }
+    foreach ($CollectionItem in $Collections) {
+      foreach ($Resource in @($CollectionItem.Resources)) {
+        if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) { continue }
         if ($Resource.Segment.Length -gt $QTIFW_MAX_XML_SCAN_BYTES) { continue }
         $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Resource.Segment.Start -Count $Resource.Segment.Length
-        foreach ($XmlResource in ConvertFrom-QtInstallerFrameworkXmlBytes -Bytes $Bytes -Source "$($Collection.Name)/$($Resource.Name)") {
+        foreach ($XmlResource in ConvertFrom-QtInstallerFrameworkXmlBytes -Bytes $Bytes -Source "$($CollectionItem.Name)/$($Resource.Name)") {
           $Results.Add($XmlResource)
         }
       }
@@ -809,7 +1015,11 @@ function Get-QtInstallerFrameworkMetadataTextResource {
     [string]$Path,
 
     [Parameter(Mandatory, HelpMessage = 'The parsed IFW binary-content layout')]
-    [pscustomobject]$Layout
+    [pscustomobject]$Layout,
+
+    [object[]]$Collection,
+
+    [string]$PackageIndexRoute = 'resource-collection-v1'
   )
 
   $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
@@ -824,12 +1034,13 @@ function Get-QtInstallerFrameworkMetadataTextResource {
       $Index++
     }
 
-    foreach ($Collection in Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) {
-      foreach ($Resource in @($Collection.Resources)) {
-        if ([System.IO.Path]::GetExtension([string]$Resource.Name) -ieq '.7z') { continue }
+    $Collections = if ($PSBoundParameters.ContainsKey('Collection')) { @($Collection) } elseif ($PackageIndexRoute -eq 'resource-collection-v1') { @(Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) } else { @() }
+    foreach ($CollectionItem in $Collections) {
+      foreach ($Resource in @($CollectionItem.Resources)) {
+        if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) { continue }
         if ($Resource.Segment.Length -gt $QTIFW_MAX_TEXT_EVIDENCE_BYTES) { continue }
         $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Resource.Segment.Start -Count $Resource.Segment.Length
-        foreach ($TextResource in ConvertFrom-QtInstallerFrameworkTextData -Bytes $Bytes -Source "$($Collection.Name)/$($Resource.Name)") {
+        foreach ($TextResource in ConvertFrom-QtInstallerFrameworkTextData -Bytes $Bytes -Source "$($CollectionItem.Name)/$($Resource.Name)") {
           $Results.Add($TextResource)
         }
       }
@@ -968,6 +1179,11 @@ function Expand-QtInstallerFrameworkPackageArchive {
       $RelativePath = Join-Path $RelativeRoot ([string]$ArchiveEntry.Key)
       if (-not (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name)) { continue }
 
+      $EncryptedProperty = $ArchiveEntry.PSObject.Properties['IsEncrypted']
+      if ($EncryptedProperty -and [bool]$EncryptedProperty.Value) {
+        throw "The Qt Installer Framework package archive entry '$($ArchiveEntry.Key)' is password-protected; encrypted package extraction is unsupported"
+      }
+
       $LinkTargetProperty = $ArchiveEntry.PSObject.Properties['LinkTarget']
       if ($LinkTargetProperty -and -not [string]::IsNullOrWhiteSpace([string]$LinkTargetProperty.Value)) {
         throw "The Qt Installer Framework package archive contains an unsupported link: $($ArchiveEntry.Key)"
@@ -1065,10 +1281,13 @@ function Expand-QtInstallerFramework {
 
   process {
     # Parse and validate the trailer once, then keep one installer stream open for all segment
-    # copies. Nested 7z readers receive isolated temporary files because they require seeking.
+    # copies. Nested archive readers receive isolated temporary files because they require seeking.
     $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
     $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
     if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
+    $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout
+    if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
+    $PayloadHandler = Get-QtInstallerFrameworkRouteHandler -Category Payload -Route $FormatInfo.PayloadRoute
 
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "Dumplings-QtIFW-$([System.Guid]::NewGuid())"
@@ -1135,7 +1354,7 @@ function Expand-QtInstallerFramework {
 
       # Resource catalog entries are copied through bounded streams. A raw resource and its
       # expanded package contents are accounted independently against the global output limit.
-      foreach ($Collection in Get-QtInstallerFrameworkResourceCollection -Path $InstallerPath -Layout $Layout) {
+      foreach ($Collection in @($FormatInfo.PackageCollections)) {
         foreach ($Resource in @($Collection.Resources)) {
           if ($Resource.Segment.Length -gt $MaximumExpandedBytes) {
             throw "The Qt Installer Framework resource '$($Resource.Name)' exceeds the $MaximumExpandedBytes-byte limit"
@@ -1151,7 +1370,7 @@ function Expand-QtInstallerFramework {
               $TemporaryStream.Dispose()
             }
 
-            $RawRelativePath = "metadata/$($Collection.Name)/$($Resource.Name)"
+            $RawRelativePath = if ($FormatInfo.PackageIndexRoute -eq 'component-index-v1') { "packages/$($Collection.Name)/$($Resource.Name)" } else { "metadata/$($Collection.Name)/$($Resource.Name)" }
             if (Test-QtInstallerFrameworkExtractionMatch -Path $RawRelativePath -Name $Name) {
               $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RawRelativePath `
                 -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
@@ -1169,14 +1388,14 @@ function Expand-QtInstallerFramework {
               }
             }
 
-            if ([System.IO.Path]::GetExtension([string]$Resource.Name) -ieq '.7z') {
+            if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) {
               # IFW package payloads retain their collection name as a logical package root.
               $ArchiveRoot = "packages/$($Collection.Name)/$([System.IO.Path]::GetFileNameWithoutExtension([string]$Resource.Name))"
               $RemainingExpandedBytes = $MaximumExpandedBytes - $WrittenBytes
               if ($RemainingExpandedBytes -le 0) {
                 throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
               }
-              $ArchiveResult = Expand-QtInstallerFrameworkPackageArchive -Path $TemporaryArchivePath -DestinationPath $DestinationPath `
+              $ArchiveResult = & $PayloadHandler -Path $TemporaryArchivePath -DestinationPath $DestinationPath `
                 -RelativeRoot $ArchiveRoot -Name $Name -CollisionAction $CollisionAction -ReservedPath $WrittenPaths `
                 -MaximumExpandedBytes $RemainingExpandedBytes
               $WrittenBytes += $ArchiveResult.Bytes
@@ -1222,7 +1441,11 @@ function ConvertFrom-QtInstallerFrameworkInstallerXml {
     if (-not $Values.Contains($Child.LocalName)) { $Values[$Child.LocalName] = $Child.InnerText.Trim() }
   }
 
-  $MaintenanceToolName = if ([string]::IsNullOrWhiteSpace($Values['MaintenanceToolName'])) { 'maintenancetool' } else { $Values['MaintenanceToolName'] }
+  # Qt IFW 2.0 renamed the public configuration keys while continuing to accept the 1.x names.
+  # Normalize both spellings here so downstream ARP and upgrade logic is generation-independent.
+  $MaintenanceToolNameValue = if (-not [string]::IsNullOrWhiteSpace($Values['MaintenanceToolName'])) { $Values['MaintenanceToolName'] } else { $Values['UninstallerName'] }
+  $MaintenanceToolName = if ([string]::IsNullOrWhiteSpace($MaintenanceToolNameValue)) { 'maintenancetool' } else { $MaintenanceToolNameValue }
+  $MaintenanceToolIniValue = if (-not [string]::IsNullOrWhiteSpace($Values['MaintenanceToolIniFile'])) { $Values['MaintenanceToolIniFile'] } else { $Values['UninstallerIniFile'] }
   $ProductCode = $null
   foreach ($Name in @('ProductUUID', 'ProductCode')) {
     if (-not [string]::IsNullOrWhiteSpace($Values[$Name])) {
@@ -1246,7 +1469,7 @@ function ConvertFrom-QtInstallerFrameworkInstallerXml {
     DisableCommandLineInterface = $Values['DisableCommandLineInterface']
     StartMenuDir                = $Values['StartMenuDir']
     MaintenanceToolName         = $MaintenanceToolName
-    MaintenanceToolIniFile      = if ([string]::IsNullOrWhiteSpace($Values['MaintenanceToolIniFile'])) { "$MaintenanceToolName.ini" } else { $Values['MaintenanceToolIniFile'] }
+    MaintenanceToolIniFile      = if ([string]::IsNullOrWhiteSpace($MaintenanceToolIniValue)) { "$MaintenanceToolName.ini" } else { $MaintenanceToolIniValue }
     SupportsModify              = $Values['SupportsModify']
     RawValues                   = $Values
   }
@@ -1314,6 +1537,344 @@ function Find-QtInstallerFrameworkAsciiMarker {
   return @($Found)
 }
 
+function Get-QtInstallerFrameworkVersionEvidence {
+  <#
+  .SYNOPSIS
+    Read source-defined Qt IFW and Qt runtime version markers from the launcher.
+  .PARAMETER Path
+    Path to the Qt IFW binary.
+  .PARAMETER Layout
+    Validated binary-content layout used to bound the launcher scan.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $FrameworkVersion = $null
+  $QtRuntimeVersion = $null
+  $MatchedText = $null
+  $ScanLength = [Math]::Min([int64]$Layout.EndOfExecutable, [int64]$QTIFW_MAX_EXECUTABLE_SCAN_BYTES)
+  $Stream = [IO.File]::Open((Get-Item -Path $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $Buffer = [byte[]]::new(1048576)
+    $Carry = ''
+    $Remaining = $ScanLength
+    while ($Remaining -gt 0 -and -not $FrameworkVersion) {
+      $Read = $Stream.Read($Buffer, 0, [int][Math]::Min($Buffer.Length, $Remaining))
+      if ($Read -le 0) { break }
+      $Text = $Carry + [Text.Encoding]::Latin1.GetString($Buffer, 0, $Read)
+      $Match = [regex]::Match($Text, 'IFW Version:\s*"?(?<ifw>[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?)"?(?:,\s*built with Qt\s+(?<qt>[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?))?', 'IgnoreCase')
+      if (-not $Match.Success) {
+        $Match = [regex]::Match($Text, 'Built with Qt Installer Framework\s+(?<ifw>[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?)', 'IgnoreCase')
+      }
+      if ($Match.Success) {
+        $FrameworkVersion = $Match.Groups['ifw'].Value
+        if ($Match.Groups['qt'].Success) { $QtRuntimeVersion = $Match.Groups['qt'].Value }
+        $MatchedText = $Match.Value
+        break
+      }
+      $Carry = if ($Text.Length -gt 512) { $Text.Substring($Text.Length - 512) } else { $Text }
+      $Remaining -= $Read
+    }
+
+    $PEVersion = $null
+    try {
+      $PELayout = Get-PELayout -Stream $Stream
+      $VersionTable = Get-PEVersionStringTable -Stream $Stream -Layout $PELayout
+      if ($VersionTable.PSObject.Properties['FileVersion']) { $PEVersion = [string]$VersionTable.FileVersion }
+    } catch {
+      # PE version resources were added after the binary format and remain optional evidence.
+    }
+
+    [pscustomobject]@{
+      FrameworkVersion       = $FrameworkVersion
+      FrameworkVersionSource = if ($FrameworkVersion) { 'EmbeddedSourceMarker' } else { $null }
+      QtRuntimeVersion       = $QtRuntimeVersion
+      MatchedText            = $MatchedText
+      PEFileVersion          = $PEVersion
+      ScanLength             = $ScanLength
+      ScanWasLimited         = $Layout.EndOfExecutable -gt $ScanLength
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
+function ConvertTo-QtInstallerFrameworkComparableVersion {
+  <#
+  .SYNOPSIS
+    Convert the numeric prefix of an embedded Qt IFW version into System.Version.
+  .PARAMETER Version
+    Embedded framework or PE version text. Prerelease suffixes are ignored for catalog routing.
+  #>
+  [OutputType([version])]
+  param ([AllowNull()][string]$Version)
+  if ($Version -match '^(?<value>[0-9]+(?:\.[0-9]+){1,3})') { return [version]$Matches.value }
+  return $null
+}
+
+function Resolve-QtInstallerFrameworkFormatProfile {
+  <#
+  .SYNOPSIS
+    Select a catalog profile from explicit version and validated index structure.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [Parameter(Mandatory)][pscustomobject]$VersionEvidence
+  )
+
+  $ComparableVersion = ConvertTo-QtInstallerFrameworkComparableVersion -Version $VersionEvidence.FrameworkVersion
+  $SelectedProfile = $null
+  if ($ComparableVersion) {
+    if ($ComparableVersion -lt [version]'1.2.0') {
+      throw "Qt Installer Framework version '$($VersionEvidence.FrameworkVersion)' predates the supported 1.2 binary format"
+    }
+    foreach ($Candidate in @($Script:QtInstallerFrameworkCatalog.Profiles)) {
+      $Minimum = [version]$Candidate.MinimumVersion
+      $Maximum = if ($Candidate.MaximumVersionExclusive) { [version]$Candidate.MaximumVersionExclusive } else { $null }
+      if ($ComparableVersion -ge $Minimum -and (-not $Maximum -or $ComparableVersion -lt $Maximum)) {
+        $SelectedProfile = [pscustomobject]$Candidate
+        break
+      }
+    }
+  }
+
+  $Candidates = if ($SelectedProfile) {
+    @($SelectedProfile)
+  } elseif ($ComparableVersion -and $ComparableVersion -ge [version]'4.12.0') {
+    @([pscustomobject]$Script:QtInstallerFrameworkCatalog.CompatibilityProfiles.Modern)
+  } else {
+    @(
+      [pscustomobject]$Script:QtInstallerFrameworkCatalog.CompatibilityProfiles.Modern
+      [pscustomobject]$Script:QtInstallerFrameworkCatalog.CompatibilityProfiles.Legacy
+    )
+  }
+
+  $Validated = [System.Collections.Generic.List[object]]::new()
+  foreach ($Candidate in $Candidates) {
+    $HandlerName = Get-QtInstallerFrameworkRouteHandler -Category PackageIndex -Route $Candidate.PackageIndexRoute
+    try {
+      $Collections = @(& $HandlerName -Path $Path -Layout $Layout)
+      $Validated.Add([pscustomobject]@{ Profile = $Candidate; Collections = $Collections; SelectionEvidence = 'Catalog version and complete package-index validation' })
+    } catch {
+      if ($SelectedProfile) { throw }
+    }
+  }
+
+  if ($Validated.Count -eq 0) { throw 'No Qt Installer Framework catalog profile validated the package index' }
+  if ($Validated.Count -gt 1) {
+    # The 2.0 overhaul retained the count/name/range index framing. For the unversioned 1.2
+    # launcher, use source-defined configuration key generations to disambiguate the meaning of
+    # the otherwise byte-compatible primary index.
+    $ConfigText = [Text.StringBuilder]::new()
+    $Stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+      foreach ($Segment in @($Layout.MetaResourceSegments)) {
+        if ($Segment.Length -gt $QTIFW_MAX_TEXT_EVIDENCE_BYTES) { continue }
+        $null = $ConfigText.Append([Text.Encoding]::Latin1.GetString((Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Segment.Start -Count $Segment.Length)))
+      }
+    } finally { $Stream.Dispose() }
+    $HasLegacyKeys = $ConfigText.ToString() -match 'Uninstaller(Name|IniFile)'
+    $HasModernKeys = $ConfigText.ToString() -match 'MaintenanceTool(Name|IniFile)|ProductUUID|DisableCommandLineInterface'
+    $SelectedGeneration = if ($HasLegacyKeys -and -not $HasModernKeys) {
+      'LegacyComponentIndex'
+    } elseif ($HasModernKeys -and -not $HasLegacyKeys) {
+      'BinaryContent'
+    } else {
+      throw 'The unversioned Qt Installer Framework package index is structurally ambiguous between legacy and modern routes'
+    }
+    $Selected = @($Validated | Where-Object { $_.Profile.FormatGeneration -eq $SelectedGeneration } | Select-Object -First 1)
+    if (-not $Selected) { throw 'The Qt Installer Framework package index is ambiguous between legacy and modern routes' }
+    if ($SelectedGeneration -eq 'LegacyComponentIndex') {
+      # Qt IFW 1.2 predates the embedded IFW version string. A complete ComponentIndex plus the
+      # source-defined legacy config names is enough to select the normal known 1.x profile.
+      $Selected[0].Profile = [pscustomobject](@($Script:QtInstallerFrameworkCatalog.Profiles | Where-Object Id -EQ 'ifw-1.x-legacy')[0])
+    }
+    $Selected[0].SelectionEvidence = if ($HasLegacyKeys -and -not $HasModernKeys) { 'Legacy configuration keys disambiguate the byte-compatible 1.x component index.' } else { 'Modern configuration keys disambiguate the byte-compatible 2.0+ resource-collection index.' }
+    return $Selected[0]
+  }
+  return $Validated[0]
+}
+
+function Get-QtInstallerFrameworkFormatInfoInternal {
+  <#
+  .SYNOPSIS
+    Resolve one validated Qt IFW layout to its catalog profile and internal parse context.
+  .PARAMETER Path
+    Resolved path to the installer or separate binary-content file.
+  .PARAMETER Layout
+    Validated common binary-content trailer and rebased segment ranges.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$Layout
+  )
+
+  $VersionEvidence = Get-QtInstallerFrameworkVersionEvidence -Path $Path -Layout $Layout
+  $ResolutionError = $null
+  try {
+    $Resolution = Resolve-QtInstallerFrameworkFormatProfile -Path $Path -Layout $Layout -VersionEvidence $VersionEvidence
+  } catch {
+    $ResolutionError = $_.Exception.Message
+    $ComparableVersion = ConvertTo-QtInstallerFrameworkComparableVersion -Version $VersionEvidence.FrameworkVersion
+    $Compatibility = if ($ComparableVersion -and $ComparableVersion -lt [version]'2.0.0') { $Script:QtInstallerFrameworkCatalog.CompatibilityProfiles.Legacy } else { $Script:QtInstallerFrameworkCatalog.CompatibilityProfiles.Modern }
+    $Resolution = [pscustomobject]@{ Profile = [pscustomobject]$Compatibility; Collections = @(); SelectionEvidence = 'No package-index route validated completely.' }
+  }
+  $Operations = @()
+  if (-not $ResolutionError) {
+    try {
+      $Operations = @(Get-QtInstallerFrameworkOperation -Path $Path -Layout $Layout)
+    } catch {
+      $ResolutionError = "The performed-operation route is malformed: $($_.Exception.Message)"
+    }
+  }
+  $SelectedProfile = $Resolution.Profile
+  # Validate every selected route before exposing a supported profile. Most generations share
+  # physical readers, but the route IDs preserve source-level semantics and capability boundaries.
+  foreach ($RouteCategory in @(
+      @{ Category = 'Trailer'; Route = $SelectedProfile.TrailerRoute },
+      @{ Category = 'Metadata'; Route = $SelectedProfile.MetadataRoute },
+      @{ Category = 'PackageIndex'; Route = $SelectedProfile.PackageIndexRoute },
+      @{ Category = 'Payload'; Route = $SelectedProfile.PayloadRoute },
+      @{ Category = 'Config'; Route = $SelectedProfile.ConfigRoute },
+      @{ Category = 'Interface'; Route = $SelectedProfile.InterfaceRoute }
+    )) {
+    $null = Get-QtInstallerFrameworkRouteHandler -Category $RouteCategory.Category -Route $RouteCategory.Route
+  }
+  $Warnings = [System.Collections.Generic.List[string]]::new()
+  if (-not $VersionEvidence.FrameworkVersion) {
+    $Warnings.Add('No source-defined Qt IFW version marker was found; the framework version is reported as a structurally validated range.')
+  }
+  if ($VersionEvidence.ScanWasLimited) { $Warnings.Add('The launcher version scan reached its bounded limit before the complete executable prefix was inspected.') }
+  if ($SelectedProfile.IsFallback) { $Warnings.Add('The Qt IFW media uses a structurally compatible fallback profile; release-specific capabilities require review.') }
+  if ($ResolutionError) { $Warnings.Add("The Qt IFW format route is unsupported or malformed: $ResolutionError") }
+  if ($Layout.MagicMarkerName -ne 'Installer') { $Warnings.Add("The Qt IFW media role is '$($Layout.MagicMarkerName)', not Installer; manifest metadata projection is diagnostic only.") }
+
+  $EmbeddedPackageArchiveCount = 0
+  foreach ($Collection in @($Resolution.Collections)) {
+    foreach ($Resource in @($Collection.Resources)) {
+      if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) { $EmbeddedPackageArchiveCount++ }
+    }
+  }
+  $PayloadAvailability = if ($EmbeddedPackageArchiveCount -gt 0) { 'Embedded' } else { 'ExternalOrUnavailable' }
+  if (-not $ResolutionError -and $PayloadAvailability -eq 'ExternalOrUnavailable') {
+    $Warnings.Add('No embedded package archive was indexed; package data is external, downloadable, or unavailable in this media.')
+  }
+
+  if ($VersionEvidence.FrameworkVersion -and $VersionEvidence.PEFileVersion) {
+    $Embedded = ConvertTo-QtInstallerFrameworkComparableVersion $VersionEvidence.FrameworkVersion
+    $PE = ConvertTo-QtInstallerFrameworkComparableVersion $VersionEvidence.PEFileVersion
+    if ($Embedded -and $PE -and ($Embedded.Major -ne $PE.Major -or $Embedded.Minor -ne $PE.Minor)) {
+      $Warnings.Add("The embedded IFW version '$($VersionEvidence.FrameworkVersion)' conflicts with PE FileVersion '$($VersionEvidence.PEFileVersion)'; the embedded source marker takes precedence.")
+    }
+  }
+  $PESubsystem = try { Get-QtInstallerFrameworkPESubsystemInfo -Path $Path } catch { $null }
+
+  [pscustomobject][ordered]@{
+    Path                         = $Path
+    IsQtInstallerFramework       = $true
+    IsSupported                  = -not [bool]$ResolutionError
+    FormatGeneration             = $SelectedProfile.FormatGeneration
+    FormatProfileId              = $SelectedProfile.Id
+    FrameworkVersion             = $VersionEvidence.FrameworkVersion
+    FrameworkVersionSource       = $VersionEvidence.FrameworkVersionSource
+    FrameworkVersionRange        = $SelectedProfile.FrameworkVersionRange
+    QtRuntimeVersion             = $VersionEvidence.QtRuntimeVersion
+    MediaRole                    = $Layout.MagicMarkerName
+    CookieKind                   = $Layout.CookieKind
+    PESubsystem                  = $PESubsystem
+    TrailerRoute                 = $SelectedProfile.TrailerRoute
+    MetadataRoute                = $SelectedProfile.MetadataRoute
+    PackageIndexRoute            = $SelectedProfile.PackageIndexRoute
+    PayloadRoute                 = $SelectedProfile.PayloadRoute
+    ConfigRoute                  = $SelectedProfile.ConfigRoute
+    InterfaceRoute               = $SelectedProfile.InterfaceRoute
+    VersionEvidenceRoute         = $SelectedProfile.VersionEvidenceRoute
+    CatalogVersion               = [int]$Script:QtInstallerFrameworkCatalog.CatalogVersion
+    SupportsProductUuid          = [bool]$SelectedProfile.SupportsProductUuid
+    SupportsCommandLineInterface = [bool]$SelectedProfile.SupportsCommandLineInterface
+    SupportsLibArchive           = [bool]$SelectedProfile.SupportsLibArchive
+    PayloadAvailability          = $PayloadAvailability
+    Capabilities                 = [pscustomobject]@{
+      ProductUuid          = [bool]$SelectedProfile.SupportsProductUuid
+      CommandLineInterface = [bool]$SelectedProfile.SupportsCommandLineInterface
+      LibArchive           = [bool]$SelectedProfile.SupportsLibArchive
+    }
+    IsFallback                   = [bool]$SelectedProfile.IsFallback
+    Evidence                     = [pscustomobject]@{
+      EmbeddedVersionText         = $VersionEvidence.MatchedText
+      PEFileVersion               = $VersionEvidence.PEFileVersion
+      VersionScanLength           = $VersionEvidence.ScanLength
+      MagicMarker                 = $Layout.MagicMarker
+      MagicCookie                 = $Layout.MagicCookie
+      PrimaryIndexSegment         = $Layout.PrimaryIndexSegment
+      CollectionCount             = @($Resolution.Collections).Count
+      EmbeddedPackageArchiveCount = $EmbeddedPackageArchiveCount
+      OperationCount              = $Operations.Count
+      ProfileSelection            = $Resolution.SelectionEvidence
+    }
+    Warnings                     = [string[]]$Warnings.ToArray()
+    Layout                       = $Layout
+    PackageCollections           = @($Resolution.Collections)
+    Operations                   = @($Operations)
+  }
+}
+
+function Get-QtInstallerFrameworkFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify the Qt IFW binary generation, framework version, media role, and parser routes.
+  .PARAMETER Path
+    Path to a Qt IFW executable or DAT binary.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  process {
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
+    if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
+    $Result = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout
+    # Internal parse objects are deliberately omitted from the public diagnostic contract.
+    $Result.PSObject.Properties.Remove('Layout')
+    $Result.PSObject.Properties.Remove('PackageCollections')
+    $Result.PSObject.Properties.Remove('Operations')
+    return $Result
+  }
+}
+
+function Get-QtInstallerFrameworkAnalysisContext {
+  <#
+  .SYNOPSIS
+    Parse each Qt IFW structural layer once for one top-level metadata operation.
+  .PARAMETER Path
+    Path to an installer-role Qt IFW executable.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+  $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
+  $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout
+  if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
+  $Collections = @($FormatInfo.PackageCollections)
+  $MetadataHandler = Get-QtInstallerFrameworkRouteHandler -Category Metadata -Route $FormatInfo.MetadataRoute
+  $MetadataResources = @(& $MetadataHandler -Path $InstallerPath -Layout $Layout -Collection $Collections -PackageIndexRoute $FormatInfo.PackageIndexRoute)
+  $TextResources = @(Get-QtInstallerFrameworkMetadataTextResource -Path $InstallerPath -Layout $Layout -Collection $Collections -PackageIndexRoute $FormatInfo.PackageIndexRoute)
+  [pscustomobject]@{
+    Path               = $InstallerPath
+    Layout             = $Layout
+    FormatInfo         = $FormatInfo
+    PackageCollections = $Collections
+    Operations         = @($FormatInfo.Operations)
+    MetadataResources  = $MetadataResources
+    TextResources      = $TextResources
+  }
+}
+
 function Get-QtInstallerFrameworkPESubsystemInfo {
   <#
   .SYNOPSIS
@@ -1351,7 +1912,10 @@ function Get-QtInstallerFrameworkInterfaceInfo {
 
     [Parameter(HelpMessage = 'The parsed installer config metadata')]
     [AllowNull()]
-    [pscustomobject]$InstallerConfig
+    [pscustomobject]$InstallerConfig,
+
+    [AllowNull()]
+    [pscustomobject]$FormatInfo
   )
 
   if (-not $Layout) { $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $Path }
@@ -1365,7 +1929,11 @@ function Get-QtInstallerFrameworkInterfaceInfo {
     $null
   }
 
-  if ($Layout.EndOfExecutable -le 0 -or $Layout.EndOfExecutable -gt $QTIFW_MAX_EXECUTABLE_SCAN_BYTES) {
+  if ($FormatInfo -and $FormatInfo.InterfaceRoute -eq 'gui-launcher-v1') {
+    # Releases before 4.0 do not implement commandlineinterface.cpp. Do not interpret unrelated
+    # option literals in bundled Qt code as partial CLI evidence.
+    $MarkerVariant = 'GUI'
+  } elseif ($Layout.EndOfExecutable -le 0 -or $Layout.EndOfExecutable -gt $QTIFW_MAX_EXECUTABLE_SCAN_BYTES) {
     $MarkerVariant = 'Unknown'
     $Warnings.Add("The Qt IFW executable prefix is outside the $QTIFW_MAX_EXECUTABLE_SCAN_BYTES-byte static scan limit.")
   } else {
@@ -1392,10 +1960,14 @@ function Get-QtInstallerFrameworkInterfaceInfo {
 
   # The PE subsystem is the builder-selected launcher mode and therefore outranks string markers;
   # markers remain useful when the PE header cannot be parsed.
-  $InterfaceVariant = switch ($PESubsystemInfo.Name) {
-    'WindowsCui' { 'CLI'; break }
-    'WindowsGui' { 'GUI'; break }
-    default { $MarkerVariant }
+  $InterfaceVariant = if ($FormatInfo -and $FormatInfo.InterfaceRoute -eq 'gui-launcher-v1') {
+    'GUI'
+  } else {
+    switch ($PESubsystemInfo.Name) {
+      'WindowsCui' { 'CLI'; break }
+      'WindowsGui' { 'GUI'; break }
+      default { $MarkerVariant }
+    }
   }
   if ($PESubsystemInfo -and $MarkerVariant -ne 'Unknown' -and $InterfaceVariant -ne $MarkerVariant) {
     $Warnings.Add("The PE subsystem identifies this as $InterfaceVariant, but embedded command markers suggest $MarkerVariant. The PE subsystem result takes precedence.")
@@ -1434,7 +2006,8 @@ function Get-QtInstallerFrameworkInterfaceInfo {
       RequiredOptionMarkers = $RequiredOptionMarkers
       CommandMarkers        = $CommandMarkers
       FoundMarkers          = $FoundMarkers.ToArray()
-      SourceRule            = 'The Windows CUI subsystem identifies the headless launcher and the Windows GUI subsystem identifies the GUI launcher; commandlineinterface.cpp enforces DisableCommandLineInterface.'
+      SourceRule            = 'Qt IFW 4.0+ may include the command-line interface; within that generation the Windows CUI subsystem identifies the headless launcher and DisableCommandLineInterface can disable it.'
+      InterfaceRoute        = if ($FormatInfo) { $FormatInfo.InterfaceRoute } else { $null }
     }
     Warnings                    = $Warnings.ToArray()
   }
@@ -1640,29 +2213,40 @@ function Get-QtInstallerFrameworkInfo {
   )
 
   process {
-    $File = Get-Item -Path $Path -Force
-    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $File.FullName
+    $Context = Get-QtInstallerFrameworkAnalysisContext -Path $Path
+    $File = Get-Item -LiteralPath $Context.Path -Force
+    $Layout = $Context.Layout
+    $FormatInfo = $Context.FormatInfo
     if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
+    if ($FormatInfo.MediaRole -ne 'Installer') { throw "Qt Installer Framework media role '$($FormatInfo.MediaRole)' is not an installer; use Get-QtInstallerFrameworkFormatInfo for diagnostics" }
 
     # Recover structured metadata first, then derive interface, install-root, upgrade, and scope
     # evidence from one shared config object.
-    $MetadataResources = @(Get-QtInstallerFrameworkMetadataResource -Path $File.FullName -Layout $Layout)
-    $TextResources = @(Get-QtInstallerFrameworkMetadataTextResource -Path $File.FullName -Layout $Layout)
+    $MetadataResources = @($Context.MetadataResources)
+    $TextResources = @($Context.TextResources)
     $InstallerXmlResource = @($MetadataResources | Where-Object { $_.Root -eq 'Installer' } | Select-Object -First 1)
     $InstallerConfig = if ($InstallerXmlResource) {
-      ConvertFrom-QtInstallerFrameworkInstallerXml -Xml $InstallerXmlResource[0].Xml
+      $ConfigHandler = Get-QtInstallerFrameworkRouteHandler -Category Config -Route $FormatInfo.ConfigRoute
+      & $ConfigHandler -Xml $InstallerXmlResource[0].Xml
     } else {
       $null
     }
-    $InterfaceInfo = Get-QtInstallerFrameworkInterfaceInfo -Path $File.FullName -Layout $Layout -InstallerConfig $InstallerConfig
+    if ($InstallerConfig -and $FormatInfo.PackageIndexRoute -eq 'component-index-v1' -and [string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
+      # Qt IFW 1.x uses ProductName verbatim as the uninstall registry subkey. ProductUUID was
+      # introduced with the 2.0 configuration generation.
+      $InstallerConfig.ProductCode = $InstallerConfig.PackageName
+    }
+    $InterfaceHandler = Get-QtInstallerFrameworkRouteHandler -Category Interface -Route $FormatInfo.InterfaceRoute
+    $InterfaceInfo = & $InterfaceHandler -Path $File.FullName -Layout $Layout -InstallerConfig $InstallerConfig -FormatInfo $FormatInfo
     $InstallLocationInfo = Get-QtInstallerFrameworkInstallLocationInfo -InstallerConfig $InstallerConfig -InterfaceInfo $InterfaceInfo
     $UpgradeInfo = Get-QtInstallerFrameworkUpgradeInfo -InstallerConfig $InstallerConfig -InstallLocationInfo $InstallLocationInfo
     $ScopeInfo = Get-QtInstallerFrameworkScopeInfo -InstallerConfig $InstallerConfig -TextResource $TextResources -InterfaceInfo $InterfaceInfo
 
     $Warnings = [System.Collections.Generic.List[string]]::new()
+    foreach ($Warning in @($FormatInfo.Warnings)) { $Warnings.Add([string]$Warning) }
     if (-not $InstallerConfig) {
       $Warnings.Add('No IFW installer-config/config.xml metadata was recovered from the embedded resources.')
-    } elseif ([string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
+    } elseif ($FormatInfo.PackageIndexRoute -ne 'component-index-v1' -and [string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
       $Warnings.Add('No embedded ProductUUID was found. Qt IFW generates the Windows uninstall key at install time unless a script/config sets ProductUUID.')
     }
     foreach ($Warning in @($InterfaceInfo.Warnings)) { $Warnings.Add($Warning) }
@@ -1691,6 +2275,31 @@ function Get-QtInstallerFrameworkInfo {
       Warnings                             = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
       UnresolvedFields                     = [string[]]@()
       BinaryMarker                         = $Layout.MagicMarkerName
+      IsQtInstallerFramework               = $FormatInfo.IsQtInstallerFramework
+      IsSupported                          = $FormatInfo.IsSupported
+      FormatGeneration                     = $FormatInfo.FormatGeneration
+      FormatProfileId                      = $FormatInfo.FormatProfileId
+      FrameworkVersion                     = $FormatInfo.FrameworkVersion
+      FrameworkVersionSource               = $FormatInfo.FrameworkVersionSource
+      FrameworkVersionRange                = $FormatInfo.FrameworkVersionRange
+      QtRuntimeVersion                     = $FormatInfo.QtRuntimeVersion
+      MediaRole                            = $FormatInfo.MediaRole
+      CookieKind                           = $FormatInfo.CookieKind
+      TrailerRoute                         = $FormatInfo.TrailerRoute
+      MetadataRoute                        = $FormatInfo.MetadataRoute
+      PackageIndexRoute                    = $FormatInfo.PackageIndexRoute
+      PayloadRoute                         = $FormatInfo.PayloadRoute
+      ConfigRoute                          = $FormatInfo.ConfigRoute
+      InterfaceRoute                       = $FormatInfo.InterfaceRoute
+      VersionEvidenceRoute                 = $FormatInfo.VersionEvidenceRoute
+      CatalogVersion                       = $FormatInfo.CatalogVersion
+      SupportsProductUuid                  = $FormatInfo.SupportsProductUuid
+      SupportsCommandLineInterface         = $FormatInfo.SupportsCommandLineInterface
+      SupportsLibArchive                   = $FormatInfo.SupportsLibArchive
+      PayloadAvailability                  = $FormatInfo.PayloadAvailability
+      FormatCapabilities                   = $FormatInfo.Capabilities
+      IsFallback                           = $FormatInfo.IsFallback
+      FormatEvidence                       = $FormatInfo.Evidence
       InterfaceVariant                     = $InterfaceInfo.InterfaceVariant
       CommandLineInterface                 = $InterfaceInfo.CommandLineInterface
       HasCommandLineInterface              = $InterfaceInfo.HasCommandLineInterface
@@ -1726,16 +2335,29 @@ function Get-QtInstallerFrameworkInfo {
       SupportsModify                       = $InstallerConfig.SupportsModify
       InstallerConfigSource                = if ($InstallerXmlResource) { $InstallerXmlResource[0].Source } else { $null }
       MetadataResourceCount                = $Layout.MetaResourceCount
-      ResourceCollectionCount              = @(Get-QtInstallerFrameworkResourceCollection -Path $File.FullName -Layout $Layout).Count
+      ResourceCollectionCount              = @($Context.PackageCollections).Count
+      OperationCount                       = @($Context.Operations).Count
+      Operations                           = @($Context.Operations)
       MetadataRoots                        = @($MetadataResources | Select-Object -ExpandProperty Root -Unique)
       RawInstallerConfig                   = $InstallerConfig.RawValues
       ParserVersionInfo                    = [pscustomobject]@{
-        Parser          = 'Dumplings.QtInstallerFramework'
-        BinaryLayout    = 'Qt Installer Framework BinaryContent'
-        CookieSearch    = 'Last 1 MiB'
-        ScopeRule       = 'PackageManagerCorePrivate::registerPath'
-        InterfaceRule   = 'PE subsystem plus DisableCommandLineInterface; executable-prefix markers are corroborating evidence'
-        SourceReference = 'Qt Installer Framework binarycontent.cpp, binaryformat.cpp, rcc.cpp, main.cpp, commandlineinterface.cpp, packagemanagercore.cpp, packagemanagercore_p.cpp'
+        Parser                = 'Dumplings.QtInstallerFramework'
+        BinaryLayout          = $FormatInfo.FormatGeneration
+        FormatProfileId       = $FormatInfo.FormatProfileId
+        FrameworkVersion      = $FormatInfo.FrameworkVersion
+        FrameworkVersionRange = $FormatInfo.FrameworkVersionRange
+        TrailerRoute          = $FormatInfo.TrailerRoute
+        MetadataRoute         = $FormatInfo.MetadataRoute
+        PackageIndexRoute     = $FormatInfo.PackageIndexRoute
+        PayloadRoute          = $FormatInfo.PayloadRoute
+        ConfigRoute           = $FormatInfo.ConfigRoute
+        InterfaceRoute        = $FormatInfo.InterfaceRoute
+        VersionEvidenceRoute  = $FormatInfo.VersionEvidenceRoute
+        CatalogVersion        = $FormatInfo.CatalogVersion
+        CookieSearch          = 'Last 1 MiB'
+        ScopeRule             = 'PackageManagerCorePrivate::registerPath'
+        InterfaceRule         = 'PE subsystem plus DisableCommandLineInterface; executable-prefix markers are corroborating evidence'
+        SourceReference       = 'Qt Installer Framework binarycontent.cpp, binaryformat.cpp, rcc.cpp, main.cpp, commandlineinterface.cpp, packagemanagercore.cpp, packagemanagercore_p.cpp'
       }
     }
   }
@@ -1965,4 +2587,4 @@ function Test-QtInstallerFrameworkDualScope {
   }
 }
 
-Export-ModuleMember -Function Get-QtInstallerFrameworkBinaryLayout, Get-QtInstallerFrameworkInfo, Expand-QtInstallerFramework, Test-QtInstallerFrameworkCLI, Test-QtInstallerFrameworkSilentInstallation, Test-QtInstallerFrameworkRequiresInstallLocation, Test-QtInstallerFrameworkSupportsExistingInstallationOverride, Read-UpgradeBehaviorFromQtInstallerFramework, Read-ProductVersionFromQtInstallerFramework, Read-ProductNameFromQtInstallerFramework, Read-PublisherFromQtInstallerFramework, Read-ProductCodeFromQtInstallerFramework, Read-ScopeFromQtInstallerFramework, Read-SupportedScopesFromQtInstallerFramework, Test-QtInstallerFrameworkDualScope
+Export-ModuleMember -Function Get-QtInstallerFrameworkBinaryLayout, Get-QtInstallerFrameworkFormatInfo, Get-QtInstallerFrameworkInfo, Expand-QtInstallerFramework, Test-QtInstallerFrameworkCLI, Test-QtInstallerFrameworkSilentInstallation, Test-QtInstallerFrameworkRequiresInstallLocation, Test-QtInstallerFrameworkSupportsExistingInstallationOverride, Read-UpgradeBehaviorFromQtInstallerFramework, Read-ProductVersionFromQtInstallerFramework, Read-ProductNameFromQtInstallerFramework, Read-PublisherFromQtInstallerFramework, Read-ProductCodeFromQtInstallerFramework, Read-ScopeFromQtInstallerFramework, Read-SupportedScopesFromQtInstallerFramework, Test-QtInstallerFrameworkDualScope
