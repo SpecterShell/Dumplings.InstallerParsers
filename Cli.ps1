@@ -37,6 +37,15 @@ param (
   [Parameter(HelpMessage = 'Directories or explicit files containing external Inno Setup disk slices')]
   [string[]]$DiskSourcePath,
 
+  [Parameter(HelpMessage = 'Paired Qt Installer Framework DAT binary-content files')]
+  [string[]]$DataPath,
+
+  [Parameter(HelpMessage = 'Local Qt Installer Framework repository roots or Updates.xml files')]
+  [string[]]$RepositoryPath,
+
+  [Parameter(HelpMessage = 'Explicit Qt Installer Framework package archives or directories')]
+  [string[]]$PackagePath,
+
   [Parameter(HelpMessage = 'Legacy .nsisbin or current setupN.bin NSISBI sidecar paths')]
   [string[]]$ExternalDataPath,
 
@@ -210,6 +219,9 @@ try {
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if (-not [string]::IsNullOrWhiteSpace($Name)) { $ExpandArguments.Name = $Name }
       if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
+      if ($DataPath) { $ExpandArguments.DataPath = $DataPath }
+      if ($RepositoryPath) { $ExpandArguments.RepositoryPath = $RepositoryPath }
+      if ($PackagePath) { $ExpandArguments.PackagePath = $PackagePath }
 
       Expand-QtInstallerFramework @ExpandArguments
     }

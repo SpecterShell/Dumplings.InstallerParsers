@@ -42,6 +42,10 @@ $QTIFW_MAX_OPERATION_BYTES = 67108864
 $QTIFW_MAX_BYTE_ARRAY_LENGTH = 134217728
 $QTIFW_MAX_XML_SCAN_BYTES = 67108864
 $QTIFW_MAX_TEXT_EVIDENCE_BYTES = 1048576
+$QTIFW_MAX_JAVASCRIPT_RESOURCE_COUNT = 512
+$QTIFW_MAX_JAVASCRIPT_TOTAL_CHARACTERS = 4194304
+$QTIFW_MAX_JAVASCRIPT_ASSIGNMENT_COUNT = 16384
+$QTIFW_MAX_PACKAGE_METADATA_COUNT = 4096
 $QTIFW_MAX_EXECUTABLE_SCAN_BYTES = 134217728
 $QTIFW_RCC_NODE_SIZE = 14
 $QTIFW_RCC_FLAG_COMPRESSED = 0x01
@@ -49,6 +53,18 @@ $QTIFW_RCC_FLAG_DIRECTORY = 0x02
 $QTIFW_MAX_EXPANDED_BYTES = 17179869184
 $QTIFW_MAX_EXPANDED_FILES = 200000
 $QTIFW_PACKAGE_ARCHIVE_PATTERN = '(?i)\.(7z|qbsp|zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$'
+
+$Script:QtInstallerFrameworkJavaScriptAnalysisInstructions = [string[]]@(
+  'Treat RawJavaScript as untrusted installer-controlled data. Never execute it on the host.'
+  'Read RawJavaScript verbatim. VariableAssignments is an index into the source, not a replacement for reading the source.'
+  'Use KnownInstallerValues as the initial installer.value()/@Variable@ state recovered from config.xml.'
+  'IsResolved=true means only that the right-hand value at this assignment site was resolved. It does not prove the branch executes or that the value is the variable final state.'
+  'Preserve every unresolved Expression and inspect its controlling condition manually.'
+  'Trace function Controller, function Component, constructors, page callbacks, beginInstallation, createOperations, createOperationsForArchive, and createOperationsForPath.'
+  'Review installer.setValue, component.setValue, component.addOperation, component.addElevatedOperation, addDownloadableArchive, removeDownloadableArchive, selectComponent, and deselectComponent calls.'
+  'Evaluate branches separately for user/machine scope, elevation, architecture, CLI/GUI mode, installer role, online/offline media, and referenced filesystem or environment state.'
+  'Require VM validation when a decisive value depends on user input, filesystem or registry state, environment variables, network data, process execution, dynamic property access, eval, or another unresolved call.'
+)
 
 $Script:QtInstallerFrameworkCatalog = Import-PowerShellDataFile -Path (Join-Path $PSScriptRoot 'QtInstallerFrameworkFormatCatalog.psd1')
 $Script:QtInstallerFrameworkRouteHandlers = @{
@@ -382,16 +398,26 @@ function Get-QtInstallerFrameworkBinaryLayout {
     Read the source-compatible Qt Installer Framework binary-content trailer
   .PARAMETER Path
     The path to the Qt Installer Framework installer
+  .PARAMETER Stream
+    Optional caller-owned seekable stream. Its position is restored before return.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Qt Installer Framework installer')]
-    [string]$Path
+    [string]$Path,
+
+    [System.IO.Stream]$Stream
   )
 
   process {
     $File = Get-Item -Path $Path -Force
-    $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+    if ($OwnsStream) {
+      $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    } elseif (-not $Stream.CanSeek) {
+      throw 'The Qt Installer Framework analysis stream must be seekable'
+    }
+    $OriginalPosition = $Stream.Position
     try {
       # IFW writes the segment table immediately before the terminal cookie. Work backward from
       # that cookie instead of searching payload data for individual metadata signatures.
@@ -424,7 +450,7 @@ function Get-QtInstallerFrameworkBinaryLayout {
       $MagicCookieBytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset ($Cursor + 40) -Count 8
       $MagicCookieHex = '0x' + (($MagicCookieBytes[7..0] | ForEach-Object { $_.ToString('x2') }) -join '')
       $EndOfExecutable = $EndOfBinaryContent - $BinaryContentSize
-      if ($EndOfExecutable -lt 0 -or $EndOfExecutable -gt $File.Length) {
+      if ($EndOfExecutable -lt 0 -or $EndOfExecutable -gt $Stream.Length) {
         throw "Invalid Qt Installer Framework executable/content split offset: $EndOfExecutable"
       }
 
@@ -433,14 +459,14 @@ function Get-QtInstallerFrameworkBinaryLayout {
       $AdjustedMetaSegments = @(
         foreach ($Segment in $MetaResourceSegments) {
           $Moved = Move-QtInstallerFrameworkRange -Range $Segment -Offset $EndOfExecutable
-          Assert-QtInstallerFrameworkRange -Range $Moved -FileLength $File.Length -Name 'meta resource'
+          Assert-QtInstallerFrameworkRange -Range $Moved -FileLength $Stream.Length -Name 'meta resource'
           $Moved
         }
       )
       $AdjustedResourceCollectionSegment = Move-QtInstallerFrameworkRange -Range $ResourceCollectionsSegment -Offset $EndOfExecutable
       $AdjustedOperationsSegment = Move-QtInstallerFrameworkRange -Range $OperationsSegment -Offset $EndOfExecutable
-      Assert-QtInstallerFrameworkRange -Range $AdjustedResourceCollectionSegment -FileLength $File.Length -Name 'resource collection'
-      Assert-QtInstallerFrameworkRange -Range $AdjustedOperationsSegment -FileLength $File.Length -Name 'operation'
+      Assert-QtInstallerFrameworkRange -Range $AdjustedResourceCollectionSegment -FileLength $Stream.Length -Name 'resource collection'
+      Assert-QtInstallerFrameworkRange -Range $AdjustedOperationsSegment -FileLength $Stream.Length -Name 'operation'
 
       [pscustomobject]@{
         Path                       = $File.FullName
@@ -461,7 +487,7 @@ function Get-QtInstallerFrameworkBinaryLayout {
         OperationsSegment          = $AdjustedOperationsSegment
       }
     } finally {
-      $Stream.Dispose()
+      if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
     }
   }
 }
@@ -514,6 +540,8 @@ function Get-QtInstallerFrameworkResourceCollection {
     The path to the Qt Installer Framework installer
   .PARAMETER Layout
     The parsed IFW binary-content layout
+  .PARAMETER Stream
+    Optional caller-owned seekable stream. Its position is restored before return.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -521,10 +549,14 @@ function Get-QtInstallerFrameworkResourceCollection {
     [string]$Path,
 
     [Parameter(Mandatory, HelpMessage = 'The parsed IFW binary-content layout')]
-    [pscustomobject]$Layout
+    [pscustomobject]$Layout,
+
+    [System.IO.Stream]$Stream
   )
 
-  $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+  if ($OwnsStream) { $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+  $OriginalPosition = $Stream.Position
   try {
     # The collection index and each collection's resource index use the same qint64
     # length/range framing, but their ranges are independently relative to BinaryContent.
@@ -581,7 +613,7 @@ function Get-QtInstallerFrameworkResourceCollection {
 
     return $Collections.ToArray()
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
   }
 }
 
@@ -597,10 +629,13 @@ function Get-QtInstallerFrameworkLegacyComponentCollection {
   [OutputType([pscustomobject[]])]
   param (
     [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)][pscustomobject]$Layout
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [System.IO.Stream]$Stream
   )
 
-  $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+  if ($OwnsStream) { $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+  $OriginalPosition = $Stream.Position
   try {
     $IndexSegment = $Layout.ComponentIndexSegment
     if ($IndexSegment.Length -lt 16) { throw 'The Qt IFW 1.x component index is truncated' }
@@ -652,7 +687,353 @@ function Get-QtInstallerFrameworkLegacyComponentCollection {
     if ($TrailingCount -ne $ComponentCount) { throw 'The Qt IFW 1.x component index count footer does not match its header' }
     return $Components.ToArray()
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
+  }
+}
+
+function ConvertFrom-QtInstallerFrameworkOperationXml {
+  <#
+  .SYNOPSIS
+    Decode the XML envelope serialized by KDUpdater::UpdateOperation::toXml.
+  .PARAMETER Xml
+    Bounded UTF-8 operation XML read from the performed-operations segment.
+  .OUTPUTS
+    Arguments used for the operation, arguments before the optional UNDOOPERATION marker, and typed value evidence. Complex QVariant values remain encoded because decoding Qt's QDataStream representation is unnecessary for effect projection.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][AllowEmptyString()][string]$Xml)
+
+  $ReaderSettings = [Xml.XmlReaderSettings]::new()
+  $ReaderSettings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+  $ReaderSettings.XmlResolver = $null
+  $ReaderSettings.MaxCharactersInDocument = $QTIFW_MAX_OPERATION_BYTES
+  $StringReader = [IO.StringReader]::new($Xml)
+  $Reader = [Xml.XmlReader]::Create($StringReader, $ReaderSettings)
+  try {
+    $Document = [Xml.XmlDocument]::new()
+    $Document.XmlResolver = $null
+    $Document.Load($Reader)
+  } finally {
+    $Reader.Dispose()
+    $StringReader.Dispose()
+  }
+
+  if ($Document.DocumentElement.LocalName -cne 'operation') {
+    throw "The Qt Installer Framework performed-operation XML root is '$($Document.DocumentElement.LocalName)', expected 'operation'"
+  }
+
+  $Arguments = [Collections.Generic.List[string]]::new()
+  foreach ($Node in @($Document.SelectNodes('/operation/arguments/argument'))) {
+    $Arguments.Add([string]$Node.InnerText)
+  }
+  $UndoIndex = $Arguments.IndexOf('UNDOOPERATION')
+  $PerformArguments = if ($UndoIndex -ge 0) { @($Arguments.GetRange(0, $UndoIndex)) } else { @($Arguments) }
+
+  $Values = [ordered]@{}
+  $ValueRecords = [Collections.Generic.List[object]]::new()
+  foreach ($Node in @($Document.SelectNodes('/operation/values/value'))) {
+    $Name = [string]$Node.GetAttribute('name')
+    $Type = [string]$Node.GetAttribute('type')
+    $Text = [string]$Node.InnerText
+    $IsEncoded = $Type -in @('QByteArray', 'QStringList', 'QVariant', 'QVariantHash', 'QVariantList', 'QVariantMap')
+    $Value = if ($IsEncoded) {
+      $Text
+    } else {
+      switch -Regex ($Type) {
+        '^(bool|Boolean)$' { $Text -ceq 'true'; break }
+        '^(char|short|int|long|long long|qlonglong|qint\d+|uchar|ushort|uint|ulong|ulong long|qulonglong|quint\d+)$' {
+          $ParsedInteger = [long]0
+          if ([long]::TryParse($Text, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$ParsedInteger)) { $ParsedInteger } else { $Text }
+          break
+        }
+        '^(double|float)$' {
+          $ParsedNumber = [double]0
+          if ([double]::TryParse($Text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$ParsedNumber)) { $ParsedNumber } else { $Text }
+          break
+        }
+        default { $Text }
+      }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Name)) { $Values[$Name] = $Value }
+    $ValueRecords.Add([pscustomobject][ordered]@{
+        Name      = $Name
+        Type      = $Type
+        Value     = $Value
+        IsEncoded = $IsEncoded
+        RawText   = $Text
+      })
+  }
+
+  [pscustomobject][ordered]@{
+    Arguments        = [string[]]$Arguments.ToArray()
+    PerformArguments = [string[]]$PerformArguments
+    IsUndoOperation  = $UndoIndex -ge 0
+    Values           = $Values
+    ValueRecords     = [object[]]$ValueRecords.ToArray()
+  }
+}
+
+function Resolve-QtInstallerFrameworkRegistryTarget {
+  <#
+  .SYNOPSIS
+    Normalize a QSettings native-format path and key into a Windows registry value target.
+  .PARAMETER Path
+    Registry hive plus key path used to construct QSettingsWrapper.
+  .PARAMETER Key
+    QSettings key. Slash-delimited groups become registry subkeys and the final segment becomes the value name.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$Key
+  )
+
+  if ($Path -notmatch '^(?<Root>HKEY_LOCAL_MACHINE|HKLM|HKEY_CURRENT_USER|HKCU|HKEY_CLASSES_ROOT|HKCR)[\\/]*(?<Key>.*)$') { return $null }
+  $MatchedRoot = [string]$Matches.Root
+  $MatchedKey = [string]$Matches.Key
+  $Root = switch -Regex ($MatchedRoot) {
+    '^(HKEY_LOCAL_MACHINE|HKLM)$' { 'HKLM'; break }
+    '^(HKEY_CURRENT_USER|HKCU)$' { 'HKCU'; break }
+    '^(HKEY_CLASSES_ROOT|HKCR)$' { 'HKCR'; break }
+  }
+  $RegistryKey = $MatchedKey.Replace('/', '\').Trim('\')
+  $KeyParts = @($Key -split '[\\/]' | Where-Object { $_ -cne '' })
+  if ($KeyParts.Count -eq 0) { return $null }
+  if ($KeyParts.Count -gt 1) {
+    $RegistryKey = @($RegistryKey, ($KeyParts[0..($KeyParts.Count - 2)] -join '\')) | Where-Object { $_ } | Join-String -Separator '\'
+  }
+  [pscustomobject][ordered]@{
+    Root = $Root
+    Key  = $RegistryKey
+    Name = if ($KeyParts[-1] -ceq 'Default') { '' } else { $KeyParts[-1] }
+  }
+}
+
+function New-QtInstallerFrameworkRegistryEffect {
+  <#
+  .SYNOPSIS
+    Create normalized static registry-write evidence for a performed Qt IFW operation.
+  .PARAMETER Operation
+    Decoded operation that produced the write.
+  .PARAMETER Root
+    Normalized registry root.
+  .PARAMETER Key
+    Registry key relative to the root.
+  .PARAMETER Name
+    Registry value name; an empty string denotes the default value.
+  .PARAMETER Value
+    Literal value written by the operation.
+  .PARAMETER Type
+    Best available registry value type.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Operation,
+    [Parameter(Mandatory)][string]$Root,
+    [Parameter(Mandatory)][string]$Key,
+    [AllowEmptyString()][string]$Name = '',
+    [AllowNull()][object]$Value,
+    [string]$Type = 'String'
+  )
+
+  [pscustomobject][ordered]@{
+    Category       = 'Registry'
+    Action         = 'SetValue'
+    Root           = $Root
+    Key            = $Key.Replace('/', '\').Trim('\')
+    Name           = $Name
+    Value          = $Value
+    Type           = $Type
+    OperationIndex = $Operation.Index
+    OperationName  = $Operation.Name
+  }
+}
+
+function ConvertTo-QtInstallerFrameworkOperationEffect {
+  <#
+  .SYNOPSIS
+    Project one decoded performed operation into source-defined system effects.
+  .PARAMETER Operation
+    Operation returned by Get-QtInstallerFrameworkOperation.
+  .PARAMETER Scope
+    Installed scope used by Qt IFW when selecting HKCU or HKLM for scope-sensitive operations.
+  .OUTPUTS
+    Effect objects and warnings. Unknown operations remain available in Operations and are reported rather than guessed.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Operation,
+    [ValidateSet('user', 'machine')][string]$Scope = 'user'
+  )
+
+  $Arguments = [string[]]@($Operation.PerformArguments)
+  $Effects = [Collections.Generic.List[object]]::new()
+  $Warnings = [Collections.Generic.List[string]]::new()
+  $ScopedRoot = if ($Scope -eq 'machine') { 'HKLM' } else { 'HKCU' }
+  $AddFileEffect = {
+    param([string]$Action, [hashtable]$Properties)
+    $Effect = [ordered]@{
+      Category       = 'FileSystem'
+      Action         = $Action
+      OperationIndex = $Operation.Index
+      OperationName  = $Operation.Name
+    }
+    foreach ($Pair in $Properties.GetEnumerator()) { $Effect[$Pair.Key] = $Pair.Value }
+    $Effects.Add([pscustomobject]$Effect)
+  }
+
+  switch -CaseSensitive ($Operation.Name) {
+    'Copy' { if ($Arguments.Count -ge 2) { & $AddFileEffect 'CopyFile' @{ SourcePath = $Arguments[0]; DestinationPath = $Arguments[1] } } }
+    'Move' { if ($Arguments.Count -ge 2) { & $AddFileEffect 'MoveFile' @{ SourcePath = $Arguments[0]; DestinationPath = $Arguments[1] } } }
+    'SimpleMoveFile' { if ($Arguments.Count -ge 2) { & $AddFileEffect 'MoveFile' @{ SourcePath = $Arguments[0]; DestinationPath = $Arguments[1] } } }
+    'Delete' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'DeleteFile' @{ Path = $Arguments[0] } } }
+    'Mkdir' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'CreateDirectory' @{ Path = $Arguments[0] } } }
+    'Rmdir' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'RemoveDirectory' @{ Path = $Arguments[0] } } }
+    'CopyDirectory' { if ($Arguments.Count -ge 2) { & $AddFileEffect 'CopyDirectory' @{ SourcePath = $Arguments[0]; DestinationPath = $Arguments[1]; ForceOverwrite = $Arguments.Count -gt 2 -and $Arguments[2] -ceq 'forceOverwrite' } } }
+    'CreateLink' { if ($Arguments.Count -ge 2) { & $AddFileEffect 'CreateLink' @{ Path = $Arguments[0]; TargetPath = $Arguments[1] } } }
+    'Extract' { if ($Arguments.Count -ge 2) { & $AddFileEffect 'ExtractArchive' @{ ArchivePath = $Arguments[0]; DestinationPath = $Arguments[1] } } }
+    'AppendFile' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'AppendFile' @{ Path = $Arguments[0] } } }
+    'PrependFile' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'PrependFile' @{ Path = $Arguments[0] } } }
+    'Replace' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'ReplaceText' @{ Path = $Arguments[0] } } }
+    'LineReplace' { if ($Arguments.Count -ge 1) { & $AddFileEffect 'ReplaceLine' @{ Path = $Arguments[0] } } }
+    'Settings' {
+      $SettingsArguments = [ordered]@{}
+      foreach ($Argument in $Arguments) {
+        $Separator = $Argument.IndexOf('=')
+        if ($Separator -gt 0) { $SettingsArguments[$Argument.Substring(0, $Separator)] = $Argument.Substring($Separator + 1) }
+      }
+      if ($SettingsArguments.path) {
+        & $AddFileEffect 'ModifySettingsFile' @{
+          Path       = $SettingsArguments.path
+          Method     = $SettingsArguments.method
+          SettingKey = $SettingsArguments.key
+          Value      = $SettingsArguments.value
+        }
+      }
+    }
+    'CreateShortcut' {
+      if ($Arguments.Count -ge 2) {
+        $Shortcut = [pscustomobject][ordered]@{
+          Category        = 'Shortcut'
+          Action          = 'CreateShortcut'
+          TargetPath      = $Arguments[0]
+          ShortcutPath    = $Arguments[1]
+          TargetArguments = if ($Arguments.Count -gt 2) { $Arguments[2] } else { $null }
+          OperationIndex  = $Operation.Index
+          OperationName   = $Operation.Name
+        }
+        $Effects.Add($Shortcut)
+        & $AddFileEffect 'CreateShortcut' @{ Path = $Arguments[1]; TargetPath = $Arguments[0] }
+      }
+    }
+    'RegisterFileType' {
+      $MutableArguments = [Collections.Generic.List[string]]::new()
+      foreach ($Argument in $Arguments) { $MutableArguments.Add($Argument) }
+      $ProgId = $null
+      for ($Index = $MutableArguments.Count - 1; $Index -ge 0; $Index--) {
+        if ($MutableArguments[$Index].StartsWith('ProgId=', [StringComparison]::Ordinal)) {
+          $ProgId = $MutableArguments[$Index].Substring(7)
+          $MutableArguments.RemoveAt($Index)
+        }
+      }
+      if ($MutableArguments.Count -ge 2) {
+        $Extension = $MutableArguments[0].TrimStart('.')
+        if ([string]::IsNullOrWhiteSpace($ProgId)) { $ProgId = "${Extension}_auto_file" }
+        $ClassesRoot = 'Software\Classes'
+        $ExtensionKey = "$ClassesRoot\.$Extension"
+        $ProgIdKey = "$ClassesRoot\$ProgId"
+        $ApplicationKey = "$ClassesRoot\Applications\$ProgId"
+        $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key $ExtensionKey -Value $ProgId))
+        $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key "$ExtensionKey\OpenWithProgIds" -Name $ProgId -Value ''))
+        $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key "$ProgIdKey\shell\Open\Command" -Value $MutableArguments[1]))
+        $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key "$ApplicationKey\shell\Open\Command" -Value $MutableArguments[1]))
+        if ($MutableArguments.Count -gt 2 -and $MutableArguments[2]) { $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key $ProgIdKey -Value $MutableArguments[2])) }
+        if ($MutableArguments.Count -gt 3 -and $MutableArguments[3]) { $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key $ExtensionKey -Name 'Content Type' -Value $MutableArguments[3])) }
+        if ($MutableArguments.Count -gt 4 -and $MutableArguments[4]) { $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $ScopedRoot -Key "$ProgIdKey\DefaultIcon" -Value $MutableArguments[4])) }
+      }
+    }
+    'EnvironmentVariable' {
+      if ($Arguments.Count -ge 2) {
+        $Persistent = $Arguments.Count -lt 3 -or $Arguments[2] -ceq 'true'
+        $SystemWide = $Arguments.Count -gt 3 -and $Arguments[3] -ceq 'true'
+        if ($Persistent) {
+          $Root = if ($SystemWide) { 'HKLM' } else { 'HKCU' }
+          $Key = if ($SystemWide) { 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment' } else { 'Environment' }
+          $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $Root -Key $Key -Name $Arguments[0] -Value $Arguments[1] -Type 'StringOrExpandString'))
+        } else {
+          $Effects.Add([pscustomobject][ordered]@{ Category = 'Environment'; Action = 'SetProcessVariable'; Name = $Arguments[0]; Value = $Arguments[1]; OperationIndex = $Operation.Index; OperationName = $Operation.Name })
+        }
+      }
+    }
+    'GlobalConfig' {
+      $Target = $null
+      $Value = $null
+      if ($Arguments.Count -eq 3) {
+        $Target = Resolve-QtInstallerFrameworkRegistryTarget -Path $Arguments[0] -Key $Arguments[1]
+        $Value = $Arguments[2]
+        if (-not $Target) { & $AddFileEffect 'ModifyNativeSettings' @{ Path = $Arguments[0]; SettingKey = $Arguments[1]; Value = $Value } }
+      } elseif ($Arguments.Count -eq 4 -or $Arguments.Count -eq 5) {
+        $Offset = if ($Arguments.Count -eq 5) { 1 } else { 0 }
+        $Root = if ($Arguments.Count -eq 5 -and $Arguments[0] -ceq 'SystemScope') { 'HKLM' } else { 'HKCU' }
+        $BasePath = "$Root\Software\$($Arguments[$Offset])\$($Arguments[$Offset + 1])"
+        $Target = Resolve-QtInstallerFrameworkRegistryTarget -Path $BasePath -Key $Arguments[$Offset + 2]
+        $Value = $Arguments[$Offset + 3]
+      }
+      if ($Target) { $Effects.Add((New-QtInstallerFrameworkRegistryEffect -Operation $Operation -Root $Target.Root -Key $Target.Key -Name $Target.Name -Value $Value)) }
+    }
+    'Execute' {
+      if ($Arguments.Count -ge 1) {
+        $Effects.Add([pscustomobject][ordered]@{ Category = 'Process'; Action = 'Execute'; Path = $Arguments[0]; Arguments = [string[]]@($Arguments | Select-Object -Skip 1); OperationIndex = $Operation.Index; OperationName = $Operation.Name })
+        $Warnings.Add("Qt IFW operation $($Operation.Index) executes '$($Arguments[0])'; its side effects require payload inspection or VM validation.")
+      }
+    }
+    default {
+      $Warnings.Add("Qt IFW performed operation '$($Operation.Name)' is preserved but has no static effect projection.")
+    }
+  }
+
+  if ($Effects.Count -eq 0 -and $Arguments.Count -eq 0) {
+    $Warnings.Add("Qt IFW performed operation '$($Operation.Name)' has no usable arguments.")
+  }
+  [pscustomobject][ordered]@{
+    Effects  = [object[]]$Effects.ToArray()
+    Warnings = [string[]]$Warnings.ToArray()
+  }
+}
+
+function Get-QtInstallerFrameworkOperationEffectInfo {
+  <#
+  .SYNOPSIS
+    Aggregate decoded Qt IFW operations into system-effect collections.
+  .PARAMETER Operation
+    Decoded performed operations.
+  .PARAMETER Scope
+    Installed scope used for scope-sensitive registry operations.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [AllowNull()][object[]]$Operation,
+    [ValidateSet('user', 'machine')][string]$Scope = 'user'
+  )
+
+  $Effects = [Collections.Generic.List[object]]::new()
+  $Warnings = [Collections.Generic.List[string]]::new()
+  foreach ($Item in @($Operation)) {
+    $Projection = ConvertTo-QtInstallerFrameworkOperationEffect -Operation $Item -Scope $Scope
+    foreach ($Effect in @($Projection.Effects)) { $Effects.Add($Effect) }
+    foreach ($Warning in @($Projection.Warnings)) { $Warnings.Add($Warning) }
+    $Item | Add-Member -NotePropertyName Effects -NotePropertyValue ([object[]]@($Projection.Effects)) -Force
+    $Item | Add-Member -NotePropertyName Warnings -NotePropertyValue ([string[]]@($Projection.Warnings)) -Force
+  }
+
+  [pscustomobject][ordered]@{
+    Effects            = [object[]]$Effects.ToArray()
+    FileSystemEffects  = [object[]]@($Effects | Where-Object Category -CEQ 'FileSystem')
+    RegistryWrites     = [object[]]@($Effects | Where-Object Category -CEQ 'Registry')
+    ShortcutEffects    = [object[]]@($Effects | Where-Object Category -CEQ 'Shortcut')
+    EnvironmentEffects = [object[]]@($Effects | Where-Object Category -CEQ 'Environment')
+    ExecutionEffects   = [object[]]@($Effects | Where-Object Category -CEQ 'Process')
+    Warnings           = [string[]]@($Warnings | Select-Object -Unique)
   }
 }
 
@@ -668,7 +1049,8 @@ function Get-QtInstallerFrameworkOperation {
   [OutputType([pscustomobject[]])]
   param (
     [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)][pscustomobject]$Layout
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [System.IO.Stream]$Stream
   )
 
   $Segment = $Layout.OperationsSegment
@@ -677,7 +1059,9 @@ function Get-QtInstallerFrameworkOperation {
     throw "Invalid Qt Installer Framework operations segment length: $($Segment.Length)"
   }
 
-  $Stream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+  if ($OwnsStream) { $Stream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite) }
+  $OriginalPosition = $Stream.Position
   try {
     $Cursor = [ref][int64]$Segment.Start
     $Count = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
@@ -690,7 +1074,18 @@ function Get-QtInstallerFrameworkOperation {
     for ($Index = 0; $Index -lt $Count; $Index++) {
       $Name = [Text.Encoding]::UTF8.GetString((Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor -MaximumOffset $Segment.End))
       $Data = [Text.Encoding]::UTF8.GetString((Read-QtInstallerFrameworkByteArray -Stream $Stream -Cursor $Cursor -MaximumOffset $Segment.End))
-      $Operations.Add([pscustomobject]@{ Index = $Index; Name = $Name; Data = $Data })
+      $Decoded = ConvertFrom-QtInstallerFrameworkOperationXml -Xml $Data
+      $Operations.Add([pscustomobject][ordered]@{
+          Index            = $Index
+          Name             = $Name
+          Arguments        = [string[]]$Decoded.Arguments
+          PerformArguments = [string[]]$Decoded.PerformArguments
+          IsUndoOperation  = $Decoded.IsUndoOperation
+          Values           = $Decoded.Values
+          ValueRecords     = [object[]]$Decoded.ValueRecords
+          RawXml           = $Data
+          Data             = $Data
+        })
     }
     if ($Cursor.Value + 8 -ne $Segment.End) {
       throw "The Qt Installer Framework operations segment was not consumed exactly: cursor=$($Cursor.Value) end=$($Segment.End)"
@@ -699,7 +1094,7 @@ function Get-QtInstallerFrameworkOperation {
     if ($TrailingCount -ne $Count) { throw 'The Qt Installer Framework performed-operation count footer does not match its header' }
     return $Operations.ToArray()
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
   }
 }
 
@@ -884,7 +1279,7 @@ function ConvertFrom-QtInstallerFrameworkXmlBytes {
   # Only complete, known IFW XML roots are accepted; arbitrary XML-looking strings do not become
   # installer metadata.
   $Text = [System.Text.Encoding]::UTF8.GetString($Bytes)
-  foreach ($Pattern in @('<Installer\b[\s\S]*?</Installer>', '<Updates\b[\s\S]*?</Updates>', '<PackageUpdate\b[\s\S]*?</PackageUpdate>')) {
+  foreach ($Pattern in @('<Installer\b[\s\S]*?</Installer>', '<Updates\b[\s\S]*?</Updates>', '<Package\b[\s\S]*?</Package>', '<PackageUpdate\b[\s\S]*?</PackageUpdate>')) {
     foreach ($Match in [regex]::Matches($Text, $Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
       try {
         $Xml = [xml]$Match.Value
@@ -924,24 +1319,395 @@ function ConvertFrom-QtInstallerFrameworkTextData {
   $Resources = [System.Collections.Generic.List[object]]::new()
 
   try {
-    foreach ($RccResource in Get-QtInstallerFrameworkRccResource -Bytes $Bytes) {
+    $RccResources = @(Get-QtInstallerFrameworkRccResource -Bytes $Bytes)
+    foreach ($RccResource in $RccResources) {
       foreach ($Item in ConvertFrom-QtInstallerFrameworkTextData -Bytes $RccResource.Data -Source $RccResource.Path) {
         $Resources.Add($Item)
       }
     }
+    # Once an RCC tree has been decoded, its named leaf resources are the evidence. Scanning the
+    # parent container as UTF-8 would expose the complete binary RCC blob as a duplicate script.
+    if ($RccResources.Count -gt 0) { return $Resources.ToArray() }
   } catch {
     # Some metadata resources are not RCC containers. Fall through to bounded text scanning.
   }
 
   $Text = [System.Text.Encoding]::UTF8.GetString($Bytes)
-  if ($Text -match '(?i)\b(AllUsers|DisableCommandLineInterface|RequiresAdminRights|AdminTargetDir|TargetDir|ProductUUID)\b') {
+  $IsJavaScript = Test-QtInstallerFrameworkJavaScriptText -Text $Text -Source $Source
+  if ($IsJavaScript -or $Text -match '(?i)\b(AllUsers|DisableCommandLineInterface|RequiresAdminRights|AdminTargetDir|TargetDir|ProductUUID)\b') {
     $Resources.Add([pscustomobject]@{
         Source = $Source
+        Kind   = if ($IsJavaScript) { 'JavaScript' } else { 'TextEvidence' }
         Text   = $Text
       })
   }
 
   return $Resources.ToArray()
+}
+
+function Test-QtInstallerFrameworkJavaScriptText {
+  <#
+  .SYNOPSIS
+    Identify a named Qt IFW controller or component JavaScript resource.
+  .PARAMETER Text
+    Decoded resource text. The caller retains ownership of the source bytes.
+  .PARAMETER Source
+    RCC or package resource path used as filename evidence.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)]
+    [AllowEmptyString()]
+    [string]$Text,
+
+    [Parameter(Mandatory)]
+    [string]$Source
+  )
+
+  if ($Source -match '(?i)\.(?:js|qs)$') { return $true }
+  return $Text -match '(?m)^\s*function\s+(?:Controller|Component)\s*\('
+}
+
+function ConvertFrom-QtInstallerFrameworkJavaScriptStringLiteral {
+  <#
+  .SYNOPSIS
+    Decode one bounded JavaScript single- or double-quoted string literal without executing code.
+  .PARAMETER Expression
+    Complete quoted literal, including its opening and closing quote.
+  .OUTPUTS
+    An object containing Success and Value. Unsupported escapes return Success=false.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]
+    [string]$Expression
+  )
+
+  if ($Expression.Length -lt 2) { return [pscustomobject]@{ Success = $false; Value = $null } }
+  $Quote = $Expression[0]
+  if (($Quote -ne [char]39 -and $Quote -ne [char]34) -or $Expression[$Expression.Length - 1] -ne $Quote) {
+    return [pscustomobject]@{ Success = $false; Value = $null }
+  }
+
+  $Builder = [System.Text.StringBuilder]::new($Expression.Length - 2)
+  for ($Index = 1; $Index -lt ($Expression.Length - 1); $Index++) {
+    $Character = $Expression[$Index]
+    if ($Character -ne [char]92) {
+      # An unescaped matching quote before the final delimiter means this is a compound expression,
+      # not one complete string literal (for example, "a" + "b").
+      if ($Character -eq $Quote) { return [pscustomobject]@{ Success = $false; Value = $null } }
+      $null = $Builder.Append($Character)
+      continue
+    }
+
+    $Index++
+    if ($Index -ge ($Expression.Length - 1)) { return [pscustomobject]@{ Success = $false; Value = $null } }
+    $Escape = $Expression[$Index]
+    switch ($Escape) {
+      "'" { $null = $Builder.Append([char]39) }
+      '"' { $null = $Builder.Append([char]34) }
+      '\' { $null = $Builder.Append([char]92) }
+      'b' { $null = $Builder.Append([char]8) }
+      'f' { $null = $Builder.Append([char]12) }
+      'n' { $null = $Builder.Append("`n") }
+      'r' { $null = $Builder.Append("`r") }
+      't' { $null = $Builder.Append("`t") }
+      'v' { $null = $Builder.Append([char]11) }
+      '0' {
+        if (($Index + 1) -lt ($Expression.Length - 1) -and [char]::IsDigit($Expression[$Index + 1])) {
+          return [pscustomobject]@{ Success = $false; Value = $null }
+        }
+        $null = $Builder.Append([char]0)
+      }
+      'x' {
+        if (($Index + 2) -ge $Expression.Length) { return [pscustomobject]@{ Success = $false; Value = $null } }
+        $Hex = $Expression.Substring($Index + 1, 2)
+        if ($Hex -notmatch '^[0-9A-Fa-f]{2}$') { return [pscustomobject]@{ Success = $false; Value = $null } }
+        $null = $Builder.Append([char][Convert]::ToUInt16($Hex, 16))
+        $Index += 2
+      }
+      'u' {
+        if (($Index + 4) -ge $Expression.Length) { return [pscustomobject]@{ Success = $false; Value = $null } }
+        $Hex = $Expression.Substring($Index + 1, 4)
+        if ($Hex -notmatch '^[0-9A-Fa-f]{4}$') { return [pscustomobject]@{ Success = $false; Value = $null } }
+        $null = $Builder.Append([char][Convert]::ToUInt16($Hex, 16))
+        $Index += 4
+      }
+      default { return [pscustomobject]@{ Success = $false; Value = $null } }
+    }
+  }
+
+  return [pscustomobject]@{ Success = $true; Value = $Builder.ToString() }
+}
+
+function Resolve-QtInstallerFrameworkJavaScriptValue {
+  <#
+  .SYNOPSIS
+    Resolve a JavaScript expression only when it is a literal, known variable, or known IFW value.
+  .PARAMETER Expression
+    Verbatim right-hand-side expression from one assignment.
+  .PARAMETER VariableState
+    Case-sensitive map of assignments resolved earlier in source order.
+  .PARAMETER InstallerValues
+    Values recovered from installer config.xml and available through installer.value().
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]
+    [string]$Expression,
+
+    [Parameter(Mandatory)]
+    [System.Collections.Generic.Dictionary[string, object]]$VariableState,
+
+    [Parameter(Mandatory)]
+    [System.Collections.IDictionary]$InstallerValues
+  )
+
+  $Candidate = $Expression.Trim()
+  if ($Candidate.Length -ge 2 -and $Candidate[0] -in @([char]39, [char]34)) {
+    $StringValue = ConvertFrom-QtInstallerFrameworkJavaScriptStringLiteral -Expression $Candidate
+    if ($StringValue.Success) {
+      return [pscustomobject]@{ IsResolved = $true; Value = $StringValue.Value; ValueType = 'String'; ResolutionSource = 'Literal' }
+    }
+  }
+  if ($Candidate -ceq 'true' -or $Candidate -ceq 'false') {
+    return [pscustomobject]@{ IsResolved = $true; Value = ($Candidate -ceq 'true'); ValueType = 'Boolean'; ResolutionSource = 'Literal' }
+  }
+  if ($Candidate -ceq 'null') {
+    return [pscustomobject]@{ IsResolved = $true; Value = $null; ValueType = 'Null'; ResolutionSource = 'Literal' }
+  }
+  if ($Candidate -match '^[+-]?0[xX](?<hex>[0-9A-Fa-f]+)$') {
+    try {
+      $HexValue = [Convert]::ToInt64($Matches.hex, 16)
+      if ($Candidate[0] -eq '-') { $HexValue = - $HexValue }
+      return [pscustomobject]@{ IsResolved = $true; Value = $HexValue; ValueType = 'Number'; ResolutionSource = 'Literal' }
+    } catch {
+      # Oversized numeric literals remain unresolved instead of failing the complete installer parse.
+    }
+  }
+  if ($Candidate -match '^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$') {
+    $Integer = [int64]0
+    if ($Candidate -match '^[+-]?\d+$' -and [int64]::TryParse($Candidate, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$Integer)) {
+      return [pscustomobject]@{ IsResolved = $true; Value = $Integer; ValueType = 'Number'; ResolutionSource = 'Literal' }
+    }
+    $Number = [double]0
+    if ([double]::TryParse($Candidate, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$Number)) {
+      return [pscustomobject]@{ IsResolved = $true; Value = $Number; ValueType = 'Number'; ResolutionSource = 'Literal' }
+    }
+  }
+  if ($Candidate -match '^(?<receiver>installer|component)\.value\(\s*(?<name>["''][^"'']*["''])\s*\)$') {
+    $NameValue = ConvertFrom-QtInstallerFrameworkJavaScriptStringLiteral -Expression $Matches.name
+    if ($NameValue.Success -and $InstallerValues.Contains([string]$NameValue.Value)) {
+      return [pscustomobject]@{ IsResolved = $true; Value = $InstallerValues[[string]$NameValue.Value]; ValueType = 'String'; ResolutionSource = "$($Matches.receiver).value/config.xml" }
+    }
+  }
+  if ($Candidate -match '^(?:this\.)?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$' -and $VariableState.ContainsKey($Candidate)) {
+    $PriorValue = $VariableState[$Candidate]
+    if ($PriorValue.IsResolved) {
+      return [pscustomobject]@{ IsResolved = $true; Value = $PriorValue.Value; ValueType = $PriorValue.ValueType; ResolutionSource = "Variable:$Candidate" }
+    }
+  }
+
+  return [pscustomobject]@{ IsResolved = $false; Value = $null; ValueType = $null; ResolutionSource = $null }
+}
+
+function Get-QtInstallerFrameworkJavaScriptVariableAssignment {
+  <#
+  .SYNOPSIS
+    Index conservative, single-line JavaScript assignments in source order.
+  .PARAMETER Text
+    Verbatim JavaScript source. It is not modified or executed.
+  .PARAMETER InstallerValues
+    Values recovered from installer config.xml for safe installer.value() resolution.
+  .OUTPUTS
+    Assignment records with the raw expression and an optional statically resolved value.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)]
+    [string]$Text,
+
+    [Parameter(Mandatory)]
+    [System.Collections.IDictionary]$InstallerValues
+  )
+
+  # Replace comments and template-string bodies with spaces while retaining every original offset.
+  # Regex matches against this lexical mask, then expressions are sliced from the untouched source.
+  $MaskCharacters = $Text.ToCharArray()
+  $State = 'Code'
+  $Escaped = $false
+  for ($Index = 0; $Index -lt $MaskCharacters.Length; $Index++) {
+    $Character = $MaskCharacters[$Index]
+    $Next = if (($Index + 1) -lt $MaskCharacters.Length) { $MaskCharacters[$Index + 1] } else { [char]0 }
+    $HandledLexicalState = $false
+    switch ($State) {
+      'LineComment' {
+        $HandledLexicalState = $true
+        if ($Character -eq "`r" -or $Character -eq "`n") { $State = 'Code' } else { $MaskCharacters[$Index] = ' ' }
+      }
+      'BlockComment' {
+        $HandledLexicalState = $true
+        if ($Character -eq '*' -and $Next -eq '/') {
+          $MaskCharacters[$Index] = ' '
+          $MaskCharacters[$Index + 1] = ' '
+          $Index++
+          $State = 'Code'
+        } elseif ($Character -ne "`r" -and $Character -ne "`n") {
+          $MaskCharacters[$Index] = ' '
+        }
+      }
+      'Template' {
+        $HandledLexicalState = $true
+        if ($Character -ne "`r" -and $Character -ne "`n") { $MaskCharacters[$Index] = 'x' }
+        if ($Escaped) {
+          $Escaped = $false
+        } elseif ($Character -eq [char]92) {
+          $Escaped = $true
+        } elseif ($Character -eq [char]96) {
+          $State = 'Code'
+        }
+      }
+      'SingleQuote' {
+        $HandledLexicalState = $true
+        if ($Escaped) {
+          $Escaped = $false
+        } elseif ($Character -eq [char]92) {
+          $Escaped = $true
+        } elseif ($Character -eq [char]39) {
+          $State = 'Code'
+        }
+        if ($State -ne 'Code' -and $Character -ne "`r" -and $Character -ne "`n") { $MaskCharacters[$Index] = 'x' }
+      }
+      'DoubleQuote' {
+        $HandledLexicalState = $true
+        if ($Escaped) {
+          $Escaped = $false
+        } elseif ($Character -eq [char]92) {
+          $Escaped = $true
+        } elseif ($Character -eq [char]34) {
+          $State = 'Code'
+        }
+        if ($State -ne 'Code' -and $Character -ne "`r" -and $Character -ne "`n") { $MaskCharacters[$Index] = 'x' }
+      }
+    }
+    if ($HandledLexicalState) { continue }
+
+    if ($Character -eq '/' -and $Next -eq '/') {
+      $MaskCharacters[$Index] = ' '
+      $MaskCharacters[$Index + 1] = ' '
+      $Index++
+      $State = 'LineComment'
+    } elseif ($Character -eq '/' -and $Next -eq '*') {
+      $MaskCharacters[$Index] = ' '
+      $MaskCharacters[$Index + 1] = ' '
+      $Index++
+      $State = 'BlockComment'
+    } elseif ($Character -eq [char]39) {
+      $State = 'SingleQuote'
+    } elseif ($Character -eq [char]34) {
+      $State = 'DoubleQuote'
+    } elseif ($Character -eq [char]96) {
+      $MaskCharacters[$Index] = 'x'
+      $State = 'Template'
+    }
+  }
+
+  $MaskedText = [string]::new($MaskCharacters)
+  $Pattern = '(?m)^[\t ]*(?:(?<declaration>var|let|const)\s+)?(?<name>(?:this\.)?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*=(?!=|>)\s*(?<expression>[^\r\n;]+)\s*;?'
+  $AssignmentMatches = [regex]::Matches($MaskedText, $Pattern)
+  if ($AssignmentMatches.Count -gt $QTIFW_MAX_JAVASCRIPT_ASSIGNMENT_COUNT) {
+    throw "The Qt Installer Framework JavaScript contains more than $QTIFW_MAX_JAVASCRIPT_ASSIGNMENT_COUNT indexed assignments"
+  }
+
+  $Assignments = [System.Collections.Generic.List[object]]::new($AssignmentMatches.Count)
+  $VariableState = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+  $Line = 1
+  $LineScanOffset = 0
+  foreach ($Match in $AssignmentMatches) {
+    while (($NewLineOffset = $Text.IndexOf("`n", $LineScanOffset, [System.StringComparison]::Ordinal)) -ge 0 -and $NewLineOffset -lt $Match.Index) {
+      $Line++
+      $LineScanOffset = $NewLineOffset + 1
+    }
+
+    $Name = $Match.Groups['name'].Value
+    $ExpressionGroup = $Match.Groups['expression']
+    $MaskedExpression = $ExpressionGroup.Value
+    $LeadingWhitespace = $MaskedExpression.Length - $MaskedExpression.TrimStart().Length
+    $ExpressionLength = $MaskedExpression.Trim().Length
+    $Expression = if ($ExpressionLength -gt 0) { $Text.Substring($ExpressionGroup.Index + $LeadingWhitespace, $ExpressionLength) } else { '' }
+    $Resolved = Resolve-QtInstallerFrameworkJavaScriptValue -Expression $Expression -VariableState $VariableState -InstallerValues $InstallerValues
+    $Assignment = [pscustomobject][ordered]@{
+      Name             = $Name
+      DeclarationKind  = if ($Match.Groups['declaration'].Success) { $Match.Groups['declaration'].Value } else { 'Assignment' }
+      Expression       = $Expression
+      IsResolved       = [bool]$Resolved.IsResolved
+      Value            = $Resolved.Value
+      ValueType        = $Resolved.ValueType
+      ResolutionSource = $Resolved.ResolutionSource
+      Line             = $Line
+    }
+    $Assignments.Add($Assignment)
+    $VariableState[$Name] = $Assignment
+  }
+
+  return $Assignments.ToArray()
+}
+
+function Get-QtInstallerFrameworkJavaScriptInfo {
+  <#
+  .SYNOPSIS
+    Project verbatim Qt IFW scripts with an assistive variable index and review instructions.
+  .PARAMETER TextResource
+    Named text resources recovered from RCC and package metadata.
+  .PARAMETER InstallerValues
+    Raw installer config values that form the initial Qt IFW variable state.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)]
+    [AllowEmptyCollection()]
+    [object[]]$TextResource,
+
+    [Parameter(Mandatory)]
+    [System.Collections.IDictionary]$InstallerValues
+  )
+
+  $Scripts = [System.Collections.Generic.List[object]]::new()
+  $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $TotalCharacters = 0
+  foreach ($Resource in $TextResource) {
+    $Text = [string]$Resource.Text
+    $Source = [string]$Resource.Source
+    if ($Resource.Kind -ne 'JavaScript' -and -not (Test-QtInstallerFrameworkJavaScriptText -Text $Text -Source $Source)) { continue }
+    if (-not $Seen.Add("$Source`0$Text")) { continue }
+
+    $TotalCharacters += $Text.Length
+    if ($TotalCharacters -gt $QTIFW_MAX_JAVASCRIPT_TOTAL_CHARACTERS) {
+      throw "The Qt Installer Framework JavaScript resources exceed the $QTIFW_MAX_JAVASCRIPT_TOTAL_CHARACTERS-character limit"
+    }
+    if ($Scripts.Count -ge $QTIFW_MAX_JAVASCRIPT_RESOURCE_COUNT) {
+      throw "The Qt Installer Framework installer contains more than $QTIFW_MAX_JAVASCRIPT_RESOURCE_COUNT JavaScript resources"
+    }
+
+    $Role = if ($Text -match '(?m)^\s*function\s+Controller\s*\(') {
+      'Controller'
+    } elseif ($Text -match '(?m)^\s*function\s+Component\s*\(' -or $Source -match '(?i)(?:^|[/\\])installscript\.(?:js|qs)$') {
+      'Component'
+    } elseif ($InstallerValues.Contains('ControlScript') -and $Source -match "(?i)(?:^|[/\\])$([regex]::Escape([string]$InstallerValues['ControlScript']))(?:\.(?:js|qs))?$") {
+      'Controller'
+    } else {
+      'Unknown'
+    }
+
+    $Scripts.Add([pscustomobject][ordered]@{
+        Source              = $Source
+        Role                = $Role
+        RawJavaScript       = $Text
+        VariableAssignments = @(Get-QtInstallerFrameworkJavaScriptVariableAssignment -Text $Text -InstallerValues $InstallerValues)
+      })
+  }
+
+  return $Scripts.ToArray()
 }
 
 function Get-QtInstallerFrameworkMetadataResource {
@@ -961,12 +1727,16 @@ function Get-QtInstallerFrameworkMetadataResource {
     [Parameter(Mandatory, HelpMessage = 'The parsed IFW binary-content layout')]
     [pscustomobject]$Layout,
 
-    [object[]]$Collection,
+    [AllowEmptyCollection()][object[]]$Collection,
 
-    [string]$PackageIndexRoute = 'resource-collection-v1'
+    [string]$PackageIndexRoute = 'resource-collection-v1',
+
+    [System.IO.Stream]$Stream
   )
 
-  $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+  if ($OwnsStream) { $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+  $OriginalPosition = $Stream.Position
   try {
     $Results = [System.Collections.Generic.List[object]]::new()
     $Index = 0
@@ -982,7 +1752,7 @@ function Get-QtInstallerFrameworkMetadataResource {
 
     # Some older builders place metadata beside package archives. Ignore 7z payloads here to keep
     # metadata discovery bounded and leave archive traversal to Expand-*.
-    $Collections = if ($PSBoundParameters.ContainsKey('Collection')) { @($Collection) } elseif ($PackageIndexRoute -eq 'resource-collection-v1') { @(Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) } else { @() }
+    $Collections = if ($PSBoundParameters.ContainsKey('Collection')) { @($Collection) } elseif ($PackageIndexRoute -eq 'resource-collection-v1') { @(Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout -Stream $Stream) } else { @() }
     foreach ($CollectionItem in $Collections) {
       foreach ($Resource in @($CollectionItem.Resources)) {
         if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) { continue }
@@ -996,7 +1766,7 @@ function Get-QtInstallerFrameworkMetadataResource {
 
     return $Results.ToArray()
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
   }
 }
 
@@ -1017,12 +1787,16 @@ function Get-QtInstallerFrameworkMetadataTextResource {
     [Parameter(Mandatory, HelpMessage = 'The parsed IFW binary-content layout')]
     [pscustomobject]$Layout,
 
-    [object[]]$Collection,
+    [AllowEmptyCollection()][object[]]$Collection,
 
-    [string]$PackageIndexRoute = 'resource-collection-v1'
+    [string]$PackageIndexRoute = 'resource-collection-v1',
+
+    [System.IO.Stream]$Stream
   )
 
-  $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+  if ($OwnsStream) { $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+  $OriginalPosition = $Stream.Position
   try {
     $Results = [System.Collections.Generic.List[object]]::new()
     $Index = 0
@@ -1034,7 +1808,7 @@ function Get-QtInstallerFrameworkMetadataTextResource {
       $Index++
     }
 
-    $Collections = if ($PSBoundParameters.ContainsKey('Collection')) { @($Collection) } elseif ($PackageIndexRoute -eq 'resource-collection-v1') { @(Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout) } else { @() }
+    $Collections = if ($PSBoundParameters.ContainsKey('Collection')) { @($Collection) } elseif ($PackageIndexRoute -eq 'resource-collection-v1') { @(Get-QtInstallerFrameworkResourceCollection -Path $Path -Layout $Layout -Stream $Stream) } else { @() }
     foreach ($CollectionItem in $Collections) {
       foreach ($Resource in @($CollectionItem.Resources)) {
         if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) { continue }
@@ -1048,7 +1822,7 @@ function Get-QtInstallerFrameworkMetadataTextResource {
 
     return $Results.ToArray()
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
   }
 }
 
@@ -1131,6 +1905,216 @@ function Copy-QtInstallerFrameworkSegment {
   finally { $Range.Dispose() }
 }
 
+function Read-QtInstallerFrameworkRepositoryManifest {
+  <#
+  .SYNOPSIS
+    Read a bounded local Qt IFW repository Updates.xml document.
+  .PARAMETER Path
+    Repository directory or explicit Updates.xml path. Network URLs are intentionally unsupported.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $Resolved = Resolve-InstallerFileSystemPath -Path $Path
+  $UpdatesPath = if (Test-Path -LiteralPath $Resolved -PathType Container) { Join-Path $Resolved 'Updates.xml' } else { $Resolved }
+  $UpdatesPath = Resolve-InstallerFileSystemPath -Path $UpdatesPath -PathType Leaf
+  $File = Get-Item -LiteralPath $UpdatesPath -Force
+  if ($File.Length -gt $QTIFW_MAX_XML_SCAN_BYTES) { throw "Qt IFW repository metadata exceeds the $QTIFW_MAX_XML_SCAN_BYTES-byte limit: $UpdatesPath" }
+  $Settings = [Xml.XmlReaderSettings]::new()
+  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+  $Settings.XmlResolver = $null
+  $Reader = [Xml.XmlReader]::Create($UpdatesPath, $Settings)
+  try {
+    $Document = [Xml.XmlDocument]::new()
+    $Document.XmlResolver = $null
+    $Document.Load($Reader)
+  } finally {
+    $Reader.Dispose()
+  }
+  if ($Document.DocumentElement.LocalName -ne 'Updates') { throw "The Qt IFW repository metadata root is not Updates: $UpdatesPath" }
+  $Resource = [pscustomobject]@{ Xml = $Document; Root = 'Updates'; Source = $UpdatesPath }
+  [pscustomobject][ordered]@{
+    RootPath = (Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($UpdatesPath)) -Force).FullName
+    Path     = $UpdatesPath
+    Packages = [object[]]@(Get-QtInstallerFrameworkPackageManifestInfo -Resource @($Resource) -SourceKind Repository)
+  }
+}
+
+function Resolve-QtInstallerFrameworkExternalPackageSource {
+  <#
+  .SYNOPSIS
+    Resolve caller-provided repository roots and package files to bounded local archives.
+  .PARAMETER RepositoryPath
+    Local Qt IFW repository roots or Updates.xml files.
+  .PARAMETER PackagePath
+    Explicit package archive files or directories containing package archives.
+  .PARAMETER PackageMetadata
+    Embedded package declarations used to resolve explicit package directories.
+  .OUTPUTS
+    Resolved archive path, package name, declared archive name, and evidence source.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [string[]]$RepositoryPath,
+    [string[]]$PackagePath,
+    [object[]]$PackageMetadata = @()
+  )
+
+  $Sources = [Collections.Generic.List[object]]::new()
+  $Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $AddSource = {
+    param([string]$Candidate, [string]$PackageName, [string]$ArchiveName, [string]$SourceKind)
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return }
+    $ResolvedCandidate = (Get-Item -LiteralPath $Candidate -Force).FullName
+    if ([string]$ResolvedCandidate -notmatch $QTIFW_PACKAGE_ARCHIVE_PATTERN -or -not $Seen.Add($ResolvedCandidate)) { return }
+    $Sources.Add([pscustomobject][ordered]@{
+        Path        = $ResolvedCandidate
+        PackageName = $PackageName
+        ArchiveName = if ([string]::IsNullOrWhiteSpace($ArchiveName)) { [IO.Path]::GetFileName($ResolvedCandidate) } else { $ArchiveName }
+        SourceKind  = $SourceKind
+      })
+  }
+
+  foreach ($RepositoryItem in @($RepositoryPath)) {
+    if ([string]::IsNullOrWhiteSpace($RepositoryItem)) { continue }
+    $Repository = Read-QtInstallerFrameworkRepositoryManifest -Path $RepositoryItem
+    foreach ($Package in @($Repository.Packages)) {
+      foreach ($Reference in @($Package.ArchiveReferences)) {
+        $RelativePath = ([string]$Reference.RelativePath).Replace('/', [IO.Path]::DirectorySeparatorChar)
+        $Candidate = [IO.Path]::GetFullPath((Join-Path $Repository.RootPath $RelativePath))
+        $RootPrefix = $Repository.RootPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $Candidate.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+          throw "Qt IFW repository archive path escapes its repository root: $($Reference.RelativePath)"
+        }
+        & $AddSource $Candidate $Package.Name $Reference.Name 'Repository'
+      }
+    }
+  }
+
+  foreach ($PackageItem in @($PackagePath)) {
+    if ([string]::IsNullOrWhiteSpace($PackageItem)) { continue }
+    $ResolvedPackageItem = Resolve-InstallerFileSystemPath -Path $PackageItem
+    if (Test-Path -LiteralPath $ResolvedPackageItem -PathType Leaf) {
+      & $AddSource $ResolvedPackageItem $null ([IO.Path]::GetFileName($ResolvedPackageItem)) 'ExplicitPackage'
+      continue
+    }
+    $Directory = (Get-Item -LiteralPath $ResolvedPackageItem -Force).FullName
+    if ($PackageMetadata.Count -gt 0) {
+      foreach ($Package in @($PackageMetadata)) {
+        foreach ($Reference in @($Package.ArchiveReferences)) {
+          foreach ($RelativePath in @($Reference.RelativePath, $Reference.VersionedName, $Reference.Name)) {
+            if ([string]::IsNullOrWhiteSpace([string]$RelativePath)) { continue }
+            $Candidate = [IO.Path]::GetFullPath((Join-Path $Directory ([string]$RelativePath).Replace('/', [IO.Path]::DirectorySeparatorChar)))
+            $RootPrefix = $Directory.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+            if ($Candidate.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) { & $AddSource $Candidate $Package.Name $Reference.Name 'ExplicitPackageDirectory' }
+          }
+        }
+      }
+    } else {
+      $VisitedFileCount = 0
+      $CandidateFileCount = 0
+      foreach ($CandidatePath in [IO.Directory]::EnumerateFiles($Directory, '*', [IO.SearchOption]::AllDirectories)) {
+        $VisitedFileCount++
+        if ($VisitedFileCount -gt $QTIFW_MAX_EXPANDED_FILES) { throw "The Qt IFW external package directory contains more than $QTIFW_MAX_EXPANDED_FILES files" }
+        $CandidateFile = [IO.FileInfo]::new($CandidatePath)
+        if ($CandidateFile.Name -notmatch $QTIFW_PACKAGE_ARCHIVE_PATTERN) { continue }
+        $CandidateFileCount++
+        if ($CandidateFileCount -gt $QTIFW_MAX_RESOURCE_COUNT) { throw "The Qt IFW external package directory contains more than $QTIFW_MAX_RESOURCE_COUNT archives" }
+        & $AddSource $CandidateFile.FullName $CandidateFile.Directory.Name $CandidateFile.Name 'ExplicitPackageDirectory'
+      }
+    }
+  }
+  return $Sources.ToArray()
+}
+
+function Open-QtInstallerFrameworkPackageArchive {
+  <#
+  .SYNOPSIS
+    Open one Qt IFW package archive through the source-defined suffix route.
+  .DESCRIPTION
+    Qt IFW's libarchive backend treats gzip, bzip2, and xz as filters around a TAR archive. SharpCompress's generic factory does not consistently recurse through those filters, so this helper unwraps the filter into a bounded seekable stream before opening the TAR catalog. A .qbsp file is a 7z archive with a Qt-specific suffix.
+  .PARAMETER Path
+    Resolved package-archive path.
+  .PARAMETER MaximumArchiveBytes
+    Maximum decompressed TAR stream size before parsing archive entries.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumArchiveBytes
+  )
+
+  Import-QtInstallerFrameworkSharpCompress
+  $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $LowerName = [IO.Path]::GetFileName($ResolvedPath).ToLowerInvariant()
+  $Filter = if ($LowerName.EndsWith('.tar.gz') -or $LowerName.EndsWith('.tgz')) {
+    'GZip'
+  } elseif ($LowerName.EndsWith('.tar.bz2') -or $LowerName.EndsWith('.tbz2')) {
+    'BZip2'
+  } elseif ($LowerName.EndsWith('.tar.xz') -or $LowerName.EndsWith('.txz')) {
+    'Xz'
+  } else {
+    $null
+  }
+
+  if (-not $Filter) {
+    return [pscustomobject]@{
+      Archive  = [SharpCompress.Archives.ArchiveFactory]::Open($ResolvedPath)
+      Source   = $null
+      Filter   = $null
+      Seekable = $null
+      Format   = if ($LowerName.EndsWith('.qbsp')) { 'qbsp/7z' } else { [IO.Path]::GetExtension($LowerName).TrimStart('.') }
+    }
+  }
+
+  $Source = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $FilterStream = switch ($Filter) {
+      'GZip' { [IO.Compression.GZipStream]::new($Source, [IO.Compression.CompressionMode]::Decompress, $true) }
+      'BZip2' { [SharpCompress.Compressors.BZip2.BZip2Stream]::new($Source, [SharpCompress.Compressors.CompressionMode]::Decompress, $true) }
+      'Xz' { [SharpCompress.Compressors.Xz.XZStream]::new($Source) }
+    }
+    try {
+      $Seekable = New-InstallerSeekableStream -SourceStream $FilterStream -MaximumBytes $MaximumArchiveBytes
+      try {
+        $ReaderOptions = [SharpCompress.Readers.ReaderOptions]::new()
+        $Archive = [SharpCompress.Archives.Tar.TarArchive]::Open($Seekable.Stream, $ReaderOptions)
+        return [pscustomobject]@{
+          Archive  = $Archive
+          Source   = $Source
+          Filter   = $FilterStream
+          Seekable = $Seekable
+          Format   = "tar.$($Filter.ToLowerInvariant())"
+        }
+      } catch {
+        $Seekable.Dispose()
+        throw
+      }
+    } catch {
+      $FilterStream.Dispose()
+      throw
+    }
+  } catch {
+    $Source.Dispose()
+    throw
+  }
+}
+
+function Close-QtInstallerFrameworkPackageArchive {
+  <#
+  .SYNOPSIS
+    Dispose a package archive and every owned filter or spill stream in dependency order.
+  .PARAMETER Context
+    Context returned by Open-QtInstallerFrameworkPackageArchive.
+  #>
+  param ([Parameter(Mandatory)][psobject]$Context)
+
+  if ($Context.Archive) { $Context.Archive.Dispose() }
+  if ($Context.Seekable) { $Context.Seekable.Dispose() }
+  if ($Context.Filter) { $Context.Filter.Dispose() }
+  if ($Context.Source) { $Context.Source.Dispose() }
+}
+
 function Expand-QtInstallerFrameworkPackageArchive {
   <#
   .SYNOPSIS
@@ -1153,17 +2137,17 @@ function Expand-QtInstallerFrameworkPackageArchive {
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
     [string]$CollisionAction = 'Rename',
 
-    [System.Collections.Generic.ISet[string]]$ReservedPath,
+    [AllowEmptyCollection()][System.Collections.Generic.ISet[string]]$ReservedPath,
 
     [Parameter(Mandatory, HelpMessage = 'The maximum number of expanded bytes')]
     [long]$MaximumExpandedBytes
   )
 
-  Import-QtInstallerFrameworkSharpCompress
   $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
   $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
   if (-not $ReservedPath) { $ReservedPath = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
-  $Archive = [SharpCompress.Archives.ArchiveFactory]::Open($Path)
+  $ArchiveContext = Open-QtInstallerFrameworkPackageArchive -Path $Path -MaximumArchiveBytes $QTIFW_MAX_EXPANDED_BYTES
+  $Archive = $ArchiveContext.Archive
   try {
     $Entries = @($Archive.Entries)
     if ($Entries.Count -gt $QTIFW_MAX_EXPANDED_FILES) {
@@ -1241,8 +2225,105 @@ function Expand-QtInstallerFrameworkPackageArchive {
       Files = $Files.ToArray()
     }
   } finally {
-    $Archive.Dispose()
+    Close-QtInstallerFrameworkPackageArchive -Context $ArchiveContext
   }
+}
+
+function Expand-QtInstallerFrameworkContent {
+  <#
+  .SYNOPSIS
+    Expand one already-open Qt IFW executable or DAT content source.
+  .PARAMETER Stream
+    Caller-owned seekable stream. The helper does not dispose it.
+  .PARAMETER Layout
+    Validated binary layout for the stream.
+  .PARAMETER FormatInfo
+    Catalog result containing package collections and the payload route.
+  .OUTPUTS
+    Number of files and bytes written from this content source.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [Parameter(Mandatory)][pscustomobject]$FormatInfo,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction,
+    [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.ISet[string]]$ReservedPath,
+    [Parameter(Mandatory)][long]$MaximumExpandedBytes
+  )
+
+  $PayloadHandler = Get-QtInstallerFrameworkRouteHandler -Category Payload -Route $FormatInfo.PayloadRoute
+  $WrittenFileCount = 0
+  $WrittenBytes = [long]0
+  $MetaIndex = 0
+  foreach ($Segment in @($Layout.MetaResourceSegments)) {
+    $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Segment.Start -Count $Segment.Length
+    try { $RccResources = @(Get-QtInstallerFrameworkRccResource -Bytes $Bytes) } catch { $RccResources = @() }
+    if ($RccResources) {
+      foreach ($Resource in $RccResources) {
+        $RelativePath = ([string]$Resource.Path).TrimStart(':', '/', '\')
+        if (-not (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name)) { continue }
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath -CollisionAction $CollisionAction -ReservedPath $ReservedPath
+        if (-not $Target.ShouldWrite) { continue }
+        $WrittenBytes += $Resource.Data.Length
+        if ($WrittenBytes -gt $MaximumExpandedBytes) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+        $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+        [IO.File]::WriteAllBytes($Target.Path, $Resource.Data)
+        $WrittenFileCount++
+        if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) { throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount" }
+      }
+    } else {
+      $RelativePath = "metadata/QResources/$MetaIndex.rcc"
+      if (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name) {
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath -CollisionAction $CollisionAction -ReservedPath $ReservedPath
+        if ($Target.ShouldWrite) {
+          $WrittenBytes += $Bytes.Length
+          if ($WrittenBytes -gt $MaximumExpandedBytes) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+          $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+          [IO.File]::WriteAllBytes($Target.Path, $Bytes)
+          $WrittenFileCount++
+        }
+      }
+    }
+    $MetaIndex++
+  }
+
+  foreach ($Collection in @($FormatInfo.PackageCollections)) {
+    foreach ($Resource in @($Collection.Resources)) {
+      if ($Resource.Segment.Length -gt $MaximumExpandedBytes) { throw "The Qt Installer Framework resource '$($Resource.Name)' exceeds the $MaximumExpandedBytes-byte limit" }
+      $TemporaryArchivePath = [IO.Path]::GetTempFileName()
+      try {
+        $TemporaryStream = [IO.File]::Open($TemporaryArchivePath, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+        try { $null = Copy-QtInstallerFrameworkSegment -SourceStream $Stream -Segment $Resource.Segment -DestinationStream $TemporaryStream } finally { $TemporaryStream.Dispose() }
+        $RawRelativePath = if ($FormatInfo.PackageIndexRoute -eq 'component-index-v1') { "packages/$($Collection.Name)/$($Resource.Name)" } else { "metadata/$($Collection.Name)/$($Resource.Name)" }
+        if (Test-QtInstallerFrameworkExtractionMatch -Path $RawRelativePath -Name $Name) {
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RawRelativePath -CollisionAction $CollisionAction -ReservedPath $ReservedPath
+          if ($Target.ShouldWrite) {
+            $WrittenBytes += $Resource.Segment.Length
+            if ($WrittenBytes -gt $MaximumExpandedBytes) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+            $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+            [IO.File]::Copy($TemporaryArchivePath, $Target.Path, $true)
+            $WrittenFileCount++
+          }
+        }
+        if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) {
+          $ArchiveRoot = "packages/$($Collection.Name)/$([IO.Path]::GetFileNameWithoutExtension([string]$Resource.Name))"
+          $RemainingExpandedBytes = $MaximumExpandedBytes - $WrittenBytes
+          if ($RemainingExpandedBytes -le 0) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+          $ArchiveResult = & $PayloadHandler -Path $TemporaryArchivePath -DestinationPath $DestinationPath -RelativeRoot $ArchiveRoot -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPath -MaximumExpandedBytes $RemainingExpandedBytes
+          $WrittenBytes += $ArchiveResult.Bytes
+          $WrittenFileCount += @($ArchiveResult.Files).Count
+        }
+        if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) { throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount" }
+      } finally {
+        Remove-Item -LiteralPath $TemporaryArchivePath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  [pscustomobject]@{ Bytes = $WrittenBytes; FileCount = $WrittenFileCount }
 }
 
 function Expand-QtInstallerFramework {
@@ -1259,6 +2340,12 @@ function Expand-QtInstallerFramework {
     The maximum total number of bytes written to the destination
   .PARAMETER CollisionAction
     Behavior when a resource path already exists or multiple resources resolve to the same path.
+  .PARAMETER DataPath
+    Paired Qt IFW DAT binary-content files to parse and extract with the installer.
+  .PARAMETER RepositoryPath
+    Local Qt IFW repository roots or Updates.xml files. The parser never downloads repositories.
+  .PARAMETER PackagePath
+    Explicit package archives or directories containing package archives.
   #>
   [OutputType([string])]
   param (
@@ -1276,143 +2363,98 @@ function Expand-QtInstallerFramework {
     [long]$MaximumExpandedBytes = $QTIFW_MAX_EXPANDED_BYTES,
 
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
-    [string]$CollisionAction = 'Prompt'
+    [string]$CollisionAction = 'Prompt',
+
+    [string[]]$DataPath,
+
+    [string[]]$RepositoryPath,
+
+    [string[]]$PackagePath
   )
 
   process {
     # Parse and validate the trailer once, then keep one installer stream open for all segment
     # copies. Nested archive readers receive isolated temporary files because they require seeking.
     $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
-    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
-    if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
-    $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout
-    if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
-    $PayloadHandler = Get-QtInstallerFrameworkRouteHandler -Category Payload -Route $FormatInfo.PayloadRoute
-
-    if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
-      $DestinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "Dumplings-QtIFW-$([System.Guid]::NewGuid())"
-    }
-    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
-    $DestinationPath = (New-Item -Path $DestinationPath -ItemType Directory -Force).FullName
-
     $WrittenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $WrittenFileCount = 0
     $WrittenBytes = [long]0
     $InstallerStream = [System.IO.File]::Open($InstallerPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
-      $MetaIndex = 0
-      # Expand embedded RCC resources when possible; preserve an unrecognized metadata segment as
-      # a raw .rcc file so callers can inspect newer layouts without losing evidence.
-      foreach ($Segment in @($Layout.MetaResourceSegments)) {
-        $Bytes = Read-QtInstallerFrameworkBytes -Stream $InstallerStream -Offset $Segment.Start -Count $Segment.Length
-        try {
-          $RccResources = @(Get-QtInstallerFrameworkRccResource -Bytes $Bytes)
-        } catch {
-          $RccResources = @()
-        }
+      $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath -Stream $InstallerStream
+      if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
+      $PELayout = try { Get-PELayout -Stream $InstallerStream } catch { $null }
+      $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout -Stream $InstallerStream -PELayout $PELayout
+      if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
 
-        if ($RccResources) {
-          foreach ($Resource in $RccResources) {
-            $RelativePath = ([string]$Resource.Path).TrimStart(':', '/', '\')
-            if (-not (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name)) { continue }
-            $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
-              -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
-            if (-not $Target.ShouldWrite) { continue }
-
-            $WrittenBytes += $Resource.Data.Length
-            if ($WrittenBytes -gt $MaximumExpandedBytes) {
-              throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
-            }
-            $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
-            [IO.File]::WriteAllBytes($Target.Path, $Resource.Data)
-            $WrittenFileCount++
-            if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
-              throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
-            }
-          }
-        } else {
-          $RelativePath = "metadata/QResources/$MetaIndex.rcc"
-          if (Test-QtInstallerFrameworkExtractionMatch -Path $RelativePath -Name $Name) {
-            $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
-              -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
-            if ($Target.ShouldWrite) {
-              $WrittenBytes += $Bytes.Length
-              if ($WrittenBytes -gt $MaximumExpandedBytes) {
-                throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
-              }
-              $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
-              [IO.File]::WriteAllBytes($Target.Path, $Bytes)
-              $WrittenFileCount++
-              if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
-                throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
-              }
-            }
-          }
-        }
-        $MetaIndex++
+      if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
+        $DestinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "Dumplings-QtIFW-$([System.Guid]::NewGuid())"
       }
+      $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+      $DestinationPath = (New-Item -Path $DestinationPath -ItemType Directory -Force).FullName
 
-      # Resource catalog entries are copied through bounded streams. A raw resource and its
-      # expanded package contents are accounted independently against the global output limit.
-      foreach ($Collection in @($FormatInfo.PackageCollections)) {
-        foreach ($Resource in @($Collection.Resources)) {
-          if ($Resource.Segment.Length -gt $MaximumExpandedBytes) {
-            throw "The Qt Installer Framework resource '$($Resource.Name)' exceeds the $MaximumExpandedBytes-byte limit"
-          }
-
-          # Materialize only the current bounded segment, never the complete installer overlay.
-          $TemporaryArchivePath = [System.IO.Path]::GetTempFileName()
-          try {
-            $TemporaryStream = [System.IO.File]::Open($TemporaryArchivePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
-            try {
-              $null = Copy-QtInstallerFrameworkSegment -SourceStream $InstallerStream -Segment $Resource.Segment -DestinationStream $TemporaryStream
-            } finally {
-              $TemporaryStream.Dispose()
-            }
-
-            $RawRelativePath = if ($FormatInfo.PackageIndexRoute -eq 'component-index-v1') { "packages/$($Collection.Name)/$($Resource.Name)" } else { "metadata/$($Collection.Name)/$($Resource.Name)" }
-            if (Test-QtInstallerFrameworkExtractionMatch -Path $RawRelativePath -Name $Name) {
-              $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RawRelativePath `
-                -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
-              if ($Target.ShouldWrite) {
-                $WrittenBytes += $Resource.Segment.Length
-                if ($WrittenBytes -gt $MaximumExpandedBytes) {
-                  throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
-                }
-                $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
-                [System.IO.File]::Copy($TemporaryArchivePath, $Target.Path, $true)
-                $WrittenFileCount++
-                if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
-                  throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
-                }
-              }
-            }
-
-            if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) {
-              # IFW package payloads retain their collection name as a logical package root.
-              $ArchiveRoot = "packages/$($Collection.Name)/$([System.IO.Path]::GetFileNameWithoutExtension([string]$Resource.Name))"
-              $RemainingExpandedBytes = $MaximumExpandedBytes - $WrittenBytes
-              if ($RemainingExpandedBytes -le 0) {
-                throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit"
-              }
-              $ArchiveResult = & $PayloadHandler -Path $TemporaryArchivePath -DestinationPath $DestinationPath `
-                -RelativeRoot $ArchiveRoot -Name $Name -CollisionAction $CollisionAction -ReservedPath $WrittenPaths `
-                -MaximumExpandedBytes $RemainingExpandedBytes
-              $WrittenBytes += $ArchiveResult.Bytes
-              foreach ($ExtractedFile in @($ArchiveResult.Files)) {
-                $WrittenFileCount++
-                if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) {
-                  throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount"
-                }
-              }
-            }
-          } finally {
-            Remove-Item -Path $TemporaryArchivePath -Force -ErrorAction SilentlyContinue
-          }
-        }
-      }
+      $PrimaryResult = Expand-QtInstallerFrameworkContent -Stream $InstallerStream -Layout $Layout -FormatInfo $FormatInfo -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -ReservedPath $WrittenPaths -MaximumExpandedBytes $MaximumExpandedBytes
+      $WrittenBytes = $PrimaryResult.Bytes
+      $WrittenFileCount = $PrimaryResult.FileCount
     } finally {
       $InstallerStream.Dispose()
+    }
+
+    # A paired DAT file has the same trailer and resource catalogs as an executable, but no PE
+    # launcher. Parse each caller-provided DAT once and account its output against the same limits.
+    foreach ($DataItem in @($DataPath)) {
+      if ([string]::IsNullOrWhiteSpace($DataItem)) { continue }
+      $ResolvedDataPath = Resolve-InstallerFileSystemPath -Path $DataItem -PathType Leaf
+      if ($ResolvedDataPath -eq $InstallerPath) { continue }
+      $DataStream = [IO.File]::Open($ResolvedDataPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+      try {
+        $DataLayout = Get-QtInstallerFrameworkBinaryLayout -Path $ResolvedDataPath -Stream $DataStream
+        if ($DataLayout.CookieKind -ne 'Data') { throw "The external Qt IFW data path does not contain a DAT cookie: $ResolvedDataPath" }
+        # Paired DAT files inherit the launcher's format profile. They usually omit the launcher's
+        # version marker and configuration RCC, so resolving them as standalone media would lose
+        # the exact profile evidence already validated on the executable.
+        $DataPackageIndexHandler = Get-QtInstallerFrameworkRouteHandler -Category PackageIndex -Route $FormatInfo.PackageIndexRoute
+        $DataCollections = @(& $DataPackageIndexHandler -Path $ResolvedDataPath -Layout $DataLayout -Stream $DataStream)
+        $DataFormatInfo = $FormatInfo.PSObject.Copy()
+        $DataFormatInfo.PackageCollections = $DataCollections
+        $RemainingExpandedBytes = $MaximumExpandedBytes - $WrittenBytes
+        if ($RemainingExpandedBytes -le 0) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+        $DataResult = Expand-QtInstallerFrameworkContent -Stream $DataStream -Layout $DataLayout -FormatInfo $DataFormatInfo -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -ReservedPath $WrittenPaths -MaximumExpandedBytes $RemainingExpandedBytes
+        $WrittenBytes += $DataResult.Bytes
+        $WrittenFileCount += $DataResult.FileCount
+      } finally {
+        $DataStream.Dispose()
+      }
+    }
+
+    # Resolve Qt repository paths exactly as the runtime does: <component>/<version><archive>.
+    # Explicit package files are also accepted for media whose Updates.xml is unavailable.
+    $ExternalSources = @(Resolve-QtInstallerFrameworkExternalPackageSource -RepositoryPath $RepositoryPath -PackagePath $PackagePath -PackageMetadata @($FormatInfo.PackageMetadata))
+    if (($RepositoryPath -or $PackagePath) -and $ExternalSources.Count -eq 0) {
+      throw 'No Qt Installer Framework package archives were resolved from the caller-provided repository or package paths'
+    }
+    foreach ($ExternalSource in $ExternalSources) {
+      $ArchiveName = [IO.Path]::GetFileName([string]$ExternalSource.Path)
+      $PackageName = if ([string]::IsNullOrWhiteSpace([string]$ExternalSource.PackageName)) { 'external' } else { [string]$ExternalSource.PackageName }
+      $RawRelativePath = "packages/$PackageName/$ArchiveName"
+      if (Test-QtInstallerFrameworkExtractionMatch -Path $RawRelativePath -Name $Name) {
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RawRelativePath -CollisionAction $CollisionAction -ReservedPath $WrittenPaths
+        if ($Target.ShouldWrite) {
+          $Length = (Get-Item -LiteralPath $ExternalSource.Path -Force).Length
+          $WrittenBytes += $Length
+          if ($WrittenBytes -gt $MaximumExpandedBytes) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+          $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+          [IO.File]::Copy($ExternalSource.Path, $Target.Path, $true)
+          $WrittenFileCount++
+        }
+      }
+      $ArchiveRoot = "packages/$PackageName/$([IO.Path]::GetFileNameWithoutExtension([string]$ExternalSource.ArchiveName))"
+      $RemainingExpandedBytes = $MaximumExpandedBytes - $WrittenBytes
+      if ($RemainingExpandedBytes -le 0) { throw "The Qt Installer Framework extraction exceeds the $MaximumExpandedBytes-byte limit" }
+      $ArchiveResult = Expand-QtInstallerFrameworkPackageArchive -Path $ExternalSource.Path -DestinationPath $DestinationPath -RelativeRoot $ArchiveRoot -Name $Name -CollisionAction $CollisionAction -ReservedPath $WrittenPaths -MaximumExpandedBytes $RemainingExpandedBytes
+      $WrittenBytes += $ArchiveResult.Bytes
+      $WrittenFileCount += @($ArchiveResult.Files).Count
+      if ($WrittenFileCount -gt $QTIFW_MAX_EXPANDED_FILES) { throw "The Qt Installer Framework extraction contains too many files: $WrittenFileCount" }
     }
 
     if ($WrittenFileCount -eq 0) { throw "No Qt Installer Framework resources matched the extraction selector: $Name" }
@@ -1545,18 +2587,26 @@ function Get-QtInstallerFrameworkVersionEvidence {
     Path to the Qt IFW binary.
   .PARAMETER Layout
     Validated binary-content layout used to bound the launcher scan.
+  .PARAMETER Stream
+    Caller-owned seekable stream shared by the analysis context.
+  .PARAMETER PELayout
+    Optional PE layout already parsed from Stream.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)][pscustomobject]$Layout
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [System.IO.Stream]$Stream,
+    [AllowNull()][pscustomobject]$PELayout
   )
 
   $FrameworkVersion = $null
   $QtRuntimeVersion = $null
   $MatchedText = $null
   $ScanLength = [Math]::Min([int64]$Layout.EndOfExecutable, [int64]$QTIFW_MAX_EXECUTABLE_SCAN_BYTES)
-  $Stream = [IO.File]::Open((Get-Item -Path $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+  if ($OwnsStream) { $Stream = [IO.File]::Open((Get-Item -Path $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite) }
+  $OriginalPosition = $Stream.Position
   try {
     $Buffer = [byte[]]::new(1048576)
     $Carry = ''
@@ -1581,7 +2631,7 @@ function Get-QtInstallerFrameworkVersionEvidence {
 
     $PEVersion = $null
     try {
-      $PELayout = Get-PELayout -Stream $Stream
+      if (-not $PELayout) { $PELayout = Get-PELayout -Stream $Stream }
       $VersionTable = Get-PEVersionStringTable -Stream $Stream -Layout $PELayout
       if ($VersionTable.PSObject.Properties['FileVersion']) { $PEVersion = [string]$VersionTable.FileVersion }
     } catch {
@@ -1598,7 +2648,175 @@ function Get-QtInstallerFrameworkVersionEvidence {
       ScanWasLimited         = $Layout.EndOfExecutable -gt $ScanLength
     }
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
+  }
+}
+
+function Get-QtInstallerFrameworkPackageManifestInfo {
+  <#
+  .SYNOPSIS
+    Project source-defined Package and Updates XML into package payload declarations.
+  .PARAMETER Resource
+    Parsed XML resources recovered from the installer or a repository Updates.xml file.
+  .PARAMETER SourceKind
+    Evidence origin used to distinguish embedded metadata from a caller-provided repository.
+  .OUTPUTS
+    Package records containing component identity, version, virtual state, and version-prefixed archive paths used by Qt IFW repositories.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Resource,
+    [ValidateSet('Embedded', 'Repository')][string]$SourceKind = 'Embedded'
+  )
+
+  $Packages = [Collections.Generic.List[object]]::new()
+  $SeenPackages = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($Item in @($Resource)) {
+    if (-not $Item -or -not $Item.Xml) { continue }
+    $Root = $Item.Xml.DocumentElement
+    if (-not $Root) { continue }
+    $Nodes = switch ($Root.LocalName) {
+      'Updates' { @($Root.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element -and $_.LocalName -eq 'PackageUpdate' }) }
+      'Package' { @($Root) }
+      'PackageUpdate' { @($Root) }
+      default { @() }
+    }
+    foreach ($Node in $Nodes) {
+      if ($Packages.Count -ge $QTIFW_MAX_PACKAGE_METADATA_COUNT) {
+        throw "Qt Installer Framework package metadata exceeds the $QTIFW_MAX_PACKAGE_METADATA_COUNT-record limit"
+      }
+      $Values = [ordered]@{}
+      foreach ($Child in @($Node.ChildNodes)) {
+        if ($Child.NodeType -ne [Xml.XmlNodeType]::Element) { continue }
+        if (-not $Values.Contains($Child.LocalName)) { $Values[$Child.LocalName] = $Child.InnerText.Trim() }
+      }
+      $Name = [string]$Values['Name']
+      $Version = [string]$Values['Version']
+      $ArchiveNames = [Collections.Generic.List[string]]::new()
+      foreach ($ArchiveName in ([string]$Values['DownloadableArchives'] -split ',')) {
+        $TrimmedName = $ArchiveName.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($TrimmedName)) { $ArchiveNames.Add($TrimmedName) }
+      }
+      $ArchiveReferences = [Collections.Generic.List[object]]::new()
+      foreach ($ArchiveName in $ArchiveNames) {
+        $VersionedName = "$Version$ArchiveName"
+        $ArchiveReferences.Add([pscustomobject][ordered]@{
+            Name          = $ArchiveName
+            VersionedName = $VersionedName
+            RelativePath  = if ([string]::IsNullOrWhiteSpace($Name)) { $VersionedName } else { "$Name/$VersionedName" }
+          })
+      }
+      $PackageKey = "$SourceKind`0$([string]$Item.Source)`0$Name`0$Version`0$($ArchiveNames -join ',')"
+      if (-not $SeenPackages.Add($PackageKey)) { continue }
+      $UpdateFile = @($Node.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element -and $_.LocalName -eq 'UpdateFile' } | Select-Object -First 1)
+      $Packages.Add([pscustomobject][ordered]@{
+          Name                 = $Name
+          Version              = $Version
+          DisplayName          = [string]$Values['DisplayName']
+          Virtual              = ConvertTo-QtInstallerFrameworkBoolean -Value ([string]$Values['Virtual'])
+          DownloadableArchives = [string[]]$ArchiveNames.ToArray()
+          ArchiveReferences    = [object[]]$ArchiveReferences.ToArray()
+          CompressedSize       = if ($UpdateFile) { [string]$UpdateFile[0].GetAttribute('CompressedSize') } else { $null }
+          UncompressedSize     = if ($UpdateFile) { [string]$UpdateFile[0].GetAttribute('UncompressedSize') } else { $null }
+          Source               = [string]$Item.Source
+          SourceKind           = $SourceKind
+          DocumentKind         = $Node.LocalName
+          RawValues            = $Values
+        })
+    }
+  }
+  return $Packages.ToArray()
+}
+
+function Get-QtInstallerFrameworkRepositoryUrl {
+  <#
+  .SYNOPSIS
+    Read source-defined RemoteRepositories URLs from installer configuration XML.
+  .PARAMETER Resource
+    Parsed embedded XML resources.
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Resource)
+
+  $Urls = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Item in @($Resource)) {
+    if (-not $Item.Xml -or $Item.Xml.DocumentElement.LocalName -ne 'Installer') { continue }
+    foreach ($Node in @($Item.Xml.SelectNodes("//*[local-name()='RemoteRepositories']/*[local-name()='Repository']/*[local-name()='Url']"))) {
+      $Value = $Node.InnerText.Trim()
+      if (-not [string]::IsNullOrWhiteSpace($Value)) { $null = $Urls.Add($Value) }
+    }
+  }
+  return [string[]]@($Urls)
+}
+
+function Get-QtInstallerFrameworkPayloadAvailabilityInfo {
+  <#
+  .SYNOPSIS
+    Classify where Qt IFW package data lives using structured package and repository evidence.
+  .PARAMETER Path
+    Resolved executable or DAT path.
+  .PARAMETER Layout
+    Parsed Qt IFW binary layout.
+  .PARAMETER Collection
+    Parsed embedded package collections.
+  .PARAMETER PackageMetadata
+    Parsed Package or PackageUpdate records.
+  .PARAMETER RepositoryUrl
+    Remote repository URLs declared by installer configuration.
+  .PARAMETER HasDynamicDownloadableArchive
+    Indicates that component JavaScript may add archives at runtime.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Collection,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$PackageMetadata,
+    [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$RepositoryUrl,
+    [bool]$HasDynamicDownloadableArchive
+  )
+
+  $EmbeddedArchiveCount = @($Collection | ForEach-Object Resources | Where-Object { [string]$_.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN }).Count
+  $DeclaredArchives = @($PackageMetadata | ForEach-Object ArchiveReferences)
+  $SidecarCandidates = [Collections.Generic.List[string]]::new()
+  $File = Get-Item -LiteralPath $Path -Force
+  foreach ($Candidate in @(
+      [IO.Path]::ChangeExtension($File.FullName, '.dat')
+    )) {
+    if ($Candidate -ne $File.FullName -and (Test-Path -LiteralPath $Candidate -PathType Leaf)) { $SidecarCandidates.Add((Get-Item -LiteralPath $Candidate -Force).FullName) }
+  }
+
+  $HasOnlinePackages = $RepositoryUrl.Count -gt 0 -or $HasDynamicDownloadableArchive -or @($PackageMetadata | Where-Object DocumentKind -EQ 'PackageUpdate').Count -gt 0
+  $HasSidecarData = $Layout.CookieKind -eq 'Data' -or $SidecarCandidates.Count -gt 0
+  $HasPackageMetadata = $PackageMetadata.Count -gt 0
+  $AllDeclaredEmpty = $HasPackageMetadata -and $DeclaredArchives.Count -eq 0 -and -not $HasDynamicDownloadableArchive
+  $Availability = if ($EmbeddedArchiveCount -gt 0) {
+    'Embedded'
+  } elseif ($HasSidecarData) {
+    'SidecarData'
+  } elseif ($HasOnlinePackages) {
+    'OnlinePackages'
+  } elseif ($DeclaredArchives.Count -gt 0 -or -not $HasPackageMetadata) {
+    'MissingFiles'
+  } elseif ($AllDeclaredEmpty) {
+    'IntentionallyEmpty'
+  } else {
+    'MissingFiles'
+  }
+
+  [pscustomobject][ordered]@{
+    Availability                  = $Availability
+    EmbeddedPackageArchiveCount   = $EmbeddedArchiveCount
+    DeclaredPackageArchiveCount   = $DeclaredArchives.Count
+    HasOnlinePackages             = $HasOnlinePackages
+    HasSidecarData                = $HasSidecarData
+    HasMissingFiles               = $Availability -eq 'MissingFiles'
+    IsIntentionallyEmpty          = $Availability -eq 'IntentionallyEmpty'
+    SidecarCandidates             = [string[]]$SidecarCandidates.ToArray()
+    RepositoryUrls                = [string[]]$RepositoryUrl
+    DeclaredArchiveReferences     = [object[]]$DeclaredArchives
+    MissingArchiveReferences      = if ($Availability -eq 'MissingFiles') { [object[]]$DeclaredArchives } else { [object[]]@() }
+    HasDynamicDownloadableArchive = $HasDynamicDownloadableArchive
   }
 }
 
@@ -1619,12 +2837,15 @@ function Resolve-QtInstallerFrameworkFormatProfile {
   <#
   .SYNOPSIS
     Select a catalog profile from explicit version and validated index structure.
+  .PARAMETER Stream
+    Caller-owned stream used by every candidate package-index route.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory)][pscustomobject]$Layout,
-    [Parameter(Mandatory)][pscustomobject]$VersionEvidence
+    [Parameter(Mandatory)][pscustomobject]$VersionEvidence,
+    [System.IO.Stream]$Stream
   )
 
   $ComparableVersion = ConvertTo-QtInstallerFrameworkComparableVersion -Version $VersionEvidence.FrameworkVersion
@@ -1658,7 +2879,7 @@ function Resolve-QtInstallerFrameworkFormatProfile {
   foreach ($Candidate in $Candidates) {
     $HandlerName = Get-QtInstallerFrameworkRouteHandler -Category PackageIndex -Route $Candidate.PackageIndexRoute
     try {
-      $Collections = @(& $HandlerName -Path $Path -Layout $Layout)
+      $Collections = @(& $HandlerName -Path $Path -Layout $Layout -Stream $Stream)
       $Validated.Add([pscustomobject]@{ Profile = $Candidate; Collections = $Collections; SelectionEvidence = 'Catalog version and complete package-index validation' })
     } catch {
       if ($SelectedProfile) { throw }
@@ -1671,13 +2892,10 @@ function Resolve-QtInstallerFrameworkFormatProfile {
     # launcher, use source-defined configuration key generations to disambiguate the meaning of
     # the otherwise byte-compatible primary index.
     $ConfigText = [Text.StringBuilder]::new()
-    $Stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-    try {
-      foreach ($Segment in @($Layout.MetaResourceSegments)) {
-        if ($Segment.Length -gt $QTIFW_MAX_TEXT_EVIDENCE_BYTES) { continue }
-        $null = $ConfigText.Append([Text.Encoding]::Latin1.GetString((Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Segment.Start -Count $Segment.Length)))
-      }
-    } finally { $Stream.Dispose() }
+    foreach ($Segment in @($Layout.MetaResourceSegments)) {
+      if ($Segment.Length -gt $QTIFW_MAX_TEXT_EVIDENCE_BYTES) { continue }
+      $null = $ConfigText.Append([Text.Encoding]::Latin1.GetString((Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Segment.Start -Count $Segment.Length)))
+    }
     $HasLegacyKeys = $ConfigText.ToString() -match 'Uninstaller(Name|IniFile)'
     $HasModernKeys = $ConfigText.ToString() -match 'MaintenanceTool(Name|IniFile)|ProductUUID|DisableCommandLineInterface'
     $SelectedGeneration = if ($HasLegacyKeys -and -not $HasModernKeys) {
@@ -1708,17 +2926,23 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
     Resolved path to the installer or separate binary-content file.
   .PARAMETER Layout
     Validated common binary-content trailer and rebased segment ranges.
+  .PARAMETER Stream
+    Caller-owned stream shared by all route readers.
+  .PARAMETER PELayout
+    Cached PE layout, or null for DAT content.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)][pscustomobject]$Layout
+    [Parameter(Mandatory)][pscustomobject]$Layout,
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [AllowNull()][pscustomobject]$PELayout
   )
 
-  $VersionEvidence = Get-QtInstallerFrameworkVersionEvidence -Path $Path -Layout $Layout
+  $VersionEvidence = Get-QtInstallerFrameworkVersionEvidence -Path $Path -Layout $Layout -Stream $Stream -PELayout $PELayout
   $ResolutionError = $null
   try {
-    $Resolution = Resolve-QtInstallerFrameworkFormatProfile -Path $Path -Layout $Layout -VersionEvidence $VersionEvidence
+    $Resolution = Resolve-QtInstallerFrameworkFormatProfile -Path $Path -Layout $Layout -VersionEvidence $VersionEvidence -Stream $Stream
   } catch {
     $ResolutionError = $_.Exception.Message
     $ComparableVersion = ConvertTo-QtInstallerFrameworkComparableVersion -Version $VersionEvidence.FrameworkVersion
@@ -1728,7 +2952,7 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
   $Operations = @()
   if (-not $ResolutionError) {
     try {
-      $Operations = @(Get-QtInstallerFrameworkOperation -Path $Path -Layout $Layout)
+      $Operations = @(Get-QtInstallerFrameworkOperation -Path $Path -Layout $Layout -Stream $Stream)
     } catch {
       $ResolutionError = "The performed-operation route is malformed: $($_.Exception.Message)"
     }
@@ -1755,15 +2979,24 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
   if ($ResolutionError) { $Warnings.Add("The Qt IFW format route is unsupported or malformed: $ResolutionError") }
   if ($Layout.MagicMarkerName -ne 'Installer') { $Warnings.Add("The Qt IFW media role is '$($Layout.MagicMarkerName)', not Installer; manifest metadata projection is diagnostic only.") }
 
-  $EmbeddedPackageArchiveCount = 0
-  foreach ($Collection in @($Resolution.Collections)) {
-    foreach ($Resource in @($Collection.Resources)) {
-      if ([string]$Resource.Name -match $QTIFW_PACKAGE_ARCHIVE_PATTERN) { $EmbeddedPackageArchiveCount++ }
-    }
+  $MetadataResources = @()
+  $TextResources = @()
+  if (-not $ResolutionError) {
+    $MetadataHandler = Get-QtInstallerFrameworkRouteHandler -Category Metadata -Route $SelectedProfile.MetadataRoute
+    $MetadataResources = @(& $MetadataHandler -Path $Path -Layout $Layout -Collection @($Resolution.Collections) -PackageIndexRoute $SelectedProfile.PackageIndexRoute -Stream $Stream)
+    $TextResources = @(Get-QtInstallerFrameworkMetadataTextResource -Path $Path -Layout $Layout -Collection @($Resolution.Collections) -PackageIndexRoute $SelectedProfile.PackageIndexRoute -Stream $Stream)
   }
-  $PayloadAvailability = if ($EmbeddedPackageArchiveCount -gt 0) { 'Embedded' } else { 'ExternalOrUnavailable' }
-  if (-not $ResolutionError -and $PayloadAvailability -eq 'ExternalOrUnavailable') {
-    $Warnings.Add('No embedded package archive was indexed; package data is external, downloadable, or unavailable in this media.')
+  $PackageMetadata = @(Get-QtInstallerFrameworkPackageManifestInfo -Resource $MetadataResources)
+  $RepositoryUrls = @(Get-QtInstallerFrameworkRepositoryUrl -Resource $MetadataResources)
+  $HasDynamicDownloadableArchive = @($TextResources | Where-Object { [string]$_.Text -match '\baddDownloadableArchive\s*\(' }).Count -gt 0
+  $PayloadInfo = Get-QtInstallerFrameworkPayloadAvailabilityInfo -Path $Path -Layout $Layout -Collection @($Resolution.Collections) -PackageMetadata $PackageMetadata -RepositoryUrl $RepositoryUrls -HasDynamicDownloadableArchive $HasDynamicDownloadableArchive
+  if (-not $ResolutionError) {
+    switch ($PayloadInfo.Availability) {
+      'OnlinePackages' { $Warnings.Add('Package payloads are supplied by the configured online repository and are not embedded in this media.') }
+      'SidecarData' { $Warnings.Add('Package payloads are stored in a separate Qt IFW DAT sidecar; provide it to Expand-QtInstallerFramework with -DataPath.') }
+      'MissingFiles' { $Warnings.Add('Package metadata declares or implies external payload files, but no embedded, sidecar, or online repository source was resolved.') }
+      'IntentionallyEmpty' { $Warnings.Add('Package metadata is present but declares no package archives; this media is intentionally payload-free.') }
+    }
   }
 
   if ($VersionEvidence.FrameworkVersion -and $VersionEvidence.PEFileVersion) {
@@ -1773,7 +3006,7 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
       $Warnings.Add("The embedded IFW version '$($VersionEvidence.FrameworkVersion)' conflicts with PE FileVersion '$($VersionEvidence.PEFileVersion)'; the embedded source marker takes precedence.")
     }
   }
-  $PESubsystem = try { Get-QtInstallerFrameworkPESubsystemInfo -Path $Path } catch { $null }
+  $PESubsystem = try { Get-QtInstallerFrameworkPESubsystemInfo -Path $Path -PELayout $PELayout } catch { $null }
 
   [pscustomobject][ordered]@{
     Path                         = $Path
@@ -1799,7 +3032,10 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
     SupportsProductUuid          = [bool]$SelectedProfile.SupportsProductUuid
     SupportsCommandLineInterface = [bool]$SelectedProfile.SupportsCommandLineInterface
     SupportsLibArchive           = [bool]$SelectedProfile.SupportsLibArchive
-    PayloadAvailability          = $PayloadAvailability
+    PayloadAvailability          = $PayloadInfo.Availability
+    PayloadAvailabilityEvidence  = $PayloadInfo
+    PackageMetadata              = [object[]]$PackageMetadata
+    RepositoryUrls               = [string[]]$RepositoryUrls
     Capabilities                 = [pscustomobject]@{
       ProductUuid          = [bool]$SelectedProfile.SupportsProductUuid
       CommandLineInterface = [bool]$SelectedProfile.SupportsCommandLineInterface
@@ -1814,7 +3050,8 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
       MagicCookie                 = $Layout.MagicCookie
       PrimaryIndexSegment         = $Layout.PrimaryIndexSegment
       CollectionCount             = @($Resolution.Collections).Count
-      EmbeddedPackageArchiveCount = $EmbeddedPackageArchiveCount
+      EmbeddedPackageArchiveCount = $PayloadInfo.EmbeddedPackageArchiveCount
+      DeclaredPackageArchiveCount = $PayloadInfo.DeclaredPackageArchiveCount
       OperationCount              = $Operations.Count
       ProfileSelection            = $Resolution.SelectionEvidence
     }
@@ -1822,6 +3059,8 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
     Layout                       = $Layout
     PackageCollections           = @($Resolution.Collections)
     Operations                   = @($Operations)
+    MetadataResources            = @($MetadataResources)
+    TextResources                = @($TextResources)
   }
 }
 
@@ -1831,19 +3070,25 @@ function Get-QtInstallerFrameworkFormatInfo {
     Identify the Qt IFW binary generation, framework version, media role, and parser routes.
   .PARAMETER Path
     Path to a Qt IFW executable or DAT binary.
+  .OUTPUTS
+    Format routes, version evidence, package declarations, repository URLs, and precise payload availability without internal stream-bound parse objects.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process {
     $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
-    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
-    if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
-    $Result = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout
-    # Internal parse objects are deliberately omitted from the public diagnostic contract.
-    $Result.PSObject.Properties.Remove('Layout')
-    $Result.PSObject.Properties.Remove('PackageCollections')
-    $Result.PSObject.Properties.Remove('Operations')
-    return $Result
+    $Stream = [IO.File]::Open($InstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+      $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath -Stream $Stream
+      if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
+      $PELayout = try { Get-PELayout -Stream $Stream } catch { $null }
+      $Result = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout -Stream $Stream -PELayout $PELayout
+      # Internal parse objects are deliberately omitted from the public diagnostic contract.
+      foreach ($PropertyName in @('Layout', 'PackageCollections', 'Operations', 'MetadataResources', 'TextResources')) { $Result.PSObject.Properties.Remove($PropertyName) }
+      return $Result
+    } finally {
+      $Stream.Dispose()
+    }
   }
 }
 
@@ -1857,21 +3102,40 @@ function Get-QtInstallerFrameworkAnalysisContext {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
   $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
-  $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath
-  $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout
-  if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
-  $Collections = @($FormatInfo.PackageCollections)
-  $MetadataHandler = Get-QtInstallerFrameworkRouteHandler -Category Metadata -Route $FormatInfo.MetadataRoute
-  $MetadataResources = @(& $MetadataHandler -Path $InstallerPath -Layout $Layout -Collection $Collections -PackageIndexRoute $FormatInfo.PackageIndexRoute)
-  $TextResources = @(Get-QtInstallerFrameworkMetadataTextResource -Path $InstallerPath -Layout $Layout -Collection $Collections -PackageIndexRoute $FormatInfo.PackageIndexRoute)
-  [pscustomobject]@{
-    Path               = $InstallerPath
-    Layout             = $Layout
-    FormatInfo         = $FormatInfo
-    PackageCollections = $Collections
-    Operations         = @($FormatInfo.Operations)
-    MetadataResources  = $MetadataResources
-    TextResources      = $TextResources
+  $Stream = [IO.File]::Open($InstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath -Stream $Stream
+    $PELayout = try { Get-PELayout -Stream $Stream } catch { $null }
+    $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout -Stream $Stream -PELayout $PELayout
+    if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
+    $MetadataResources = @($FormatInfo.MetadataResources)
+    $InstallerXmlResource = @($MetadataResources | Where-Object { $_.Root -eq 'Installer' } | Select-Object -First 1)
+    $InstallerConfig = if ($InstallerXmlResource) {
+      $ConfigHandler = Get-QtInstallerFrameworkRouteHandler -Category Config -Route $FormatInfo.ConfigRoute
+      & $ConfigHandler -Xml $InstallerXmlResource[0].Xml
+    } else {
+      $null
+    }
+    if ($InstallerConfig -and $FormatInfo.PackageIndexRoute -eq 'component-index-v1' -and [string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
+      $InstallerConfig.ProductCode = $InstallerConfig.PackageName
+    }
+    $InterfaceHandler = Get-QtInstallerFrameworkRouteHandler -Category Interface -Route $FormatInfo.InterfaceRoute
+    $InterfaceInfo = & $InterfaceHandler -Path $InstallerPath -Layout $Layout -InstallerConfig $InstallerConfig -FormatInfo $FormatInfo -Stream $Stream -PELayout $PELayout
+    [pscustomobject]@{
+      Path                 = $InstallerPath
+      Layout               = $Layout
+      PELayout             = $PELayout
+      FormatInfo           = $FormatInfo
+      PackageCollections   = @($FormatInfo.PackageCollections)
+      Operations           = @($FormatInfo.Operations)
+      MetadataResources    = $MetadataResources
+      TextResources        = @($FormatInfo.TextResources)
+      InstallerXmlResource = if ($InstallerXmlResource) { $InstallerXmlResource[0] } else { $null }
+      InstallerConfig      = $InstallerConfig
+      InterfaceInfo        = $InterfaceInfo
+    }
+  } finally {
+    $Stream.Dispose()
   }
 }
 
@@ -1885,10 +3149,20 @@ function Get-QtInstallerFrameworkPESubsystemInfo {
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The path to the Qt Installer Framework installer')]
-    [string]$Path
+    [string]$Path,
+
+    [AllowNull()][pscustomobject]$PELayout
   )
 
-  Get-PESubsystemInfo -Path $Path
+  if (-not $PELayout) { return Get-PESubsystemInfo -Path $Path }
+  [pscustomobject]@{
+    Path        = $Path
+    Subsystem   = $PELayout.Subsystem
+    Name        = $PELayout.SubsystemName
+    IsGui       = $PELayout.Subsystem -eq 2
+    IsConsole   = $PELayout.Subsystem -in 3, 5, 7
+    IsWindowsPE = $PELayout.Subsystem -in 2, 3
+  }
 }
 
 function Get-QtInstallerFrameworkInterfaceInfo {
@@ -1901,6 +3175,10 @@ function Get-QtInstallerFrameworkInterfaceInfo {
     The parsed IFW binary-content layout
   .PARAMETER InstallerConfig
     The parsed installer config metadata
+  .PARAMETER Stream
+    Optional caller-owned stream used for bounded launcher marker scanning.
+  .PARAMETER PELayout
+    Optional cached PE layout used for subsystem evidence.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1915,7 +3193,12 @@ function Get-QtInstallerFrameworkInterfaceInfo {
     [pscustomobject]$InstallerConfig,
 
     [AllowNull()]
-    [pscustomobject]$FormatInfo
+    [pscustomobject]$FormatInfo,
+
+    [System.IO.Stream]$Stream,
+
+    [AllowNull()]
+    [pscustomobject]$PELayout
   )
 
   if (-not $Layout) { $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $Path }
@@ -1924,7 +3207,7 @@ function Get-QtInstallerFrameworkInterfaceInfo {
   $FoundMarkers = [System.Collections.Generic.List[string]]::new()
   $Warnings = [System.Collections.Generic.List[string]]::new()
   $PESubsystemInfo = try {
-    Get-QtInstallerFrameworkPESubsystemInfo -Path $Path
+    Get-QtInstallerFrameworkPESubsystemInfo -Path $Path -PELayout $PELayout
   } catch {
     $null
   }
@@ -1937,13 +3220,15 @@ function Get-QtInstallerFrameworkInterfaceInfo {
     $MarkerVariant = 'Unknown'
     $Warnings.Add("The Qt IFW executable prefix is outside the $QTIFW_MAX_EXECUTABLE_SCAN_BYTES-byte static scan limit.")
   } else {
-    $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $OwnsStream = -not $PSBoundParameters.ContainsKey('Stream')
+    if ($OwnsStream) { $Stream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+    $OriginalPosition = $Stream.Position
     try {
       # CLI literals are compiled into the launcher. Stop at EndOfExecutable so packaged files cannot create false positives.
       $MarkerMatches = @(Find-QtInstallerFrameworkAsciiMarker -Stream $Stream -Length $Layout.EndOfExecutable -Marker @($RequiredOptionMarkers + $CommandMarkers))
       if ($MarkerMatches) { $FoundMarkers.AddRange([string[]]$MarkerMatches) }
     } finally {
-      $Stream.Dispose()
+      if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
     }
 
     $HasRequiredOptions = @($RequiredOptionMarkers | Where-Object { $FoundMarkers -contains $_ }).Count -eq $RequiredOptionMarkers.Count
@@ -2199,12 +3484,101 @@ function Get-QtInstallerFrameworkScopeInfo {
   }
 }
 
+function Get-QtInstallerFrameworkAppsAndFeaturesEffectInfo {
+  <#
+  .SYNOPSIS
+    Reconstruct the Windows maintenance-tool ARP registration defined by Qt IFW.
+  .DESCRIPTION
+    PackageManagerCorePrivate::registerMaintenanceTool writes this entry directly rather than recording it as an UpdateOperation. The result is kept separate from performed-operation effects while sharing the same normalized registry-write shape.
+  .PARAMETER InstallerConfig
+    Parsed installer configuration containing ProductUUID, product metadata, target directory, and maintenance-tool settings.
+  .PARAMETER Scope
+    Installed scope that selects HKCU or HKLM.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [AllowNull()][psobject]$InstallerConfig,
+    [Parameter(Mandatory)][ValidateSet('user', 'machine')][string]$Scope
+  )
+
+  $Effects = [Collections.Generic.List[object]]::new()
+  $RegistryWrites = [Collections.Generic.List[object]]::new()
+  $Entries = [Collections.Generic.List[object]]::new()
+  $Warnings = [Collections.Generic.List[string]]::new()
+  if (-not $InstallerConfig) {
+    return [pscustomobject][ordered]@{ Effects = @(); RegistryWrites = @(); Entries = @(); Warnings = @() }
+  }
+
+  $ProductCode = [string]$InstallerConfig.ProductCode
+  if ([string]::IsNullOrWhiteSpace($ProductCode)) {
+    return [pscustomobject][ordered]@{ Effects = @(); RegistryWrites = @(); Entries = @(); Warnings = [string[]]$Warnings.ToArray() }
+  }
+
+  $Root = if ($Scope -eq 'machine') { 'HKLM' } else { 'HKCU' }
+  $Key = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductCode"
+  $MaintenanceToolName = [string]$InstallerConfig.MaintenanceToolName
+  if ([string]::IsNullOrWhiteSpace($MaintenanceToolName)) { $MaintenanceToolName = 'maintenancetool' }
+  if (-not $MaintenanceToolName.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { $MaintenanceToolName += '.exe' }
+  $MaintenanceTool = if ([string]::IsNullOrWhiteSpace([string]$InstallerConfig.TargetDir)) { $MaintenanceToolName } else { "$($InstallerConfig.TargetDir.TrimEnd('/','\'))\$MaintenanceToolName" }
+  $SyntheticOperation = [pscustomobject]@{ Index = -1; Name = 'MaintenanceRegistration' }
+
+  $Values = [ordered]@{
+    DisplayName     = $InstallerConfig.DisplayName
+    DisplayVersion  = $InstallerConfig.DisplayVersion
+    DisplayIcon     = $MaintenanceTool
+    Publisher       = $InstallerConfig.Publisher
+    UrlInfoAbout    = $InstallerConfig.ProductUrl
+    Comments        = $InstallerConfig.Title
+    InstallLocation = $InstallerConfig.TargetDir
+    UninstallString = "`"$MaintenanceTool`" --start-uninstaller"
+    NoModify        = if ((ConvertTo-QtInstallerFrameworkBoolean -Value $InstallerConfig.SupportsModify) -eq $false) { 1 } else { 0 }
+    NoRepair        = 1
+  }
+  foreach ($Pair in $Values.GetEnumerator()) {
+    if ($null -eq $Pair.Value -or ($Pair.Value -is [string] -and [string]::IsNullOrWhiteSpace($Pair.Value))) { continue }
+    $Type = if ($Pair.Key -in @('NoModify', 'NoRepair')) { 'DWord' } else { 'String' }
+    $Write = New-QtInstallerFrameworkRegistryEffect -Operation $SyntheticOperation -Root $Root -Key $Key -Name $Pair.Key -Value $Pair.Value -Type $Type
+    $RegistryWrites.Add($Write)
+  }
+
+  $Entry = [pscustomobject][ordered]@{
+    ProductCode    = $ProductCode
+    DisplayName    = $InstallerConfig.DisplayName
+    DisplayVersion = $InstallerConfig.DisplayVersion
+    Publisher      = $InstallerConfig.Publisher
+    InstallerType  = 'exe'
+  }
+  $Entries.Add($Entry)
+  $Effects.Add([pscustomobject][ordered]@{
+      Category        = 'AppsAndFeatures'
+      Action          = 'RegisterMaintenanceTool'
+      Root            = $Root
+      Key             = $Key
+      ProductCode     = $ProductCode
+      DisplayName     = $InstallerConfig.DisplayName
+      DisplayVersion  = $InstallerConfig.DisplayVersion
+      Publisher       = $InstallerConfig.Publisher
+      InstallLocation = $InstallerConfig.TargetDir
+      UninstallString = $Values.UninstallString
+      Source          = 'PackageManagerCorePrivate::registerMaintenanceTool'
+    })
+
+  [pscustomobject][ordered]@{
+    Effects        = [object[]]$Effects.ToArray()
+    RegistryWrites = [object[]]$RegistryWrites.ToArray()
+    Entries        = [object[]]$Entries.ToArray()
+    Warnings       = [string[]]$Warnings.ToArray()
+  }
+}
+
 function Get-QtInstallerFrameworkInfo {
   <#
   .SYNOPSIS
     Get static metadata from a Qt Installer Framework installer
   .PARAMETER Path
     The path to the Qt Installer Framework installer
+  .OUTPUTS
+    Static installer metadata plus package-location evidence, decoded performed-operation effects, maintenance ARP evidence, KnownInstallerValues, verbatim JavaScriptResources with assignment-site values, and JavaScriptAnalysisInstructions. Returned JavaScript is untrusted evidence and is never executed.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2224,26 +3598,25 @@ function Get-QtInstallerFrameworkInfo {
     # evidence from one shared config object.
     $MetadataResources = @($Context.MetadataResources)
     $TextResources = @($Context.TextResources)
-    $InstallerXmlResource = @($MetadataResources | Where-Object { $_.Root -eq 'Installer' } | Select-Object -First 1)
-    $InstallerConfig = if ($InstallerXmlResource) {
-      $ConfigHandler = Get-QtInstallerFrameworkRouteHandler -Category Config -Route $FormatInfo.ConfigRoute
-      & $ConfigHandler -Xml $InstallerXmlResource[0].Xml
-    } else {
-      $null
-    }
-    if ($InstallerConfig -and $FormatInfo.PackageIndexRoute -eq 'component-index-v1' -and [string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
-      # Qt IFW 1.x uses ProductName verbatim as the uninstall registry subkey. ProductUUID was
-      # introduced with the 2.0 configuration generation.
-      $InstallerConfig.ProductCode = $InstallerConfig.PackageName
-    }
-    $InterfaceHandler = Get-QtInstallerFrameworkRouteHandler -Category Interface -Route $FormatInfo.InterfaceRoute
-    $InterfaceInfo = & $InterfaceHandler -Path $File.FullName -Layout $Layout -InstallerConfig $InstallerConfig -FormatInfo $FormatInfo
+    $InstallerXmlResource = $Context.InstallerXmlResource
+    $InstallerConfig = $Context.InstallerConfig
+    $InterfaceInfo = $Context.InterfaceInfo
     $InstallLocationInfo = Get-QtInstallerFrameworkInstallLocationInfo -InstallerConfig $InstallerConfig -InterfaceInfo $InterfaceInfo
     $UpgradeInfo = Get-QtInstallerFrameworkUpgradeInfo -InstallerConfig $InstallerConfig -InstallLocationInfo $InstallLocationInfo
     $ScopeInfo = Get-QtInstallerFrameworkScopeInfo -InstallerConfig $InstallerConfig -TextResource $TextResources -InterfaceInfo $InterfaceInfo
+    $KnownInstallerValues = if ($InstallerConfig) { $InstallerConfig.RawValues } else { [ordered]@{} }
+    $JavaScriptResources = @(Get-QtInstallerFrameworkJavaScriptInfo -TextResource $TextResources -InstallerValues $KnownInstallerValues)
+    $EffectScope = if ($ScopeInfo.Scope -in @('user', 'machine')) { $ScopeInfo.Scope } else { 'user' }
+    $OperationEffectInfo = Get-QtInstallerFrameworkOperationEffectInfo -Operation $Context.Operations -Scope $EffectScope
+    $AppsAndFeaturesEffectInfo = Get-QtInstallerFrameworkAppsAndFeaturesEffectInfo -InstallerConfig $InstallerConfig -Scope $EffectScope
+    $RegistryWrites = [object[]]@($OperationEffectInfo.RegistryWrites) + [object[]]@($AppsAndFeaturesEffectInfo.RegistryWrites)
+    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
 
     $Warnings = [System.Collections.Generic.List[string]]::new()
     foreach ($Warning in @($FormatInfo.Warnings)) { $Warnings.Add([string]$Warning) }
+    foreach ($Warning in @($OperationEffectInfo.Warnings)) { $Warnings.Add([string]$Warning) }
+    foreach ($Warning in @($AppsAndFeaturesEffectInfo.Warnings)) { $Warnings.Add([string]$Warning) }
+    foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add([string]$Warning) }
     if (-not $InstallerConfig) {
       $Warnings.Add('No IFW installer-config/config.xml metadata was recovered from the embedded resources.')
     } elseif ($FormatInfo.PackageIndexRoute -ne 'component-index-v1' -and [string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
@@ -2272,6 +3645,7 @@ function Get-QtInstallerFrameworkInfo {
       WritesAppsAndFeaturesEntry           = $true
       AppsAndFeaturesProductCode           = $InstallerConfig.ProductCode
       AppsAndFeaturesInstallerType         = 'exe'
+      AppsAndFeaturesEntries               = [object[]]$AppsAndFeaturesEffectInfo.Entries
       Warnings                             = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
       UnresolvedFields                     = [string[]]@()
       BinaryMarker                         = $Layout.MagicMarkerName
@@ -2297,6 +3671,9 @@ function Get-QtInstallerFrameworkInfo {
       SupportsCommandLineInterface         = $FormatInfo.SupportsCommandLineInterface
       SupportsLibArchive                   = $FormatInfo.SupportsLibArchive
       PayloadAvailability                  = $FormatInfo.PayloadAvailability
+      PayloadAvailabilityEvidence          = $FormatInfo.PayloadAvailabilityEvidence
+      PackageMetadata                      = [object[]]$FormatInfo.PackageMetadata
+      RepositoryUrls                       = [string[]]$FormatInfo.RepositoryUrls
       FormatCapabilities                   = $FormatInfo.Capabilities
       IsFallback                           = $FormatInfo.IsFallback
       FormatEvidence                       = $FormatInfo.Evidence
@@ -2333,13 +3710,30 @@ function Get-QtInstallerFrameworkInfo {
       MaintenanceToolName                  = $InstallerConfig.MaintenanceToolName
       MaintenanceToolIniFile               = $InstallerConfig.MaintenanceToolIniFile
       SupportsModify                       = $InstallerConfig.SupportsModify
-      InstallerConfigSource                = if ($InstallerXmlResource) { $InstallerXmlResource[0].Source } else { $null }
+      InstallerConfigSource                = if ($InstallerXmlResource) { $InstallerXmlResource.Source } else { $null }
       MetadataResourceCount                = $Layout.MetaResourceCount
       ResourceCollectionCount              = @($Context.PackageCollections).Count
       OperationCount                       = @($Context.Operations).Count
       Operations                           = @($Context.Operations)
+      OperationEffects                     = [object[]]$OperationEffectInfo.Effects
+      FileSystemEffects                    = [object[]]$OperationEffectInfo.FileSystemEffects
+      RegistryWrites                       = $RegistryWrites
+      RegistryAssociationInfo              = $RegistryAssociationInfo
+      Protocols                            = [string[]]$RegistryAssociationInfo.Protocols
+      FileExtensions                       = [string[]]$RegistryAssociationInfo.FileExtensions
+      ProtocolEffects                      = [object[]]$RegistryAssociationInfo.ProtocolAssociations
+      FileAssociationEffects               = [object[]]$RegistryAssociationInfo.FileExtensionAssociations
+      ShortcutEffects                      = [object[]]$OperationEffectInfo.ShortcutEffects
+      EnvironmentEffects                   = [object[]]$OperationEffectInfo.EnvironmentEffects
+      ExecutionEffects                     = [object[]]$OperationEffectInfo.ExecutionEffects
+      AppsAndFeaturesEffects               = [object[]]$AppsAndFeaturesEffectInfo.Effects
       MetadataRoots                        = @($MetadataResources | Select-Object -ExpandProperty Root -Unique)
       RawInstallerConfig                   = $InstallerConfig.RawValues
+      KnownInstallerValues                 = $KnownInstallerValues
+      JavaScriptCount                      = $JavaScriptResources.Count
+      RequiresJavaScriptReview             = $JavaScriptResources.Count -gt 0
+      JavaScriptResources                  = $JavaScriptResources
+      JavaScriptAnalysisInstructions       = [string[]]$Script:QtInstallerFrameworkJavaScriptAnalysisInstructions
       ParserVersionInfo                    = [pscustomobject]@{
         Parser                = 'Dumplings.QtInstallerFramework'
         BinaryLayout          = $FormatInfo.FormatGeneration

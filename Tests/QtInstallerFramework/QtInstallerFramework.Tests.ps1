@@ -123,9 +123,11 @@ BeforeAll {
     param(
       [string]$Name,
       [string]$InstallerXml,
+      [string]$ScriptText,
       [switch]$GuiOnly,
       [string]$FrameworkVersion,
       [object[]]$Operation = @(),
+      [object[]]$PackageResource = @(),
       [ValidateSet('Installer', 'Uninstaller', 'Updater', 'PackageManager')]
       [string]$MediaRole = 'Installer',
       [ValidateSet('Executable', 'Data')]
@@ -147,6 +149,14 @@ BeforeAll {
     $MetaStart = $Bytes.Count
     $MetaBytes = [byte[]](New-TestQtRccResource -InstallerXml $InstallerXml)
     $Bytes.AddRange([byte[]]$MetaBytes)
+    $MetaSegments = [System.Collections.Generic.List[object]]::new()
+    $MetaSegments.Add([pscustomobject]@{ Start = $MetaStart; Length = $MetaBytes.Length })
+    if ($PSBoundParameters.ContainsKey('ScriptText')) {
+      $ScriptStart = $Bytes.Count
+      $ScriptBytes = [System.Text.Encoding]::UTF8.GetBytes($ScriptText)
+      $Bytes.AddRange($ScriptBytes)
+      $MetaSegments.Add([pscustomobject]@{ Start = $ScriptStart; Length = $ScriptBytes.Length })
+    }
 
     $OperationsStart = $Bytes.Count
     Add-TestInt64LE -Bytes $Bytes -Value $Operation.Count
@@ -157,19 +167,54 @@ BeforeAll {
     Add-TestInt64LE -Bytes $Bytes -Value $Operation.Count
     $OperationsLength = $Bytes.Count - $OperationsStart
 
+    # BinaryContent reserves one qint64 resource-manager field before the collection data.
     Add-TestInt64LE -Bytes $Bytes -Value 0
+    $ResourceSegments = [Collections.Generic.List[object]]::new()
+    foreach ($PackageResourceItem in @($PackageResource)) {
+      $ResourceBytes = [byte[]]$PackageResourceItem.Bytes
+      $ResourceStart = $Bytes.Count
+      $Bytes.AddRange($ResourceBytes)
+      $ResourceSegments.Add([pscustomobject]@{
+          Collection = [string]$PackageResourceItem.Collection
+          Name       = [string]$PackageResourceItem.Name
+          Start      = $ResourceStart
+          Length     = $ResourceBytes.Length
+        })
+    }
+
+    $CollectionSegments = [Collections.Generic.List[object]]::new()
+    foreach ($CollectionName in @($ResourceSegments | Select-Object -ExpandProperty Collection -Unique)) {
+      $CollectionStart = $Bytes.Count
+      $CollectionResources = @($ResourceSegments | Where-Object Collection -CEQ $CollectionName)
+      Add-TestInt64LE -Bytes $Bytes -Value $CollectionResources.Count
+      foreach ($Resource in $CollectionResources) {
+        Add-TestQtByteArray -Bytes $Bytes -Value $Resource.Name
+        Add-TestInt64LE -Bytes $Bytes -Value ($Resource.Start - $EndOfExecutable)
+        Add-TestInt64LE -Bytes $Bytes -Value $Resource.Length
+      }
+      Add-TestInt64LE -Bytes $Bytes -Value $CollectionResources.Count
+      $CollectionSegments.Add([pscustomobject]@{ Name = $CollectionName; Start = $CollectionStart; Length = $Bytes.Count - $CollectionStart })
+    }
+
     $CollectionIndexStart = $Bytes.Count
-    Add-TestInt64LE -Bytes $Bytes -Value 0
-    Add-TestInt64LE -Bytes $Bytes -Value 0
+    Add-TestInt64LE -Bytes $Bytes -Value $CollectionSegments.Count
+    foreach ($Collection in $CollectionSegments) {
+      Add-TestQtByteArray -Bytes $Bytes -Value $Collection.Name
+      Add-TestInt64LE -Bytes $Bytes -Value ($Collection.Start - $EndOfExecutable)
+      Add-TestInt64LE -Bytes $Bytes -Value $Collection.Length
+    }
+    Add-TestInt64LE -Bytes $Bytes -Value $CollectionSegments.Count
     $CollectionIndexLength = $Bytes.Count - $CollectionIndexStart
 
     Add-TestInt64LE -Bytes $Bytes -Value ($CollectionIndexStart - $EndOfExecutable)
     Add-TestInt64LE -Bytes $Bytes -Value $CollectionIndexLength
-    Add-TestInt64LE -Bytes $Bytes -Value ($MetaStart - $EndOfExecutable)
-    Add-TestInt64LE -Bytes $Bytes -Value $MetaBytes.Length
+    foreach ($MetaSegment in $MetaSegments) {
+      Add-TestInt64LE -Bytes $Bytes -Value ($MetaSegment.Start - $EndOfExecutable)
+      Add-TestInt64LE -Bytes $Bytes -Value $MetaSegment.Length
+    }
     Add-TestInt64LE -Bytes $Bytes -Value ($OperationsStart - $EndOfExecutable)
     Add-TestInt64LE -Bytes $Bytes -Value $OperationsLength
-    Add-TestInt64LE -Bytes $Bytes -Value 1
+    Add-TestInt64LE -Bytes $Bytes -Value $MetaSegments.Count
 
     $BinaryContentSize = ($Bytes.Count + 24) - $EndOfExecutable
     Add-TestInt64LE -Bytes $Bytes -Value $BinaryContentSize
@@ -185,6 +230,66 @@ BeforeAll {
 
     [System.IO.File]::WriteAllBytes($FixturePath, $Bytes.ToArray())
     return $FixturePath
+  }
+
+  function New-TestQtPackageArchive {
+    param (
+      [Parameter(Mandatory)]
+      [ValidateSet('tar', 'tar.gz', 'tar.bz2', 'tar.xz', 'zip', '7z', 'qbsp')]
+      [string]$Format
+    )
+
+    $Payload = [Text.Encoding]::UTF8.GetBytes('Qt IFW package format regression')
+    $Path = Join-Path $TestDrive "qt-package.$Format"
+    switch ($Format) {
+      { $_ -in @('7z', 'qbsp') } {
+        # A small independently generated 7z archive. Qt IFW defines .qbsp as the same physical format.
+        $Bytes = [Convert]::FromBase64String('N3q8ryccAASYEnOLJAAAAAAAAABiAAAAAAAAAHPd8FsBAB9RdCBJRlcgcGFja2FnZSBmb3JtYXQgcmVncmVzc2lvbgABBAYAAQkkAAcLAQABISEBAAwgAAgKAe1s3BwAAAUBGQwAAAAAAAAAAAAAAAARGQBwAGEAeQBsAG8AYQBkAC4AdAB4AHQAAAAZAgAAFAoBAL7OmS7ILN0BFQYBACAAAAAAAA==')
+      }
+      'tar.bz2' {
+        $Bytes = [Convert]::FromBase64String('QlpoOTFBWSZTWdh/8TgAAEdfkdIAQAF/BAEgIoBvr95gBAAgAAAIIAB0ImptEMSB5Mggep6np6QaKZqNAAA0A0ARxp8Q2QAhG5AFAg+QYJzCpFxNueauEyFLHgQN4okwlLG4OggRQSPiCgLsAsjgaZDSk30L2E9ganX/M1urWrLNude1x2PBR2gUUI5F3JFOFCQ2H/xOAA==')
+      }
+      'tar.xz' {
+        $Bytes = [Convert]::FromBase64String('/Td6WFoAAATm1rRGAgAhARYAAAB0L+Wj4Af/AG1dADgYS5l1D0YIb9M6IJf02WKFmi3aKO3xv/1RoAfcREAIWBY7YuRX83OY1G+bEHL5X9GWDhFgfvllt5uh2DX02XyTmugrKBqBZerhFbMYXEPh6rgnXbFu8MUZAJpwbBvvClv3ZWxSez4s5W1EuQAAAAAA7LICCLnvjRkAAYkBgBAAADat9TaxxGf7AgAAAAAEWVo=')
+      }
+      default {
+        $TarStream = [IO.MemoryStream]::new()
+        $TarWriter = [System.Formats.Tar.TarWriter]::new($TarStream, $true)
+        $PayloadStream = [IO.MemoryStream]::new($Payload, $false)
+        try {
+          $Entry = [System.Formats.Tar.PaxTarEntry]::new([System.Formats.Tar.TarEntryType]::RegularFile, 'payload.txt')
+          $Entry.DataStream = $PayloadStream
+          $TarWriter.WriteEntry($Entry)
+        } finally {
+          $TarWriter.Dispose()
+          $PayloadStream.Dispose()
+        }
+        $TarBytes = $TarStream.ToArray()
+        $TarStream.Dispose()
+
+        if ($Format -eq 'tar') {
+          $Bytes = $TarBytes
+        } elseif ($Format -eq 'tar.gz') {
+          $CompressedStream = [IO.MemoryStream]::new()
+          $GZipStream = [IO.Compression.GZipStream]::new($CompressedStream, [IO.Compression.CompressionLevel]::SmallestSize, $true)
+          try { $GZipStream.Write($TarBytes, 0, $TarBytes.Length) } finally { $GZipStream.Dispose() }
+          $Bytes = $CompressedStream.ToArray()
+          $CompressedStream.Dispose()
+        } else {
+          $ZipStream = [IO.MemoryStream]::new()
+          $ZipArchive = [IO.Compression.ZipArchive]::new($ZipStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+          try {
+            $Entry = $ZipArchive.CreateEntry('payload.txt', [IO.Compression.CompressionLevel]::SmallestSize)
+            $EntryStream = $Entry.Open()
+            try { $EntryStream.Write($Payload, 0, $Payload.Length) } finally { $EntryStream.Dispose() }
+          } finally { $ZipArchive.Dispose() }
+          $Bytes = $ZipStream.ToArray()
+          $ZipStream.Dispose()
+        }
+      }
+    }
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+    return $Path
   }
 }
 
@@ -323,7 +428,7 @@ Describe 'Qt Installer Framework parser' {
       @{ Name = 'qt-ifw-3.2.2.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/3.2.2/QtInstallerFramework-win-x86.exe'; Version = '3.2.2'; Generation = 'BinaryContent'; Profile = 'ifw-3.1.2-3.x-binary-content' }
       @{ Name = 'qt-ifw-4.0.0.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/4.0.0/QtInstallerFramework-win-x86.exe'; Version = '4.0.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.0-4.1-cli' }
       @{ Name = 'qt-ifw-4.2.0.exe'; Url = 'https://download.qt.io/archive/qt-installer-framework/4.2.0/QtInstallerFramework-windows-x86-4.2.0.exe'; Version = '4.2.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.2-current-libarchive' }
-      @{ Name = 'qt-ifw-4.11.0.exe'; Url = 'https://download.qt.io/archive/online_installers/4.11/qt-online-installer-windows-x64-4.11.0.exe'; Version = '4.11.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.2-current-libarchive'; Payload = 'ExternalOrUnavailable' }
+      @{ Name = 'qt-ifw-4.11.0.exe'; Url = 'https://download.qt.io/archive/online_installers/4.11/qt-online-installer-windows-x64-4.11.0.exe'; Version = '4.11.0'; Generation = 'BinaryContent'; Profile = 'ifw-4.2-current-libarchive'; Payload = 'MissingFiles' }
     )
     foreach ($Case in $Cases) {
       $Fixture = Get-InstallerFixture -Name $Case.Name -Url $Case.Url
@@ -335,9 +440,61 @@ Describe 'Qt Installer Framework parser' {
       if ($Case.ContainsKey('Payload')) {
         $Info.PayloadAvailability | Should -Be $Case.Payload
         $Info.Evidence.EmbeddedPackageArchiveCount | Should -Be 0
-        $Info.Warnings | Should -Contain 'No embedded package archive was indexed; package data is external, downloadable, or unavailable in this media.'
+        $Info.Warnings | Should -Contain 'Package metadata declares or implies external payload files, but no embedded, sidecar, or online repository source was resolved.'
       }
     }
+  }
+
+  It 'Should restore a caller-owned stream after binary layout analysis' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-stream.exe' -FrameworkVersion '4.11.0' -InstallerXml '<Installer><Name>Example.Stream</Name><Version>1.0</Version></Installer>'
+    $Stream = [IO.File]::OpenRead($Fixture)
+    try {
+      $Stream.Position = 7
+      $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $Fixture -Stream $Stream
+      $Layout.CookieKind | Should -Be 'Executable'
+      $Stream.Position | Should -Be 7
+    } finally { $Stream.Dispose() }
+  }
+
+  It 'Should distinguish online, missing, intentionally empty, and sidecar package media' {
+    $Online = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-online.exe' -FrameworkVersion '4.11.0' -ScriptText '<Updates><PackageUpdate><Name>Example.Online.Component</Name><Version>2.3.4</Version><DownloadableArchives>content.7z</DownloadableArchives></PackageUpdate></Updates>' -InstallerXml @'
+<Installer><Name>Example.Online</Name><Version>1.0</Version><RemoteRepositories><Repository><Url>https://example.invalid/repository</Url></Repository></RemoteRepositories></Installer>
+'@
+    $Missing = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-missing.exe' -FrameworkVersion '4.11.0' -ScriptText '<Package><Name>Example.Missing</Name><Version>1.0.0</Version><DownloadableArchives>content.7z</DownloadableArchives></Package>' -InstallerXml '<Installer><Name>Example.Missing</Name><Version>1.0</Version></Installer>'
+    $Empty = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-empty.exe' -FrameworkVersion '4.11.0' -ScriptText '<Package><Name>Example.Empty</Name><Version>1.0.0</Version><Virtual>true</Virtual></Package>' -InstallerXml '<Installer><Name>Example.Empty</Name><Version>1.0</Version></Installer>'
+    $SidecarInstaller = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-sidecar.exe' -FrameworkVersion '4.11.0' -InstallerXml '<Installer><Name>Example.Sidecar</Name><Version>1.0</Version></Installer>'
+    $null = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-sidecar.dat' -FrameworkVersion '4.11.0' -CookieKind Data -InstallerXml '<Installer><Name>Example.Sidecar</Name><Version>1.0</Version></Installer>'
+
+    $OnlineInfo = Get-QtInstallerFrameworkFormatInfo -Path $Online
+    $OnlineInfo.PayloadAvailability | Should -Be 'OnlinePackages'
+    $OnlineInfo.RepositoryUrls | Should -Contain 'https://example.invalid/repository'
+    $OnlineInfo.PackageMetadata | Should -HaveCount 1
+    $OnlineInfo.PackageMetadata[0].ArchiveReferences[0].RelativePath | Should -Be 'Example.Online.Component/2.3.4content.7z'
+    (Get-QtInstallerFrameworkFormatInfo -Path $Missing).PayloadAvailability | Should -Be 'MissingFiles'
+    (Get-QtInstallerFrameworkFormatInfo -Path $Empty).PayloadAvailability | Should -Be 'IntentionallyEmpty'
+    (Get-QtInstallerFrameworkFormatInfo -Path $SidecarInstaller).PayloadAvailability | Should -Be 'SidecarData'
+  }
+
+  It 'Should extract package archives from paired DAT and local repository sources' {
+    $PackageArchive = New-TestQtPackageArchive -Format zip
+    $PackageBytes = [IO.File]::ReadAllBytes($PackageArchive)
+    $Installer = New-TestQtInstallerFrameworkFixture -Name 'external-content.exe' -FrameworkVersion '4.11.0' -ScriptText '<Package><Name>Example.Component</Name><Version>1.0.0</Version><DownloadableArchives>content.zip</DownloadableArchives></Package>' -InstallerXml '<Installer><Name>Example.External</Name><Version>1.0</Version></Installer>'
+    $Data = New-TestQtInstallerFrameworkFixture -Name 'external-content.dat' -FrameworkVersion '4.11.0' -CookieKind Data -PackageResource @([pscustomobject]@{ Collection = 'Example.Component'; Name = 'content.zip'; Bytes = $PackageBytes }) -InstallerXml '<Installer><Name>Example.External</Name><Version>1.0</Version></Installer>'
+    $DataDestination = Join-Path $TestDrive 'external-data-output'
+    $null = Expand-QtInstallerFramework -Path $Installer -DataPath $Data -DestinationPath $DataDestination -Name 'payload.txt' -CollisionAction Rename
+    Get-Content -LiteralPath (Join-Path $DataDestination 'packages/Example.Component/content/payload.txt') -Raw | Should -Be 'Qt IFW package format regression'
+
+    $Repository = Join-Path $TestDrive 'repository'
+    $null = New-Item -Path (Join-Path $Repository 'Example.Component') -ItemType Directory -Force
+    Copy-Item -LiteralPath $PackageArchive -Destination (Join-Path $Repository 'Example.Component/1.0.0content.zip')
+    [IO.File]::WriteAllText((Join-Path $Repository 'Updates.xml'), '<Updates><PackageUpdate><Name>Example.Component</Name><Version>1.0.0</Version><DownloadableArchives>content.zip</DownloadableArchives></PackageUpdate></Updates>')
+    $RepositoryDestination = Join-Path $TestDrive 'repository-output'
+    $null = Expand-QtInstallerFramework -Path $Installer -RepositoryPath $Repository -DestinationPath $RepositoryDestination -Name 'payload.txt' -CollisionAction Rename
+    Get-Content -LiteralPath (Join-Path $RepositoryDestination 'packages/Example.Component/content/payload.txt') -Raw | Should -Be 'Qt IFW package format regression'
+
+    $PackageDestination = Join-Path $TestDrive 'explicit-package-output'
+    $null = Expand-QtInstallerFramework -Path $Installer -PackagePath $PackageArchive -DestinationPath $PackageDestination -Name 'payload.txt' -CollisionAction Rename
+    Get-Content -LiteralPath (Join-Path $PackageDestination 'packages/external/qt-package/payload.txt') -Raw | Should -Be 'Qt IFW package format regression'
   }
 
   It 'Should extract a selected file through the legacy component archive route' {
@@ -401,6 +558,104 @@ Describe 'Qt Installer Framework parser' {
     Test-QtInstallerFrameworkRequiresInstallLocation -Path $Fixture | Should -BeFalse
     Test-QtInstallerFrameworkSupportsExistingInstallationOverride -Path $Fixture | Should -BeFalse
     Read-UpgradeBehaviorFromQtInstallerFramework -Path $Fixture | Should -Be 'uninstallPrevious'
+  }
+
+  It 'Should return verbatim JavaScript with conservative assignment values and review instructions' {
+    $ScriptText = @'
+function Controller() {
+  // var fakeLine = true;
+  /*
+  const fakeBlock = "not code";
+  */
+  var root = "C:\\Apps\\Example";
+  let enabled = true;
+  var inline = true // a comment is not part of the expression
+  const retries = 3;
+  var withSemicolon = "a;b";
+  var compound = "a" + "b";
+  var alias = root;
+  var configured = installer.value("TargetDir");
+  var dynamic = installer.environmentVariable("TEMP");
+  this.mode = 'machine';
+  this.mode = installer.value("DynamicMode");
+}
+'@
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-javascript.exe' -FrameworkVersion '4.11.0' -ScriptText $ScriptText -InstallerXml @'
+<Installer>
+  <Name>Example.ScriptedQtIFW</Name>
+  <Version>1.0.0</Version>
+  <Publisher>Example Publisher</Publisher>
+  <TargetDir>C:/ConfiguredTarget</TargetDir>
+  <ControlScript>controller</ControlScript>
+</Installer>
+'@
+
+    $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
+    $Script = $Info.JavaScriptResources | Select-Object -First 1
+
+    $Info.JavaScriptCount | Should -Be 1
+    $Info.RequiresJavaScriptReview | Should -BeTrue
+    $Info.KnownInstallerValues.TargetDir | Should -Be 'C:/ConfiguredTarget'
+    $Info.JavaScriptAnalysisInstructions.Count | Should -BeGreaterThan 4
+    $Script.Source | Should -Be 'MetaResource[1]'
+    $Script.Role | Should -Be 'Controller'
+    $Script.RawJavaScript | Should -BeExactly $ScriptText
+    ($Script.VariableAssignments | Where-Object Name -EQ 'root').Value | Should -Be 'C:\Apps\Example'
+    ($Script.VariableAssignments | Where-Object Name -EQ 'alias').ResolutionSource | Should -Be 'Variable:root'
+    ($Script.VariableAssignments | Where-Object Name -EQ 'configured').Value | Should -Be 'C:/ConfiguredTarget'
+    ($Script.VariableAssignments | Where-Object Name -EQ 'dynamic').IsResolved | Should -BeFalse
+    ($Script.VariableAssignments | Where-Object Name -EQ 'inline').Expression | Should -Be 'true'
+    ($Script.VariableAssignments | Where-Object Name -EQ 'inline').Value | Should -BeTrue
+    ($Script.VariableAssignments | Where-Object Name -EQ 'withSemicolon').Value | Should -Be 'a;b'
+    ($Script.VariableAssignments | Where-Object Name -EQ 'compound').IsResolved | Should -BeFalse
+    $Script.VariableAssignments.Name | Should -Not -Contain 'fakeLine'
+    $Script.VariableAssignments.Name | Should -Not -Contain 'fakeBlock'
+    @($Script.VariableAssignments | Where-Object Name -EQ 'this.mode').Count | Should -Be 2
+    @($Script.VariableAssignments | Where-Object Name -EQ 'this.mode')[0].Value | Should -Be 'machine'
+    @($Script.VariableAssignments | Where-Object Name -EQ 'this.mode')[1].Expression | Should -Be 'installer.value("DynamicMode")'
+  }
+
+  It 'Should decode performed-operation XML into system and ARP effects' {
+    $Operations = @(
+      [pscustomobject]@{ Name = 'CreateShortcut'; Data = '<operation><arguments><argument>@TargetDir@\app.exe</argument><argument>@StartMenuDir@\Example.lnk</argument><argument>--open</argument></arguments><values><value name="admin" type="bool">false</value></values></operation>' }
+      [pscustomobject]@{ Name = 'RegisterFileType'; Data = '<operation><arguments><argument>qtf</argument><argument>&quot;@TargetDir@\app.exe&quot; &quot;%1&quot;</argument><argument>Qt IFW document</argument><argument>application/x-qtifw-test</argument><argument>@TargetDir@\app.exe,0</argument><argument>ProgId=Example.QtIfw.Document</argument></arguments></operation>' }
+      [pscustomobject]@{ Name = 'GlobalConfig'; Data = '<operation><arguments><argument>HKEY_CURRENT_USER\Software\Classes\qtifw-demo</argument><argument>URL Protocol</argument><argument></argument></arguments></operation>' }
+      [pscustomobject]@{ Name = 'GlobalConfig'; Data = '<operation><arguments><argument>HKEY_CURRENT_USER\Software\Classes\qtifw-demo\shell\open\command</argument><argument>Default</argument><argument>&quot;@TargetDir@\app.exe&quot; &quot;%1&quot;</argument></arguments></operation>' }
+      [pscustomobject]@{ Name = 'EnvironmentVariable'; Data = '<operation><arguments><argument>QT_IFW_HOME</argument><argument>@TargetDir@</argument><argument>true</argument><argument>false</argument></arguments></operation>' }
+      [pscustomobject]@{ Name = 'Settings'; Data = '<operation><arguments><argument>path=@TargetDir@\settings.ini</argument><argument>method=set</argument><argument>key=General/Enabled</argument><argument>value=true</argument><argument>UNDOOPERATION</argument><argument></argument></arguments></operation>' }
+    )
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-operation-effects.exe' -FrameworkVersion '4.11.0' -Operation $Operations -InstallerXml @'
+<Installer>
+  <Name>Example.QtIFWEffects</Name>
+  <Version>2.0.0</Version>
+  <Title>Example effects</Title>
+  <Publisher>Example Publisher</Publisher>
+  <ProductUrl>https://example.invalid/effects</ProductUrl>
+  <TargetDir>@ApplicationsDir@/ExampleEffects</TargetDir>
+  <MaintenanceToolName>effects-maintenance</MaintenanceToolName>
+  <ProductUUID>{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}</ProductUUID>
+</Installer>
+'@
+
+    $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
+
+    $Info.OperationCount | Should -Be 6
+    $Info.Operations[0].Arguments | Should -HaveCount 3
+    $Info.Operations[0].Values.admin | Should -BeFalse
+    $Info.Operations[0].ValueRecords[0].IsEncoded | Should -BeFalse
+    $Info.Operations[5].IsUndoOperation | Should -BeTrue
+    $Info.Operations[5].PerformArguments | Should -HaveCount 4
+    $Info.ShortcutEffects | Should -HaveCount 1
+    $Info.ShortcutEffects[0].ShortcutPath | Should -Be '@StartMenuDir@\Example.lnk'
+    $Info.FileExtensions | Should -Contain 'qtf'
+    $Info.FileAssociationEffects[0].DefaultProgId | Should -Be 'Example.QtIfw.Document'
+    $Info.Protocols | Should -Contain 'qtifw-demo'
+    $Info.ProtocolEffects[0].Command | Should -Be '"@TargetDir@\app.exe" "%1"'
+    @($Info.RegistryWrites | Where-Object { $_.Key -eq 'Environment' -and $_.Name -eq 'QT_IFW_HOME' }) | Should -HaveCount 1
+    @($Info.FileSystemEffects | Where-Object { $_.Action -eq 'ModifySettingsFile' -and $_.Path -eq '@TargetDir@\settings.ini' }) | Should -HaveCount 1
+    $Info.AppsAndFeaturesEntries | Should -HaveCount 1
+    $Info.AppsAndFeaturesEntries[0].ProductCode | Should -Be '{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}'
+    $Info.AppsAndFeaturesEffects[0].Key | Should -Be 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}'
   }
 
   It 'Should warn when IFW ProductUUID is generated at install time' {
@@ -480,6 +735,14 @@ Describe 'Qt Installer Framework parser' {
     $Info.SupportedScopes | Should -Be @('user', 'machine')
     $Info.CommandLineInterfaceEvidence.FoundMarkers | Should -Contain 'accept-licenses'
     $Info.CommandLineInterfaceEvidence.FoundMarkers | Should -Contain 'check-updates'
+    $Info.JavaScriptCount | Should -Be 2
+    $Info.JavaScriptResources.Source | Should -Contain ':/installer-config/control_js'
+    $Info.JavaScriptResources.Source | Should -Contain ':/com.msys2.root/installscript.js'
+    $Info.JavaScriptResources.Role | Should -Contain 'Controller'
+    $Info.JavaScriptResources.Role | Should -Contain 'Component'
+    $Info.JavaScriptResources.Source | Should -Not -Contain 'MetaResource[0]'
+    ($Info.JavaScriptResources | Where-Object Role -EQ 'Component').RawJavaScript | Should -BeLike '*function Component()*'
+    @((($Info.JavaScriptResources | Where-Object Role -EQ 'Component').VariableAssignments | Where-Object Name -EQ 'systemDrive')).Count | Should -Be 2
     Test-QtInstallerFrameworkRequiresInstallLocation -Path $Fixture | Should -BeTrue
     Test-QtInstallerFrameworkSupportsExistingInstallationOverride -Path $Fixture | Should -BeFalse
   }
@@ -527,6 +790,29 @@ Describe 'Qt Installer Framework parser' {
         Resolve-QtInstallerFrameworkExtractionPath -DestinationPath $env:TEMP -RelativePath '..\escape.exe'
       }
     } | Should -Throw '*escapes the destination*'
+  }
+
+  It 'Should expand the Qt-supported <Format> package format' -ForEach @(
+    @{ Format = 'tar' }
+    @{ Format = 'tar.gz' }
+    @{ Format = 'tar.bz2' }
+    @{ Format = 'tar.xz' }
+    @{ Format = 'zip' }
+    @{ Format = '7z' }
+    @{ Format = 'qbsp' }
+  ) {
+    $ArchivePath = New-TestQtPackageArchive -Format $Format
+    $Destination = Join-Path $TestDrive "qt-package-$($Format.Replace('.', '-'))"
+    $Module = Get-Module QtInstallerFramework | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+
+    $Result = & $Module {
+      param($ArchivePath, $Destination)
+      Expand-QtInstallerFrameworkPackageArchive -Path $ArchivePath -DestinationPath $Destination -RelativeRoot 'component' -Name 'payload.txt' -CollisionAction Rename -MaximumExpandedBytes 1048576
+    } $ArchivePath $Destination
+
+    $Result.Files | Should -HaveCount 1
+    $Result.Files[0].FullName | Should -Be (Join-Path $Destination 'component\payload.txt')
+    (Get-Content -LiteralPath $Result.Files[0].FullName -Raw) | Should -BeExactly 'Qt IFW package format regression'
   }
 
   It 'Should selectively expand a file from a real IFW package archive' {
