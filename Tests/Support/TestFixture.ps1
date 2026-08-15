@@ -2,6 +2,23 @@
 
 if (-not $Script:DumplingsTestFixtureHashCache) { $Script:DumplingsTestFixtureHashCache = @{} }
 
+function Resolve-DumplingsTestModulePath {
+  <#
+  .SYNOPSIS
+    Resolve a path below the component owning this mirrored test helper.
+  #>
+  param([Parameter(Mandatory)][string]$RelativePath)
+
+  $TestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+  $ModuleRoot = [IO.Path]::GetFullPath((Join-Path $TestRoot '..'))
+  $Path = [IO.Path]::GetFullPath((Join-Path $ModuleRoot $RelativePath))
+  $RootPrefix = $ModuleRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+  if (-not $Path.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Test module path escapes the module root: $RelativePath"
+  }
+  return $Path
+}
+
 function Get-DumplingsTestFixtureHash {
   param([Parameter(Mandatory)][string]$Path)
 
@@ -28,25 +45,51 @@ function Get-DumplingsTestFixtureRoot {
   if ($env:DUMPLINGS_TEST_FIXTURE_ROOT) {
     return [IO.Path]::GetFullPath($env:DUMPLINGS_TEST_FIXTURE_ROOT)
   }
-  $RepositoryDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..'))
+  $RepositoryDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..\..'))
   return Join-Path $RepositoryDirectory 'Dumplings-TestFixtures'
 }
 
-function Get-DumplingsTestFixtureDirectory {
+function Resolve-DumplingsTestFixturePath {
   <#
   .SYNOPSIS
-    Create and return one suite-specific durable fixture directory.
+    Resolve one canonical path below the durable fixture cache.
+  .PARAMETER RelativePath
+    Human-readable cache path such as Installers\NSIS\Vendor.Package\1.0\setup.exe.
+  .PARAMETER EnsureParent
+    Create the parent directory. Downloads use this switch; read-only fixture probes do not.
+  #>
+  param(
+    [Parameter(Mandatory)][string]$RelativePath,
+    [switch]$EnsureParent
+  )
+
+  $Root = [IO.Path]::GetFullPath((Get-DumplingsTestFixtureRoot))
+  $Path = [IO.Path]::GetFullPath((Join-Path $Root $RelativePath))
+  $RootPrefix = $Root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+  if (-not $Path.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Fixture path escapes the cache root: $RelativePath"
+  }
+  if ($EnsureParent) {
+    $null = New-Item -Path ([IO.Path]::GetDirectoryName($Path)) -ItemType Directory -Force
+  }
+  return $Path
+}
+
+function Resolve-DumplingsTestFixtureCatalogPath {
+  <#
+  .SYNOPSIS
+    Resolve a named durable fixture through the shared human-readable catalog.
+  .PARAMETER Name
+    Exact asset name recorded in FixtureCatalog.psd1.
   #>
   param([Parameter(Mandatory)][string]$Name)
 
-  $Root = Get-DumplingsTestFixtureRoot
-  $Directory = [IO.Path]::GetFullPath((Join-Path $Root $Name))
-  $RootPrefix = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-  if (-not $Directory.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Fixture directory escapes the cache root: $Name"
+  if (-not $Script:DumplingsTestFixtureCatalog) {
+    $Script:DumplingsTestFixtureCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'FixtureCatalog.psd1')
   }
-  $null = New-Item -Path $Directory -ItemType Directory -Force
-  return $Directory
+  $RelativePath = $Script:DumplingsTestFixtureCatalog[$Name]
+  if (-not $RelativePath) { throw "The fixture '$Name' is not present in the shared fixture catalog." }
+  return $RelativePath
 }
 
 function Write-DumplingsTestFixtureCacheRecord {
@@ -98,8 +141,7 @@ function Get-DumplingsTestFixture {
     Resolve SourceForge's HTML meta-refresh target before downloading.
   #>
   param(
-    [Parameter(Mandatory)][string]$Directory,
-    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string]$RelativePath,
     [Parameter(Mandatory)][Alias('Url')][uri]$Uri,
     [string]$Sha256,
     [hashtable]$Headers,
@@ -107,13 +149,7 @@ function Get-DumplingsTestFixture {
     [switch]$UseSourceForgeMetaRefresh
   )
 
-  $Directory = [IO.Path]::GetFullPath($Directory)
-  $Path = [IO.Path]::GetFullPath((Join-Path $Directory $Name))
-  $DirectoryPrefix = $Directory.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-  if (-not $Path.StartsWith($DirectoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Fixture name escapes its cache directory: $Name"
-  }
-  $null = New-Item -Path $Directory -ItemType Directory -Force
+  $Path = Resolve-DumplingsTestFixturePath -RelativePath $RelativePath -EnsureParent
 
   $NameBytes = [Text.Encoding]::UTF8.GetBytes($Path.ToLowerInvariant())
   $HashAlgorithm = [Security.Cryptography.SHA256]::Create()

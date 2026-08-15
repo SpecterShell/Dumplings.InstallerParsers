@@ -131,17 +131,18 @@ Invoke-Pester .\Modules\InstallerParsers\Tests
 Run a focused parser suite:
 
 ```powershell
-Invoke-Pester .\Modules\InstallerParsers\Tests\NSIS.Tests.ps1
-Invoke-Pester .\Modules\InstallerParsers\Tests\Inno.Tests.ps1
+Invoke-Pester .\Modules\InstallerParsers\Tests\NSIS
+Invoke-Pester .\Modules\InstallerParsers\Tests\Inno
 ```
 
 Also run PackageModule bridge tests after changing the CLI contract:
 
 ```powershell
-Invoke-Pester .\Modules\PackageModule\Tests\InstallerBridge.Tests.ps1
+Invoke-Pester .\Modules\PackageModule\Tests\WinGet\InstallerBridge.Contracts.Tests.ps1
+Invoke-Pester .\Modules\PackageModule\Tests\WinGet\InstallerBridge.Regressions.Tests.ps1
 ```
 
-Tests should use generated fixtures or the persistent shared fixture cache. Do not depend on user `Downloads`, temporary cleanup-sensitive paths, or executing installers.
+Each implemented parser family owns one directory below `Tests`; byte-identical fixture helpers and reusable generated-fixture builders live under non-discoverable `Tests/Support`. Downloaded fixtures use canonical paths below `../Dumplings-TestFixtures/Installers`, curated media uses `Builders`, and synthetic or extracted output uses `$TestDrive`. Do not depend on user `Downloads`, temporary cleanup-sensitive paths, or executing installers.
 
 ## Licensing
 

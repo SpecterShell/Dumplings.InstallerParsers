@@ -1,15 +1,20 @@
+. (Join-Path $PSScriptRoot '..\Support\TestBootstrap.ps1')
+
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 BeforeAll {
-  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\SetupFactory.psm1') -Force
-  $Script:FixtureRoot = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\SetupFactory'
+  $Script:DumplingsTestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+  $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))
+  $Script:DumplingsModulesRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModuleRoot '..'))
+  $Script:DumplingsRepositoryRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModulesRoot '..'))
+  . (Join-Path $Script:DumplingsTestRoot 'Support\TestFixture.ps1')
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\Archive.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\PE.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\SetupFactory.psm1') -Force
 }
 
 Describe 'Setup Factory static parser' {
@@ -33,7 +38,7 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
 
   It 'decodes the official zlib blast PKWARE test vector with an output limit' {
     if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-      Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\SetupFactory\PkwareBlast.cs')
+      Add-Type -Path (Join-Path $Script:DumplingsModuleRoot 'Assets\Source\SetupFactory\PkwareBlast.cs')
     }
     $Compressed = [byte[]](0x00, 0x04, 0x82, 0x24, 0x25, 0x8F, 0x80, 0x7F)
     $Decoded = [Dumplings.InstallerParsers.PkwareBlast]::Decode($Compressed, 13)
@@ -43,13 +48,13 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
 
   It 'rejects a truncated PKWARE stream without hanging' {
     if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-      Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\SetupFactory\PkwareBlast.cs')
+      Add-Type -Path (Join-Path $Script:DumplingsModuleRoot 'Assets\Source\SetupFactory\PkwareBlast.cs')
     }
     { [Dumplings.InstallerParsers.PkwareBlast]::Decode([byte[]](0, 4, 0), 1024) } | Should -Throw '*end marker*'
   }
 
   It 'parses the real Bicom Systems OutCALL installer when available' {
-    $Path = Join-Path $Script:FixtureRoot 'OutCALL-2.0.exe'
+    $Path = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'OutCALL-2.0.exe')
     if (-not (Test-Path -LiteralPath $Path)) { Set-ItResult -Skipped -Because 'The shared real-installer fixture is not available'; return }
     $Info = Get-SetupFactoryInfo -Path $Path
     $Info.DisplayName | Should -Be 'OutCALL'
@@ -61,7 +66,7 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
   }
 
   It 'parses the real Bicom Systems Communicator installer when available' {
-    $Path = Join-Path $Script:FixtureRoot 'Communicator-7.6.0.exe'
+    $Path = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'Communicator-7.6.0.exe')
     if (-not (Test-Path -LiteralPath $Path)) { Set-ItResult -Skipped -Because 'The shared real-installer fixture is not available'; return }
     $Info = Get-SetupFactoryInfo -Path $Path
     $Info.DisplayName | Should -Be 'Communicator'
@@ -70,7 +75,7 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
   }
 
   It 'parses the real Bicom Systems gloCOM installer when available' {
-    $Path = Join-Path $Script:FixtureRoot 'gloCOM-7.6.0.4.exe'
+    $Path = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'gloCOM-7.6.0.4.exe')
     if (-not (Test-Path -LiteralPath $Path)) { Set-ItResult -Skipped -Because 'The shared real-installer fixture is not available'; return }
     $Info = Get-SetupFactoryInfo -Path $Path
     $Info.DisplayName | Should -Be 'gloCOM'
@@ -79,7 +84,7 @@ Registry.SetValue("HKCU", "Software\Classes\.example", "", "Example.Document")
   }
 
   It 'parses the real Locklizard installer without inventing a ProductCode' {
-    $Path = Join-Path $Script:FixtureRoot 'SafeguardPDFViewer_v3.exe'
+    $Path = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SafeguardPDFViewer_v3.exe')
     if (-not (Test-Path -LiteralPath $Path)) { Set-ItResult -Skipped -Because 'The shared real-installer fixture is not available'; return }
     $Info = Get-SetupFactoryInfo -Path $Path
     $Info.DisplayName | Should -Be 'Locklizard Safeguard - PDF Viewer'

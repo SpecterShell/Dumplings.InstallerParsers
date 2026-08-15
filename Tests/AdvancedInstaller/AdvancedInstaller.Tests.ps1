@@ -1,14 +1,21 @@
-BeforeAll {
-  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'AdvancedInstaller.psm1') -Force
+. (Join-Path $PSScriptRoot '..\Support\TestBootstrap.ps1')
 
-  $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
+BeforeAll {
+  $Script:DumplingsTestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+  $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))
+  $Script:DumplingsModulesRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModuleRoot '..'))
+  $Script:DumplingsRepositoryRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModulesRoot '..'))
+  . (Join-Path $Script:DumplingsTestRoot 'Support\TestFixture.ps1')
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Installers' 'AdvancedInstaller.psm1') -Force
+
+  $Script:FixtureDirectory = $TestDrive
+  $Script:BuilderFixtureDirectory = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AdvancedInstaller'
 
   function Get-InstallerFixture {
     param(
@@ -19,7 +26,7 @@ BeforeAll {
       [string]$Url
     )
 
-    Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url
+    Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name $Name) -Uri $Url
   }
 
   function New-AdvancedInstallerFooterFixture {
@@ -298,7 +305,7 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should parse controlled Advanced Installer 6.3 ANSI embedded media' {
-    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\6.3\diehard-ansi-63.exe'
+    $Fixture = Join-Path $Script:BuilderFixtureDirectory '6.3\Generated\diehard-ansi-63.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.3 fixture is not present in the persistent cache.'
       return
@@ -317,7 +324,7 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should parse and expand controlled Advanced Installer 6.3 external-resource media' {
-    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\6.3\diehard-external-63.exe'
+    $Fixture = Join-Path $Script:BuilderFixtureDirectory '6.3\Generated\diehard-external-63.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.3 external-media fixture is not present in the persistent cache.'
       return
@@ -353,8 +360,8 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should distinguish the controlled Unicode v0 and v1 catalog generations' {
-    $V0Fixture = Join-Path $Script:FixtureDirectory 'Generated\6.4\diehard-unicode-64.exe'
-    $V1Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\diehard-86.exe'
+    $V0Fixture = Join-Path $Script:BuilderFixtureDirectory '6.4\Generated\diehard-unicode-64.exe'
+    $V1Fixture = Join-Path $Script:BuilderFixtureDirectory '8.6\Generated\diehard-86.exe'
     if (-not (Test-Path -LiteralPath $V0Fixture -PathType Leaf) -or -not (Test-Path -LiteralPath $V1Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.4 and 8.6 fixtures are not both present in the persistent cache.'
       return
@@ -370,7 +377,7 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should identify a controlled web installer without treating external archives as the selected MSI' {
-    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\Web\diehard-86.exe'
+    $Fixture = Join-Path $Script:BuilderFixtureDirectory '8.6\Generated\Web\diehard-86.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 web fixture is not present in the persistent cache.'
       return
@@ -386,7 +393,7 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should project compressed prerequisite payload evidence from the outer catalog' {
-    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\prereq-lzma-86.exe'
+    $Fixture = Join-Path $Script:BuilderFixtureDirectory '8.6\Generated\prereq-lzma-86.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 prerequisite fixture is not present in the persistent cache.'
       return
@@ -403,7 +410,7 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should project controlled MSI/MSIX operating-system selection evidence' {
-    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\23.9\mixed-controlled-Msi.exe'
+    $Fixture = Join-Path $Script:BuilderFixtureDirectory '23.9\Generated\mixed-controlled-Msi.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 23.9 mixed MSI/MSIX fixture is not present in the persistent cache.'
       return
@@ -498,7 +505,7 @@ Describe 'Advanced Installer parser' {
   }
 
   It 'Should report AES-256 evidence and release the controlled encrypted payload' {
-    $Fixture = Join-Path $Script:FixtureDirectory 'Generated\8.6\diehard-aes-86.exe'
+    $Fixture = Join-Path $Script:BuilderFixtureDirectory '8.6\Generated\diehard-aes-86.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 AES fixture is not present in the persistent cache.'
       return
@@ -521,14 +528,14 @@ Describe 'Advanced Installer parser' {
     $MsiInfo.UpgradeCode | Should -Be '{F036F415-628F-4FE1-A550-13AE231667EF}'
   }
 
-  It 'Should parse the 2 GB BenchMate installer within the performance watchdog' -Tag 'Performance' {
+  It 'Should parse the 2 GB BenchMate installer within the performance watchdog' -Tag 'RealFixture', 'Benchmark' {
     $Name = 'bm-14.2.0.exe'
     $Url = 'https://dl.benchmate.org/bm-14.2.0.exe'
     $Sha256 = '123DD975FBE1BEDCE784BF30C755392CE69C92E07D555E9051422DD8EDFC6506'
-    $Fixture = Join-Path $Script:FixtureDirectory $Name
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name $Name)
     if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 $Sha256)) {
       if ($env:DUMPLINGS_DOWNLOAD_LARGE_TEST_FIXTURES -eq '1') {
-        $Fixture = Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -Sha256 $Sha256
+        $Fixture = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name $Name) -Uri $Url -Sha256 $Sha256
       } else {
         Set-ItResult -Skipped -Because 'Set DUMPLINGS_DOWNLOAD_LARGE_TEST_FIXTURES=1 to cache the 2.1 GB BenchMate performance fixture.'
         return

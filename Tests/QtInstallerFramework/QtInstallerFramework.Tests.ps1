@@ -1,14 +1,20 @@
-BeforeAll {
-  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'QtInstallerFramework.psm1') -Force
+. (Join-Path $PSScriptRoot '..\Support\TestBootstrap.ps1')
 
-  $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\Main'
+BeforeAll {
+  $Script:DumplingsTestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+  $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))
+  $Script:DumplingsModulesRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModuleRoot '..'))
+  $Script:DumplingsRepositoryRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModulesRoot '..'))
+  . (Join-Path $Script:DumplingsTestRoot 'Support\TestFixture.ps1')
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Installers' 'QtInstallerFramework.psm1') -Force
+
+  $Script:FixtureDirectory = $TestDrive
 
   function Get-InstallerFixture {
     param(
@@ -21,7 +27,7 @@ BeforeAll {
       [switch]$UseSourceForgeMetaRefresh
     )
 
-    Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -UseSourceForgeMetaRefresh:$UseSourceForgeMetaRefresh
+    Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name $Name) -Uri $Url -UseSourceForgeMetaRefresh:$UseSourceForgeMetaRefresh
   }
 
   function Add-TestUInt16BE {
