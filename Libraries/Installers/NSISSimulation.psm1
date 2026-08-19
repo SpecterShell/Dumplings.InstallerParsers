@@ -1562,6 +1562,8 @@ function Merge-NSISExecutionStates {
 
   $Target.Warnings.Clear()
   foreach ($BranchState in $State) { foreach ($Warning in $BranchState.Warnings) { if (-not $Target.Warnings.Contains($Warning)) { $Target.Warnings.Add($Warning) } } }
+  $Target.Notices.Clear()
+  foreach ($BranchState in $State) { foreach ($Notice in $BranchState.Notices) { if (-not $Target.Notices.Contains($Notice)) { $Target.Notices.Add($Notice) } } }
   $Target.ConditionalReasons.Clear()
   foreach ($Reason in $InitialConditionalReasons) { $null = $Target.ConditionalReasons.Add($Reason) }
   $Target.HasUnknownControlFlow = $Target.ConditionalReasons.Count -gt 0
@@ -2009,9 +2011,9 @@ function Get-NSISIniValue {
   [OutputType([string])]
   param (
     [Parameter(Mandatory)][pscustomobject]$State,
-    [Parameter(Mandatory)][string]$File,
-    [Parameter(Mandatory)][string]$Section,
-    [Parameter(Mandatory)][string]$Key
+    [AllowEmptyString()][Parameter(Mandatory)][string]$File,
+    [AllowEmptyString()][Parameter(Mandatory)][string]$Section,
+    [AllowEmptyString()][Parameter(Mandatory)][string]$Key
   )
 
   if ($State.IniFiles.ContainsKey($File) -and $State.IniFiles[$File].ContainsKey($Section) -and $State.IniFiles[$File][$Section].ContainsKey($Key)) {
@@ -2219,6 +2221,7 @@ function Initialize-NSISState {
     ExecutedPayloads            = [System.Collections.Generic.List[object]]::new()
     ConditionalExtractedFiles   = [System.Collections.Generic.List[object]]::new()
     Warnings                    = [System.Collections.Generic.List[string]]::new()
+    Notices                     = [System.Collections.Generic.List[string]]::new()
     Stack                       = [System.Collections.Generic.List[string]]::new()
     SystemVariableStack         = [System.Collections.Generic.List[object]]::new()
     Directories                 = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -5025,7 +5028,11 @@ function Complete-NSISMetadata {
     $AppsAndFeaturesInfo = Get-NSISAppsAndFeaturesEntryInfo -State $State
     $State.Metadata.AppsAndFeaturesEntries = @($AppsAndFeaturesInfo.AppsAndFeaturesEntries)
     $State.Metadata.AppsAndFeaturesEntryEvidence = @($AppsAndFeaturesInfo.AppsAndFeaturesEntryEvidence)
-    $State.Metadata.Notices = [string[]]@($AppsAndFeaturesInfo.Notices)
+    $State.Metadata.Notices = [string[]]@(
+      @($State.Notices; $AppsAndFeaturesInfo.Notices) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Select-Object -Unique
+    )
     $State.Metadata.HasLocalizedAppsAndFeaturesEntries = $AppsAndFeaturesInfo.HasLocalizedEntries
 
     # Architecture-targeted simulation can intentionally skip a direct scan.
@@ -5135,9 +5142,17 @@ function Invoke-NSISStaticSimulation {
     $InitializedState = Initialize-NSISState @InitializationArguments
     $State = $InitializedState.State
     $State.Environment = @{} + $Environment
-    $State.CommandLine = $CommandLine
-    Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_CMDLINE -Value $CommandLine
-    $Parameters = Get-NSISCommandLineParameters -CommandLine $CommandLine
+    # CreateProcess always exposes at least the executable path in $CMDLINE.
+    # Preserve an explicitly supplied test command line, including an explicit
+    # empty value, but otherwise model the quoted resolved installer path.
+    $EffectiveCommandLine = if ($PSBoundParameters.ContainsKey('CommandLine')) {
+      $CommandLine
+    } else {
+      '"' + [string]$HeaderData.Path + '"'
+    }
+    $State.CommandLine = $EffectiveCommandLine
+    Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_CMDLINE -Value $EffectiveCommandLine
+    $Parameters = Get-NSISCommandLineParameters -CommandLine $EffectiveCommandLine
     $State.ExecFlags[$Script:NSIS_EXEC_FLAG_SILENT] = [int]([regex]::IsMatch($Parameters, '(?:^|\s)/S(?:\s|$)', [Text.RegularExpressions.RegexOptions]::CultureInvariant))
     $InstallDirectoryOverride = Get-NSISCommandLineOption -Parameters $Parameters -Option '/D='
     if (-not [string]::IsNullOrWhiteSpace($InstallDirectoryOverride)) {
@@ -5219,24 +5234,24 @@ function Invoke-NSISStaticSimulation {
     # conservative pre-simulation fallback used by the first literal scan.
     if ($State.ShellVarContext -and -not $HasTargetScopeResolver) { Add-NSISDirectUninstallWrites -State $State }
 
-    # Very large NSISBI installers can contain one extraction command per
-    # payload file. Walking all of those commands adds no identity evidence once
-    # initialization and explicit uninstall writes are complete, and can take
-    # minutes for Unity-sized archives. Keep Full as the normal behavior while
-    # bounding this payload-only path after deterministic ARP metadata is known.
+    # Large generated installers can contain one extraction command per payload
+    # file. Walking all commands adds no identity evidence once initialization
+    # and explicit uninstall writes are complete, and can exceed the parser CLI
+    # timeout. Keep Full as the normal behavior while bounding this path only
+    # after deterministic ARP identity has been recovered.
     $InitializedMetadata = Complete-NSISMetadata -State $State -SkipLocalizedAppsAndFeaturesEntries
-    if ($HeaderData.IsNsisBi -and $State.Entries.Count -gt $Script:NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT -and
+    if ($State.Entries.Count -gt $Script:NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayName) -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayVersion) -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.ProductCode)) {
-      $State.Warnings.Add("Full section simulation was skipped after deterministic uninstall metadata was recovered because the NSISBI command table contains $($State.Entries.Count) entries.")
+      $State.Notices.Add("Full section simulation was skipped after deterministic uninstall metadata was recovered because the validated NSIS command table contains $($State.Entries.Count) entries.")
       return [pscustomobject]@{
         State           = $State
         Layout          = $Layout
         HeaderData      = $HeaderData
         Metadata        = Complete-NSISMetadata -State $State
         IsEarlyExit     = $true
-        EarlyExitReason = 'LargeNsisBiCommandTable'
+        EarlyExitReason = 'LargeCommandTable'
       }
     }
 

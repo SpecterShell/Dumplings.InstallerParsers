@@ -82,16 +82,25 @@ Describe 'Inno structures and version handling' -Tag Unit {
   It 'Projects literal file-extension and protocol associations from catalogued registry records' {
     InModuleScope Inno {
       $RegistryEntries = @(
-        [pscustomobject]@{ RootKey = 'HKA'; Subkey = 'Software\Classes\.sample'; ValueName = ''; ValueData = 'Dumplings.Sample'; Conditional = $false }
-        [pscustomobject]@{ RootKey = 'HKLM'; Subkey = 'Software\Classes\dumplings\shell\open\command'; ValueName = ''; ValueData = '"{app}\sample.exe" "%1"'; Conditional = $false }
-        [pscustomobject]@{ RootKey = 'HKLM'; Subkey = 'Software\Classes\dumplings'; ValueName = 'URL Protocol'; ValueData = ''; Conditional = $false }
-        [pscustomobject]@{ RootKey = 'HKCU'; Subkey = 'Software\Vendor\.ignored'; ValueName = ''; ValueData = 'Ignored'; Conditional = $false }
+        [pscustomobject]@{ RootKey = 'HKA'; Subkey = 'Software\Classes\.sample'; ValueName = ''; ValueData = 'Dumplings.Sample'; Conditional = $false; Components = ''; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 10 }
+        [pscustomobject]@{ RootKey = 'HKLM'; Subkey = 'Software\Classes\dumplings\shell\open\command'; ValueName = ''; ValueData = '"{app}\sample.exe" "%1"'; Conditional = $false; Components = ''; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 20 }
+        [pscustomobject]@{ RootKey = 'HKLM'; Subkey = 'Software\Classes\dumplings'; ValueName = 'URL Protocol'; ValueData = ''; Conditional = $false; Components = ''; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 30 }
+        [pscustomobject]@{ RootKey = 'HKCU'; Subkey = 'Software\Vendor\.ignored'; ValueName = ''; ValueData = 'Ignored'; Conditional = $false; Components = ''; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 40 }
+        [pscustomobject]@{ RootKey = 'HKCR'; Subkey = '.optional'; ValueName = ''; ValueData = 'Dumplings.Optional'; Conditional = $true; Components = 'optional'; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 50 }
+        [pscustomobject]@{ RootKey = 'HKCR'; Subkey = 'optional-protocol'; ValueName = 'URL Protocol'; ValueData = ''; Conditional = $true; Components = ''; Tasks = ''; Languages = ''; Check = 'ShouldRegisterProtocol'; RecordOffset = 60 }
       )
 
       $Associations = Get-InnoRegistryAssociationInfo -RegistryEntries $RegistryEntries
 
       $Associations.FileExtensions | Should -Be @('sample')
       $Associations.Protocols | Should -Be @('dumplings')
+      $Associations.ConditionalFileExtensions | Should -Be @('optional')
+      $Associations.ConditionalProtocols | Should -Be @('optional-protocol')
+      $Associations.FileExtensionAssociations | Should -HaveCount 2
+      $Associations.ProtocolAssociations | Should -HaveCount 2
+      $Associations.ConditionalRegistryAssociations | Should -HaveCount 2
+      ($Associations.ConditionalRegistryAssociations | Where-Object Name -EQ 'optional').Components | Should -Be 'optional'
+      ($Associations.ConditionalRegistryAssociations | Where-Object Name -EQ 'optional-protocol').Check | Should -Be 'ShouldRegisterProtocol'
     }
   }
 

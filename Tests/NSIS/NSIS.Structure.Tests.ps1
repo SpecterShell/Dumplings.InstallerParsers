@@ -358,8 +358,43 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
       }
     }
 
-    $Result.WithoutLog | Should -Be 1
-    $Result.WithLog | Should -Be 0
+    $Result.WithoutLog.FatalInvalidCommandCount | Should -Be 1
+    $Result.WithLog.FatalInvalidCommandCount | Should -Be 0
+  }
+
+  It 'Should use paired LockWindow operands to resolve the log-enabled command layout' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Entries = @(
+        [pscustomobject]@{ LayoutOpcode = [uint32]68; RawOpcode = [uint32]68; Raw = [uint32[]]@(68, 0, 0, 0, 0, 0, 0) }
+        [pscustomobject]@{ LayoutOpcode = [uint32]68; RawOpcode = [uint32]68; Raw = [uint32[]]@(68, 1, 0, 0, 0, 0, 0) }
+      )
+      [pscustomobject]@{
+        WithoutLog = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type NSIS3 -Unicode $true -LogCmdIsEnabled $false
+        WithLog    = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type NSIS3 -Unicode $true -LogCmdIsEnabled $true
+      }
+    }
+
+    $Result.WithoutLog.FatalInvalidCommandCount | Should -Be 0
+    $Result.WithoutLog.SemanticPenalty | Should -Be 2
+    $Result.WithLog.FatalInvalidCommandCount | Should -Be 0
+    $Result.WithLog.SemanticPenalty | Should -Be 0
+  }
+
+  It 'Should retain opaque trailing vendor operands without making a recognized command fatal' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]$Script:NSIS_OPCODE_CREATE_DIR
+        RawOpcode    = [uint32]$Script:NSIS_OPCODE_CREATE_DIR
+        Raw          = [uint32[]]@($Script:NSIS_OPCODE_CREATE_DIR, 4864, 1, 0, 0, 0, 5626)
+      }
+      Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $true
+    }
+
+    $Result.FatalInvalidCommandCount | Should -Be 0
+    $Result.IgnoredExtensionOperandCount | Should -Be 1
+    $Result.IgnoredExtensionOperands[0].OperandIndexes | Should -Be 6
   }
 
   It 'Should parse Google Antigravity through its source-backed log-enabled command layout' {
@@ -373,6 +408,61 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Format.IsSupported | Should -BeTrue
     $Info.ProductCode | Should -Be '121a0be4-63bd-531e-acf8-fc3924c7e984'
     $Info.DisplayName | Should -Be 'Antigravity 2.8.1'
+  }
+
+  It 'Should prefer stock raw-Deflate framing over an accidental legacy NSISBI header collision' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/iQIYI.iQIYI/14.8.0.10198/IQIYIsetup_winget.exe' -Uri 'https://mesh.if.iqiyi.com/player/upgrade/file/14.8.0.10198/IQIYIsetup_winget.exe' -Sha256 'D5C1F2FF746B05A7B5ABE1C5E9E5BD736829162FE484B114B1FBAF8C7B1E1641'
+
+    $Info = Get-NSISInfo -Path $Fixture
+    $Format = $Info.ParserVersionInfo
+
+    $Format.FirstHeaderFlagRoute | Should -Be 'standard'
+    $Format.CompressionRoute | Should -Be 'Deflate'
+    $Format.IsNsisBi | Should -BeFalse
+    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.ProductCode | Should -Not -BeNullOrEmpty
+  }
+
+  It 'Should retain Tencent Video metadata without empty-INI binding failures or unbounded section walking' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Tencent.TencentVideo/11.180.7429.0/TencentVideo11.180.7429.0.exe' -Uri 'https://dldir1v6.qq.com/qqtv/TencentVideo11.180.7429.0.exe' -Sha256 '3FF27EE167CC4D28175D204BAEAE76E350535DF55EB216728FAAB35D3350D411'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x86 -Scope machine
+
+    $Info.ProductCode | Should -Be 'qqlive'
+    $Info.Warnings | Should -Not -Match 'Cannot bind argument|execution budget'
+    $Info.Notices | Should -Match 'Full section simulation was skipped'
+  }
+
+  It 'Should resolve paired LockWindow records in a vendor NSIS 3 Unicode installer' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/NetEase.YoudaoPokeClass/2.18.9/YoudaoPokeClass-2.18.9.exe' -Uri 'https://codown.youdao.com/ke/pokeClass/2.18.9.0/YoudaoPokeClass-2.18.9.exe' -Sha256 '3C6F8A4D6FCC9023E9A4FD8D7D5A07059D372A4BBCCA452F8071F3F633CC0162'
+
+    $Format = Get-NSISFormatInfo -Path $Fixture
+
+    $Format.CatalogProfileId | Should -Be 'official-nsis3-unicode'
+    $Format.LogCommandEnabled | Should -BeTrue
+    $Format.FatalInvalidCommandCount | Should -Be 0
+    $Format.HasSemanticAmbiguity | Should -BeFalse
+  }
+
+  It 'Should retain a vendor extension operand as nonfatal format evidence' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Tencent.Yuanbao/2.81.0/yuanbao_2.81.0.629_x64.exe' -Uri 'https://cdn-hybrid-prod.hunyuan.tencent.com/Desktop/official/b2640c59915a11b284a81d8d469c715d/yuanbao_2.81.0.629_x64.exe' -Sha256 'AB3DC14CDD2CB5EAF89B6A4CCC9EE268AF8AE5DDBDFAD84DD55DE7622FD44898'
+
+    $Format = Get-NSISFormatInfo -Path $Fixture
+
+    $Format.IsSupported | Should -BeTrue
+    $Format.FatalInvalidCommandCount | Should -Be 0
+    $Format.IgnoredExtensionOperandCount | Should -Be 1
+    $Format.Notices | Should -Match 'vendor-extension operand'
+  }
+
+  It 'Should initialize CMDLINE with the quoted installer path for bounded runtime scans' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/SonicWall.GlobalVPNClient/5.0.0.2008/GVCSetup-Win32_5.0.0.2008.exe' -Uri 'https://software.sonicwall.com/GlobalVPNClient/GVCSetup-Win32_5.0.0.2008.exe' -Sha256 'A5CA2B31C5B56D7DC616DFC7B1D3D3AB557363FEC4E207EEB6067AC4C34AFE14'
+
+    $Info = Get-NSISInfo -Path $Fixture
+
+    $Info.DisplayName | Should -Be 'Global VPN Client'
+    $Info.DisplayVersion | Should -Be '5.0.0.2008'
+    $Info.Warnings | Should -Not -Match 'execution budget'
   }
 
   It 'Should recognize bounded vendor LZMA2 header framing' {

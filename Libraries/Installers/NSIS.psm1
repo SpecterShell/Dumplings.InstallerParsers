@@ -136,7 +136,8 @@ function Get-NSISInfo {
     if (-not $FormatInfo.IsSupported) {
       throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
     }
-    $SimulationArguments = @{ FormatContext = $Context; Environment = $Environment; CommandLine = $CommandLine; FileSystem = $FileSystem }
+    $SimulationArguments = @{ FormatContext = $Context; Environment = $Environment; FileSystem = $FileSystem }
+    if ($PSBoundParameters.ContainsKey('CommandLine')) { $SimulationArguments.CommandLine = $CommandLine }
     if ($FileSystemComplete) { $SimulationArguments.FileSystemComplete = $true }
     if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $SimulationArguments.Architecture = $Architecture }
     if (-not [string]::IsNullOrWhiteSpace($Scope)) { $SimulationArguments.Scope = $Scope }
@@ -151,6 +152,11 @@ function Get-NSISInfo {
     # do not need a second parse through Get-NSISFormatInfo.
     $Metadata.Warnings = [string[]]@(
       @($Metadata.Warnings; $FormatInfo.Warnings) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    )
+    $Metadata.Notices = [string[]]@(
+      @($Metadata.Notices; $FormatInfo.Notices) |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
         Select-Object -Unique
     )

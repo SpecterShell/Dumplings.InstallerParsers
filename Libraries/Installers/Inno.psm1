@@ -3505,9 +3505,6 @@ function Get-InnoInfo {
       $Warnings.Add('Post-file metadata records exist without an anchorable embedded file table; registry and association evidence requires manual validation.')
     }
     $AssociationInfo = Get-InnoRegistryAssociationInfo -RegistryEntries ([pscustomobject[]]@($PostFileRecordInfo.RegistryEntries))
-    if (@($PostFileRecordInfo.RegistryEntries | Where-Object Conditional).Count -gt 0) {
-      $Warnings.Add('One or more Inno registry entries are conditional on components, tasks, languages, or Pascal expressions; emitted registry evidence may not apply to every installation path.')
-    }
 
     $AppNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppName] -ConstantMap $PascalScriptConstantMap
     $AppVerNameInfo = Get-InnoStaticStringInfo -Value $HeaderValues[$HeaderFields.AppVerName] -ConstantMap $PascalScriptConstantMap
@@ -3611,9 +3608,15 @@ function Get-InnoInfo {
       AppsAndFeaturesInstallerType             = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? 'inno' : $null
       Warnings                                 = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
       UnresolvedFields                         = [string[]]@($UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Notices                                  = [string[]]@()
       RegistryWrites                           = [pscustomobject[]]@($PostFileRecordInfo.RegistryEntries)
       FileExtensions                           = [string[]]@($AssociationInfo.FileExtensions)
       Protocols                                = [string[]]@($AssociationInfo.Protocols)
+      ConditionalFileExtensions                = [string[]]@($AssociationInfo.ConditionalFileExtensions)
+      ConditionalProtocols                     = [string[]]@($AssociationInfo.ConditionalProtocols)
+      FileExtensionAssociations                = [pscustomobject[]]@($AssociationInfo.FileExtensionAssociations)
+      ProtocolAssociations                     = [pscustomobject[]]@($AssociationInfo.ProtocolAssociations)
+      ConditionalRegistryAssociations          = [pscustomobject[]]@($AssociationInfo.ConditionalRegistryAssociations)
       MetadataTablesResolved                   = $PostFileRecordInfo.IsResolved
       MetadataRecordCounts                     = [pscustomobject]@{
         Icons           = @($PostFileRecordInfo.Icons).Count
@@ -4347,6 +4350,11 @@ function Get-InnoRegistryAssociationInfo {
 
   $Extensions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $Protocols = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $ConditionalExtensions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $ConditionalProtocols = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $ExtensionAssociations = [Collections.Generic.List[object]]::new()
+  $ProtocolAssociations = [Collections.Generic.List[object]]::new()
+  $ConditionalAssociations = [Collections.Generic.List[object]]::new()
   foreach ($Entry in $RegistryEntries) {
     $ClassesPath = if ($Entry.RootKey -eq 'HKCR') {
       [string]$Entry.Subkey
@@ -4357,12 +4365,47 @@ function Get-InnoRegistryAssociationInfo {
     }
     if ([string]::IsNullOrWhiteSpace($ClassesPath) -or $ClassesPath -match '\{code:') { continue }
     $FirstSegment = ($ClassesPath -split '\\', 2)[0]
-    if ($FirstSegment -match '^\.[A-Za-z0-9][A-Za-z0-9+_-]*$') { $null = $Extensions.Add($FirstSegment.TrimStart('.').ToLowerInvariant()) }
-    if ($Entry.ValueName -ieq 'URL Protocol' -and $FirstSegment -match '^[A-Za-z][A-Za-z0-9+.-]*$') { $null = $Protocols.Add($FirstSegment.ToLowerInvariant()) }
+    $Kind = if ($FirstSegment -match '^\.[A-Za-z0-9][A-Za-z0-9+_-]*$') {
+      'FileExtension'
+    } elseif ($Entry.ValueName -ieq 'URL Protocol' -and $FirstSegment -match '^[A-Za-z][A-Za-z0-9+.-]*$') {
+      'Protocol'
+    } else {
+      $null
+    }
+    if (-not $Kind) { continue }
+
+    $Name = $Kind -eq 'FileExtension' ? $FirstSegment.TrimStart('.').ToLowerInvariant() : $FirstSegment.ToLowerInvariant()
+    $Association = [pscustomobject][ordered]@{
+      Kind         = $Kind
+      Name         = $Name
+      RootKey      = [string]$Entry.RootKey
+      Subkey       = [string]$Entry.Subkey
+      ValueName    = [string]$Entry.ValueName
+      ValueData    = [string]$Entry.ValueData
+      Conditional  = [bool]$Entry.Conditional
+      Components   = [string]$Entry.Components
+      Tasks        = [string]$Entry.Tasks
+      Languages    = [string]$Entry.Languages
+      Check        = [string]$Entry.Check
+      RecordOffset = $Entry.RecordOffset
+    }
+    if ($Kind -eq 'FileExtension') {
+      $ExtensionAssociations.Add($Association)
+      $null = ($Entry.Conditional ? $ConditionalExtensions : $Extensions).Add($Name)
+    } else {
+      $ProtocolAssociations.Add($Association)
+      $null = ($Entry.Conditional ? $ConditionalProtocols : $Protocols).Add($Name)
+    }
+    if ($Entry.Conditional) { $ConditionalAssociations.Add($Association) }
   }
   return [pscustomobject]@{
-    FileExtensions = [string[]]@($Extensions | Sort-Object)
-    Protocols      = [string[]]@($Protocols | Sort-Object)
+    FileExtensions                  = [string[]]@($Extensions | Sort-Object)
+    Protocols                       = [string[]]@($Protocols | Sort-Object)
+    ConditionalFileExtensions       = [string[]]@($ConditionalExtensions | Sort-Object)
+    ConditionalProtocols            = [string[]]@($ConditionalProtocols | Sort-Object)
+    FileExtensionAssociations       = [pscustomobject[]]$ExtensionAssociations.ToArray()
+    ProtocolAssociations            = [pscustomobject[]]$ProtocolAssociations.ToArray()
+    ConditionalRegistryAssociations = [pscustomobject[]]$ConditionalAssociations.ToArray()
   }
 }
 

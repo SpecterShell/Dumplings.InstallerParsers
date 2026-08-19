@@ -86,6 +86,16 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.Shortcut.Comment | Should -Be 'Unit shortcut'
   }
 
+  It 'Should model empty INI operands without PowerShell binding failures' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{ IniFiles = @{ '' = @{ '' = @{ '' = 'empty-key-value' } } } }
+      Get-NSISIniValue -State $State -File '' -Section '' -Key ''
+    }
+
+    $Result | Should -Be 'empty-key-value'
+  }
+
   It 'Should reproduce environment, registry, and INI read error contracts' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {

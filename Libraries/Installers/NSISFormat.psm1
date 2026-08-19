@@ -124,7 +124,7 @@ $NSIS_MAX_BACKWARD_PE_SCAN = 1048576
 $NSIS_MAX_FILE_SIZE = [uint64]4294967295
 $NSIS_MAX_HEADER_SIZE = 134217728
 $NSIS_MAX_ENTRY_COUNT = 33554432
-$NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT = 65536
+$NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT = 16384
 $NSIS_MAX_EXTRACTION_FILE_COUNT = 262144
 $NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES = 1073741824
 $NSIS_MAX_VIRTUAL_FILE_BYTES = 4194304
@@ -240,6 +240,7 @@ $NSIS_OPCODE_SECTION_SET = 63
 $NSIS_OPCODE_INSTALL_TYPE_SET = 64
 $NSIS_OPCODE_GET_OS_INFO = 65
 $NSIS_OPCODE_RESERVED = 66
+$NSIS_OPCODE_LOCK_WINDOW = 67
 $NSIS_OPCODE_FILE_WRITE_UTF16 = 68
 $NSIS_OPCODE_FILE_READ_UTF16 = 69
 $NSIS_OPCODE_LOG = 70
@@ -1381,17 +1382,23 @@ function Get-NSISArchiveCrcInfo {
   }
 }
 
-function Get-NSISHeaderData {
+function Read-NSISHeaderDataCandidate {
   <#
   .SYNOPSIS
-    Locate and decompress the NSIS installer header without invoking external tools
+    Decode one stock or legacy NSISBI first-header route.
   .PARAMETER Path
-    The path to the installer
+    The path to the installer.
+  .PARAMETER FirstHeaderRoute
+    Stock first-header framing or the unmarked NSISBI 3.03 extension.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The path to the installer')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(Mandatory)]
+    [ValidateSet('Standard', 'Pre304')]
+    [string]$FirstHeaderRoute
   )
 
   $InstallerPath = (Get-Item -Path $Path -Force).FullName
@@ -1401,6 +1408,32 @@ function Get-NSISHeaderData {
   try {
     $FirstHeader = Get-NSISFirstHeaderCandidate -Stream $InstallerStream
     if (-not $FirstHeader) { throw 'The NSIS installer header could not be located at a valid aligned archive start' }
+
+    # NSISBI 3.03 did not reserve a first-header flag. Its two extra words can
+    # therefore collide with arbitrary bytes at the beginning of a stock raw
+    # Deflate stream. Decode both physical routes and accept only a complete,
+    # bounded logical header; the public caller gives stock framing priority.
+    if (($FirstHeader.Flags -band $Script:NSISBI_CURRENT_FLAG_FORMAT) -eq 0) {
+      $ProbeLength = [int][Math]::Min(64L, $InstallerStream.Length - $FirstHeader.Offset)
+      $FirstHeaderProbe = Read-BinaryBytes -Stream $InstallerStream -Offset $FirstHeader.Offset -Count $ProbeLength
+      $DataBlockLow = if ($FirstHeaderProbe.Length -ge 36) { [BitConverter]::ToUInt32($FirstHeaderProbe, 28) } else { [uint32]0 }
+      $DataBlockHigh = if ($FirstHeaderProbe.Length -ge 36) { [BitConverter]::ToUInt32($FirstHeaderProbe, 32) } else { [uint32]0 }
+      if ($FirstHeaderRoute -eq 'Pre304') {
+        if (-not (Test-NSISPre304FirstHeader -Bytes $FirstHeaderProbe -LengthOfHeader $FirstHeader.LengthOfHeader -LengthOfFollowingData $FirstHeader.LengthOfFollowingData)) {
+          throw 'The unmarked NSISBI 3.03 first-header route did not satisfy its structural invariants.'
+        }
+        $FlagInfo = Get-NSISFirstHeaderFlagInfo -Flags $FirstHeader.Flags -DataBlockLow $DataBlockLow -DataBlockHigh $DataBlockHigh -Pre304
+      } else {
+        $FlagInfo = Get-NSISFirstHeaderFlagInfo -Flags $FirstHeader.Flags -DataBlockLow 0 -DataBlockHigh 0
+      }
+      foreach ($PropertyName in @(
+          'FirstHeaderSize', 'IsNsisBi', 'FlagRoute', 'HasLongDataBlockOffsets', 'HasLargeFileSource',
+          'SupportsExternalFiles', 'HasExternalFile', 'IsStubInstaller', 'ExternalFileCount',
+          'ExternalSegmentSize', 'DataBlockLength'
+        )) {
+        $FirstHeader.$PropertyName = $FlagInfo.$PropertyName
+      }
+    }
 
     $FirstHeaderOffset = $FirstHeader.Offset
     $LengthOfHeader = $FirstHeader.LengthOfHeader
@@ -1573,6 +1606,31 @@ function Get-NSISHeaderData {
   } finally {
     $InstallerStream.Dispose()
   }
+}
+
+function Get-NSISHeaderData {
+  <#
+  .SYNOPSIS
+    Locate and decompress the NSIS installer header without invoking external tools.
+  .DESCRIPTION
+    Unmarked first headers are attempted as stock 28-byte NSIS records before
+    the legacy 36-byte NSISBI route. Every route must decode the exact declared
+    logical header length and pass the existing archive and stream bounds.
+  .PARAMETER Path
+    The path to the installer.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory, HelpMessage = 'The path to the installer')][string]$Path)
+
+  $Errors = [Collections.Generic.List[string]]::new()
+  foreach ($Route in @('Standard', 'Pre304')) {
+    try {
+      return Read-NSISHeaderDataCandidate -Path $Path -FirstHeaderRoute $Route
+    } catch {
+      $Errors.Add("$Route`: $($_.Exception.Message)")
+    }
+  }
+  throw "Failed to decode the NSIS first header using stock and legacy NSISBI framing: $($Errors -join '; ')"
 }
 
 function Get-NSISBlockHeaders {
@@ -2106,18 +2164,25 @@ function Get-NSISVersionInfo {
       $LogEvidenceByType[$CandidateType] = Test-NSISLogCommandEvidence -Entries $Entries -Type $CandidateType -Unicode $Unicode -StringsBlock $StringsBlock
     }
     $ScoredCandidates = @($Candidates | ForEach-Object {
+        $Score = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled -IsNsisBi:$IsNsisBi
         [pscustomobject]@{
-          Type              = $_.Type
-          LogCmdIsEnabled   = $_.LogCmdIsEnabled
-          Priority          = $_.Priority
-          BadCommandCount   = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled -IsNsisBi:$IsNsisBi
-          SemanticPenalty   = if ($LogEvidenceByType[$_.Type] -and -not $_.LogCmdIsEnabled) { 1 } else { 0 }
-          SemanticSignature = Get-NSISCommandLayoutSemanticSignature -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
+          Type                         = $_.Type
+          LogCmdIsEnabled              = $_.LogCmdIsEnabled
+          Priority                     = $_.Priority
+          BadCommandCount              = $Score.FatalInvalidCommandCount
+          FatalInvalidCommandCount     = $Score.FatalInvalidCommandCount
+          IgnoredExtensionOperandCount = $Score.IgnoredExtensionOperandCount
+          IgnoredExtensionOperands     = $Score.IgnoredExtensionOperands
+          SemanticPenalty              = $Score.SemanticPenalty + $(if ($LogEvidenceByType[$_.Type] -and -not $_.LogCmdIsEnabled) { 1 } else { 0 })
+          SemanticSignature            = Get-NSISCommandLayoutSemanticSignature -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
         }
-      } | Sort-Object -Property BadCommandCount, SemanticPenalty, Priority)
+      } | Sort-Object -Property BadCommandCount, SemanticPenalty, IgnoredExtensionOperandCount, Priority)
     $BestCandidate = $ScoredCandidates[0]
   } else {
     $BestCandidate | Add-Member -NotePropertyName BadCommandCount -NotePropertyValue 0 -Force
+    $BestCandidate | Add-Member -NotePropertyName FatalInvalidCommandCount -NotePropertyValue 0 -Force
+    $BestCandidate | Add-Member -NotePropertyName IgnoredExtensionOperandCount -NotePropertyValue 0 -Force
+    $BestCandidate | Add-Member -NotePropertyName IgnoredExtensionOperands -NotePropertyValue ([object[]]@()) -Force
     $BestCandidate | Add-Member -NotePropertyName SemanticPenalty -NotePropertyValue 0 -Force
     $BestCandidate | Add-Member -NotePropertyName SemanticSignature -NotePropertyValue '' -Force
     $ScoredCandidates = @($BestCandidate)
@@ -2125,7 +2190,9 @@ function Get-NSISVersionInfo {
 
   $CatalogProfile = Resolve-NSISCatalogProfile -CommandType $BestCandidate.Type -Unicode $Unicode -IsNsisBi $IsNsisBi -StringsBlock $StringsBlock -Entries $Entries
   $BestScoreCandidates = @($ScoredCandidates | Where-Object {
-      $_.BadCommandCount -eq $BestCandidate.BadCommandCount -and $_.SemanticPenalty -eq $BestCandidate.SemanticPenalty
+      $_.BadCommandCount -eq $BestCandidate.BadCommandCount -and
+      $_.SemanticPenalty -eq $BestCandidate.SemanticPenalty -and
+      $_.IgnoredExtensionOperandCount -eq $BestCandidate.IgnoredExtensionOperandCount
     })
   $BestScoreCount = $BestScoreCandidates.Count
   $SemanticSignatures = @($BestScoreCandidates.SemanticSignature | Select-Object -Unique)
@@ -2141,25 +2208,28 @@ function Get-NSISVersionInfo {
   }
 
   return [pscustomobject]@{
-    Unicode              = $Unicode
-    Type                 = $BestCandidate.Type
-    IsV3                 = $BestCandidate.Type -eq 'NSIS3'
-    IsPark               = $BestCandidate.Type -like 'Park*'
-    IsNsisBi             = $IsNsisBi
-    LogCmdIsEnabled      = [bool]$BestCandidate.LogCmdIsEnabled
-    BadCommandCount      = [int]$BestCandidate.BadCommandCount
-    Profile              = $CatalogProfile
-    CatalogProfileId     = $CatalogProfile.Id
-    EditionId            = $CatalogProfile.EditionId
-    Edition              = $CatalogProfile.Edition
-    CharacterMode        = $CatalogProfile.CharacterMode
-    Generation           = $CatalogProfile.Generation
-    VersionRange         = $CatalogProfile.VersionRange
-    CompilerVersion      = $null
-    DetectionConfidence  = $DetectionConfidence
-    HasSemanticAmbiguity = $HasSemanticAmbiguity
-    CandidateLayouts     = [pscustomobject[]]$ScoredCandidates
-    StringCodeCounts     = [pscustomobject]@{
+    Unicode                      = $Unicode
+    Type                         = $BestCandidate.Type
+    IsV3                         = $BestCandidate.Type -eq 'NSIS3'
+    IsPark                       = $BestCandidate.Type -like 'Park*'
+    IsNsisBi                     = $IsNsisBi
+    LogCmdIsEnabled              = [bool]$BestCandidate.LogCmdIsEnabled
+    BadCommandCount              = [int]$BestCandidate.BadCommandCount
+    FatalInvalidCommandCount     = [int]$BestCandidate.FatalInvalidCommandCount
+    IgnoredExtensionOperandCount = [int]$BestCandidate.IgnoredExtensionOperandCount
+    IgnoredExtensionOperands     = [object[]]@($BestCandidate.IgnoredExtensionOperands)
+    Profile                      = $CatalogProfile
+    CatalogProfileId             = $CatalogProfile.Id
+    EditionId                    = $CatalogProfile.EditionId
+    Edition                      = $CatalogProfile.Edition
+    CharacterMode                = $CatalogProfile.CharacterMode
+    Generation                   = $CatalogProfile.Generation
+    VersionRange                 = $CatalogProfile.VersionRange
+    CompilerVersion              = $null
+    DetectionConfidence          = $DetectionConfidence
+    HasSemanticAmbiguity         = $HasSemanticAmbiguity
+    CandidateLayouts             = [pscustomobject[]]$ScoredCandidates
+    StringCodeCounts             = [pscustomobject]@{
       NSIS2 = $NSIS2Count
       NSIS3 = $NSIS3Count
       Park  = $ParkCount
@@ -2334,7 +2404,7 @@ function Measure-NSISCommandLayoutCandidate {
   .PARAMETER IsNsisBi
     Whether records use NSISBI's eight-operand command ABI.
   #>
-  [OutputType([int])]
+  [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The raw NSIS command entries')]
     [pscustomobject[]]$Entries,
@@ -2352,25 +2422,32 @@ function Measure-NSISCommandLayoutCandidate {
     [bool]$IsNsisBi = $false
   )
 
-  $BadCommandCount = 0
+  $FatalInvalidCommandCount = 0
+  $IgnoredExtensionOperandCount = 0
+  $IgnoredExtensionOperands = [Collections.Generic.List[object]]::new()
+  $LockWindowShapeValues = [Collections.Generic.HashSet[int]]::new()
+  $FileWriteLockShapeCount = 0
 
-  # Score a layout by impossible opcode values and nonzero parameters beyond the
-  # source-defined arity. The lowest score selects the command normalization.
-  foreach ($Entry in $Entries) {
+  # Invalid opcodes and impossible operand semantics are fatal. Nonzero values
+  # beyond a recognized command's source-defined operands are retained as
+  # vendor-extension evidence and influence selection without disabling the
+  # documented command subset.
+  for ($EntryIndex = 0; $EntryIndex -lt $Entries.Count; $EntryIndex++) {
+    $Entry = $Entries[$EntryIndex]
     if ($Entry.LayoutOpcode -in @($Script:NSIS_OPCODE_EXTRACT_STUB_FILE, $Script:NSIS_OPCODE_VERIFY_EXTERNAL_FILE)) { continue }
     $Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.LayoutOpcode -Type $Type -Unicode $Unicode -LogCmdIsEnabled $LogCmdIsEnabled
     if ($Opcode -lt 0 -or $Opcode -ge $Script:NSIS_COMMAND_PARAMETER_COUNTS.Count) {
-      $BadCommandCount++
+      $FatalInvalidCommandCount++
       continue
     }
 
     if ($Type -eq 'NSIS3') {
       if ($Opcode -eq $Script:NSIS_OPCODE_RESERVED) {
-        $BadCommandCount++
+        $FatalInvalidCommandCount++
         continue
       }
     } elseif ($Opcode -eq $Script:NSIS_OPCODE_RESERVED -or $Opcode -eq $Script:NSIS_OPCODE_GET_OS_INFO) {
-      $BadCommandCount++
+      $FatalInvalidCommandCount++
       continue
     }
 
@@ -2379,11 +2456,11 @@ function Measure-NSISCommandLayoutCandidate {
     # emitted only by EW_SECTIONSET. This distinguishes official stubs with an
     # inserted EW_LOG slot even when the script contains no LogText/LogSet
     # instruction. Electron-builder's SectionSetSize output exercises this
-    # route in Google Antigravity.
+    # route in otherwise stock NSIS 3 Unicode media.
     if ($Opcode -eq $Script:NSIS_OPCODE_INSTALL_TYPE_SET) {
       $Operation = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$Entry.Raw[3]), 0)
       if ($Operation -notin @(0, 1)) {
-        $BadCommandCount++
+        $FatalInvalidCommandCount++
         continue
       }
     }
@@ -2401,8 +2478,25 @@ function Measure-NSISCommandLayoutCandidate {
     # invariant Park 2.46.3 LockWindow records also appear valid under the
     # non-log layout and acquire a different canonical meaning.
     if ($Opcode -eq $Script:NSIS_OPCODE_FIND_PROC -and $LastNonZeroParameter -eq 0) {
-      $BadCommandCount++
+      $FatalInvalidCommandCount++
       continue
+    }
+    if ($Opcode -eq $Script:NSIS_OPCODE_LOCK_WINDOW -and $Entry.Raw[1] -notin @(0, 1)) {
+      $FatalInvalidCommandCount++
+      continue
+    }
+
+    # A paired LockWindow on/off sequence is source-defined semantic evidence
+    # for a log-enabled official command table. Interpreting the same two
+    # one-operand records as FileWriteUTF16LE would produce two empty no-op
+    # writes and is therefore retained only as a lower-ranked alternative.
+    $HasLockWindowShape = $Entry.Raw[1] -in @(0, 1)
+    for ($Index = 2; $HasLockWindowShape -and $Index -le $MaximumOperand; $Index++) {
+      if ($Entry.Raw[$Index] -ne 0) { $HasLockWindowShape = $false }
+    }
+    if ($HasLockWindowShape -and $Opcode -in @($Script:NSIS_OPCODE_LOCK_WINDOW, $Script:NSIS_OPCODE_FILE_WRITE_UTF16)) {
+      $null = $LockWindowShapeValues.Add([int]$Entry.Raw[1])
+      if ($Opcode -eq $Script:NSIS_OPCODE_FILE_WRITE_UTF16) { $FileWriteLockShapeCount++ }
     }
     # NSISBI widens registry data and uninstaller records to carry 64-bit data
     # offsets plus per-file CRC values. Other canonical commands retain their
@@ -2419,11 +2513,27 @@ function Measure-NSISCommandLayoutCandidate {
       $Script:NSIS_COMMAND_PARAMETER_COUNTS[$Opcode]
     }
     if ($ExpectedOperandCount -lt $LastNonZeroParameter) {
-      $BadCommandCount++
+      $OperandIndexes = [Collections.Generic.List[int]]::new()
+      for ($Index = $ExpectedOperandCount + 1; $Index -le $MaximumOperand; $Index++) {
+        if ($Entry.Raw[$Index] -ne 0) { $OperandIndexes.Add($Index) }
+      }
+      $IgnoredExtensionOperandCount += $OperandIndexes.Count
+      $IgnoredExtensionOperands.Add([pscustomobject][ordered]@{
+          EntryIndex           = $EntryIndex
+          RawOpcode            = [uint32]$Entry.RawOpcode
+          CanonicalOpcode      = $Opcode
+          ExpectedOperandCount = $ExpectedOperandCount
+          OperandIndexes       = [int[]]$OperandIndexes.ToArray()
+        })
     }
   }
 
-  return $BadCommandCount
+  return [pscustomobject][ordered]@{
+    FatalInvalidCommandCount     = $FatalInvalidCommandCount
+    IgnoredExtensionOperandCount = $IgnoredExtensionOperandCount
+    IgnoredExtensionOperands     = [object[]]$IgnoredExtensionOperands.ToArray()
+    SemanticPenalty              = $LockWindowShapeValues.Count -eq 2 ? $FileWriteLockShapeCount : 0
+  }
 }
 
 function Get-NSISStubArchitecture {
@@ -2512,55 +2622,63 @@ function ConvertTo-NSISFormatInfo {
   $VersionInfo = $Context.VersionInfo
   $HeaderData = $Context.HeaderData
   $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Notices = [System.Collections.Generic.List[string]]::new()
   if ($VersionInfo.HasSemanticAmbiguity) {
     $Warnings.Add('Multiple equally valid NSIS command layouts assign different meanings to opcodes used by this installer. Static command simulation is disabled rather than guessing a compiler feature set or reordered command table.')
   } elseif ($VersionInfo.DetectionConfidence -eq 'Ambiguous') {
     $Warnings.Add('The installer does not contain decisive generation control codes; the selected command profile is the lowest-error structurally valid candidate.')
   }
   if ($VersionInfo.BadCommandCount -gt 0) {
-    $Warnings.Add("The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) that violate the source-defined opcode or arity table.")
+    $Warnings.Add("The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) with invalid opcodes or source-defined operand semantics.")
+  }
+  if ($VersionInfo.IgnoredExtensionOperandCount -gt 0) {
+    $Notices.Add("The selected command layout contains $($VersionInfo.IgnoredExtensionOperandCount) nonzero trailing vendor-extension operand(s); the parser used the documented command operands and retained the opaque values as format evidence.")
   }
   if ($HeaderData.HasExternalFile) {
     $Warnings.Add('The NSISBI installer references an external payload sidecar; embedded format evidence does not describe the complete payload set.')
   }
 
   return [pscustomobject][ordered]@{
-    Path                  = $HeaderData.Path
-    InstallerType         = 'Nullsoft'
-    EditionId             = $VersionInfo.EditionId
-    Edition               = $VersionInfo.Edition
-    CompilerVersion       = $VersionInfo.CompilerVersion
-    VersionRange          = $VersionInfo.VersionRange
-    Generation            = $VersionInfo.Generation
-    CharacterMode         = $VersionInfo.CharacterMode
-    StubArchitecture      = $VersionInfo.StubArchitecture
-    CatalogProfileId      = $VersionInfo.CatalogProfileId
-    FirstHeaderRoute      = $VersionInfo.FirstHeaderRoute
-    FirstHeaderFlagRoute  = $VersionInfo.FirstHeaderFlagRoute
-    HeaderRoute           = $VersionInfo.HeaderRoute
-    BlockHeaderRoute      = $VersionInfo.BlockHeaderRoute
-    EntryRoute            = $VersionInfo.EntryRoute
-    StringRoute           = $VersionInfo.StringRoute
-    OpcodeRoute           = $VersionInfo.OpcodeRoute
-    VariableRoute         = $VersionInfo.VariableRoute
-    CompressionRoute      = $VersionInfo.CompressionRoute
-    PayloadRoute          = $VersionInfo.PayloadRoute
-    ChecksumRoute         = $VersionInfo.ChecksumRoute
-    ArchiveCrcStatus      = $HeaderData.ArchiveCrcInfo.Status
-    ArchiveCrcVerified    = $HeaderData.ArchiveCrcInfo.IsVerified
-    LogCommandEnabled     = $VersionInfo.LogCmdIsEnabled
-    IsSolid               = $HeaderData.IsSolid
-    IsNsisBi              = $HeaderData.IsNsisBi
-    SupportsExternalFiles = $HeaderData.SupportsExternalFiles
-    HasExternalFile       = $HeaderData.HasExternalFile
-    IsStubInstaller       = $HeaderData.IsStubInstaller
-    ExternalFileCount     = $HeaderData.ExternalFileCount
-    ExternalSegmentSize   = $HeaderData.ExternalSegmentSize
-    DetectionConfidence   = $VersionInfo.DetectionConfidence
-    HasSemanticAmbiguity  = [bool]$VersionInfo.HasSemanticAmbiguity
-    CandidateLayouts      = $VersionInfo.CandidateLayouts
-    IsSupported           = [bool]$VersionInfo.Profile.Supported -and $VersionInfo.BadCommandCount -eq 0 -and -not $VersionInfo.HasSemanticAmbiguity
-    Warnings              = [string[]]$Warnings.ToArray()
+    Path                         = $HeaderData.Path
+    InstallerType                = 'Nullsoft'
+    EditionId                    = $VersionInfo.EditionId
+    Edition                      = $VersionInfo.Edition
+    CompilerVersion              = $VersionInfo.CompilerVersion
+    VersionRange                 = $VersionInfo.VersionRange
+    Generation                   = $VersionInfo.Generation
+    CharacterMode                = $VersionInfo.CharacterMode
+    StubArchitecture             = $VersionInfo.StubArchitecture
+    CatalogProfileId             = $VersionInfo.CatalogProfileId
+    FirstHeaderRoute             = $VersionInfo.FirstHeaderRoute
+    FirstHeaderFlagRoute         = $VersionInfo.FirstHeaderFlagRoute
+    HeaderRoute                  = $VersionInfo.HeaderRoute
+    BlockHeaderRoute             = $VersionInfo.BlockHeaderRoute
+    EntryRoute                   = $VersionInfo.EntryRoute
+    StringRoute                  = $VersionInfo.StringRoute
+    OpcodeRoute                  = $VersionInfo.OpcodeRoute
+    VariableRoute                = $VersionInfo.VariableRoute
+    CompressionRoute             = $VersionInfo.CompressionRoute
+    PayloadRoute                 = $VersionInfo.PayloadRoute
+    ChecksumRoute                = $VersionInfo.ChecksumRoute
+    ArchiveCrcStatus             = $HeaderData.ArchiveCrcInfo.Status
+    ArchiveCrcVerified           = $HeaderData.ArchiveCrcInfo.IsVerified
+    LogCommandEnabled            = $VersionInfo.LogCmdIsEnabled
+    IsSolid                      = $HeaderData.IsSolid
+    IsNsisBi                     = $HeaderData.IsNsisBi
+    SupportsExternalFiles        = $HeaderData.SupportsExternalFiles
+    HasExternalFile              = $HeaderData.HasExternalFile
+    IsStubInstaller              = $HeaderData.IsStubInstaller
+    ExternalFileCount            = $HeaderData.ExternalFileCount
+    ExternalSegmentSize          = $HeaderData.ExternalSegmentSize
+    DetectionConfidence          = $VersionInfo.DetectionConfidence
+    HasSemanticAmbiguity         = [bool]$VersionInfo.HasSemanticAmbiguity
+    CandidateLayouts             = $VersionInfo.CandidateLayouts
+    FatalInvalidCommandCount     = $VersionInfo.FatalInvalidCommandCount
+    IgnoredExtensionOperandCount = $VersionInfo.IgnoredExtensionOperandCount
+    IgnoredExtensionOperands     = $VersionInfo.IgnoredExtensionOperands
+    IsSupported                  = [bool]$VersionInfo.Profile.Supported -and $VersionInfo.BadCommandCount -eq 0 -and -not $VersionInfo.HasSemanticAmbiguity
+    Warnings                     = [string[]]$Warnings.ToArray()
+    Notices                      = [string[]]$Notices.ToArray()
   }
 }
 
