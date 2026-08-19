@@ -2626,7 +2626,10 @@ function ConvertTo-NSISFormatInfo {
   if ($VersionInfo.HasSemanticAmbiguity) {
     $Warnings.Add('Multiple equally valid NSIS command layouts assign different meanings to opcodes used by this installer. Static command simulation is disabled rather than guessing a compiler feature set or reordered command table.')
   } elseif ($VersionInfo.DetectionConfidence -eq 'Ambiguous') {
-    $Warnings.Add('The installer does not contain decisive generation control codes; the selected command profile is the lowest-error structurally valid candidate.')
+    # NSIS 2 and NSIS 3 share most command numbers. When every tied candidate
+    # gives all used opcodes the same meaning, generation uncertainty does not
+    # make simulation uncertain and belongs in diagnostic evidence, not warnings.
+    $Notices.Add('The installer does not contain decisive generation control codes; equivalent command profiles were tied, so the earliest compatible profile was selected.')
   }
   if ($VersionInfo.BadCommandCount -gt 0) {
     $Warnings.Add("The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) with invalid opcodes or source-defined operand semantics.")

@@ -1,5 +1,7 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # NSIS command interpreter and virtual system-effect simulation.
+# Instructor Registry plug-in stack and registry semantics are grounded in the
+# published v4.2 source: https://nsis.sourceforge.io/Registry_plug-in
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -2203,58 +2205,59 @@ function Initialize-NSISState {
   $HasComponentPage = Test-NSISHasComponentPage -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
   $VersionInfo | Add-Member -NotePropertyName HasComponentPage -NotePropertyValue $HasComponentPage -Force
   $State = [pscustomobject]@{
-    Path                        = $HeaderData.Path
-    Entries                     = $Entries
-    Sections                    = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
-    HasComponentPage            = $HasComponentPage
-    StringsBlock                = $StringsBlock
-    LanguageTable               = $LanguageTable
-    LanguageTables              = $LanguageTables
-    VersionInfo                 = $VersionInfo
-    AnsiEncoding                = Get-NSISAnsiEncoding -LanguageId $(if ($LanguageTable) { $LanguageTable.LanguageId } else { $Script:NSIS_DEFAULT_LANGUAGE }) -CodePage $AnsiCodePage
-    Variables                   = @{}
-    Registry                    = @{}
-    RegistryWrites              = [System.Collections.Generic.List[object]]::new()
-    IniFiles                    = @{}
-    IniWrites                   = [System.Collections.Generic.List[object]]::new()
-    CreatedShortcuts            = [System.Collections.Generic.List[object]]::new()
-    ExecutedPayloads            = [System.Collections.Generic.List[object]]::new()
-    ConditionalExtractedFiles   = [System.Collections.Generic.List[object]]::new()
-    Warnings                    = [System.Collections.Generic.List[string]]::new()
-    Notices                     = [System.Collections.Generic.List[string]]::new()
-    Stack                       = [System.Collections.Generic.List[string]]::new()
-    SystemVariableStack         = [System.Collections.Generic.List[object]]::new()
-    Directories                 = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Files                       = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    FileSystem                  = @{}
-    FileSystemComplete          = [bool]$FileSystemComplete
-    UnknownFileSystemPredicates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    UnknownProcessPredicates    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    FileHandles                 = @{}
-    NextFileHandle              = 1
-    NextTempFile                = 1
-    FindHandles                 = @{}
-    NextFindHandle              = 1
-    ExecFlags                   = @{}
-    LastExecFlags               = @{}
-    UnknownExecFlags            = [System.Collections.Generic.HashSet[int]]::new()
-    UnknownVariables            = [System.Collections.Generic.HashSet[int]]::new()
-    CurrentInstallType          = 0
-    InstallTypeNames            = @{}
-    StatusUpdateFlag            = 0
-    ShellVarContext             = $null
-    HasUnknownControlFlow       = $false
-    ConditionalReasons          = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    UnsupportedOpcodes          = [System.Collections.Generic.HashSet[int]]::new()
-    UnknownEnvironment          = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    BranchPredicates            = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    ExploredBranchCount         = 0
-    TruncatedBranchCount        = 0
-    TargetArchitecture          = $Architecture
-    TargetScope                 = $Scope
-    Environment                 = @{}
-    CommandLine                 = ''
-    Metadata                    = [ordered]@{
+    Path                         = $HeaderData.Path
+    Entries                      = $Entries
+    Sections                     = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+    HasComponentPage             = $HasComponentPage
+    StringsBlock                 = $StringsBlock
+    LanguageTable                = $LanguageTable
+    LanguageTables               = $LanguageTables
+    VersionInfo                  = $VersionInfo
+    AnsiEncoding                 = Get-NSISAnsiEncoding -LanguageId $(if ($LanguageTable) { $LanguageTable.LanguageId } else { $Script:NSIS_DEFAULT_LANGUAGE }) -CodePage $AnsiCodePage
+    Variables                    = @{}
+    Registry                     = @{}
+    RegistryWrites               = [System.Collections.Generic.List[object]]::new()
+    IniFiles                     = @{}
+    IniWrites                    = [System.Collections.Generic.List[object]]::new()
+    CreatedShortcuts             = [System.Collections.Generic.List[object]]::new()
+    ExecutedPayloads             = [System.Collections.Generic.List[object]]::new()
+    ConditionalExtractedFiles    = [System.Collections.Generic.List[object]]::new()
+    Warnings                     = [System.Collections.Generic.List[string]]::new()
+    Notices                      = [System.Collections.Generic.List[string]]::new()
+    Stack                        = [System.Collections.Generic.List[string]]::new()
+    SystemVariableStack          = [System.Collections.Generic.List[object]]::new()
+    Directories                  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Files                        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    FileSystem                   = @{}
+    FileSystemComplete           = [bool]$FileSystemComplete
+    UnknownFileSystemPredicates  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    UnknownProcessPredicates     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    FileHandles                  = @{}
+    NextFileHandle               = 1
+    NextTempFile                 = 1
+    FindHandles                  = @{}
+    NextFindHandle               = 1
+    ExecFlags                    = @{}
+    LastExecFlags                = @{}
+    UnknownExecFlags             = [System.Collections.Generic.HashSet[int]]::new()
+    UnknownVariables             = [System.Collections.Generic.HashSet[int]]::new()
+    CurrentInstallType           = 0
+    InstallTypeNames             = @{}
+    StatusUpdateFlag             = 0
+    ShellVarContext              = $null
+    HasUnknownControlFlow        = $false
+    ConditionalReasons           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    UnsupportedOpcodes           = [System.Collections.Generic.HashSet[int]]::new()
+    UnknownEnvironment           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    BranchPredicates             = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    ExploredBranchCount          = 0
+    TruncatedBranchCount         = 0
+    TargetArchitecture           = $Architecture
+    TargetScope                  = $Scope
+    RegistryPluginScopeVariables = [int[]]@()
+    Environment                  = @{}
+    CommandLine                  = ''
+    Metadata                     = [ordered]@{
       Path                               = $HeaderData.Path
       InstallerType                      = 'Nullsoft'
       TargetArchitecture                 = $Architecture
@@ -2518,6 +2521,251 @@ function Get-NSISOsInfoMemoryValue {
   }
 }
 
+function Resolve-NSISRegistryPluginPath {
+  <#
+  .SYNOPSIS
+    Split an Instructor Registry plug-in path into a canonical hive and key.
+  .DESCRIPTION
+    The plug-in accepts long and abbreviated Windows hive names followed by a
+    backslash and key. Invalid or dynamically unresolved roots return null so
+    static simulation never invents a target hive.
+  .PARAMETER Path
+    Full registry path popped from the NSIS plug-in stack.
+  #>
+  [OutputType([pscustomobject])]
+  param ([AllowEmptyString()][string]$Path)
+
+  $Value = $Path.Trim().TrimEnd('\')
+  if ($Value -notmatch '^(?<Root>HK(?:CR|CU|LM|U|PD|CC|DD)|HKEY_(?:CLASSES_ROOT|CURRENT_USER|LOCAL_MACHINE|USERS|PERFORMANCE_DATA|CURRENT_CONFIG|DYN_DATA))\\(?<Key>.*)$') { return $null }
+  # Capture both fields before the following regex switch replaces PowerShell's
+  # automatic $Matches dictionary with the hive-alias match.
+  $RootText = $Matches.Root
+  $Key = $Matches.Key
+  $Root = switch -Regex ($RootText) {
+    '^(?:HKCR|HKEY_CLASSES_ROOT)$' { 'HKCR'; break }
+    '^(?:HKCU|HKEY_CURRENT_USER)$' { 'HKCU'; break }
+    '^(?:HKLM|HKEY_LOCAL_MACHINE)$' { 'HKLM'; break }
+    '^(?:HKU|HKEY_USERS)$' { 'HKU'; break }
+    '^(?:HKPD|HKEY_PERFORMANCE_DATA)$' { 'HKPD'; break }
+    '^(?:HKCC|HKEY_CURRENT_CONFIG)$' { 'HKCC'; break }
+    '^(?:HKDD|HKEY_DYN_DATA)$' { 'HKDD'; break }
+  }
+  if (-not $Root) { return $null }
+  return [pscustomobject]@{ Root = $Root; Key = $Key.TrimStart('\') }
+}
+
+function Add-NSISRegistryPluginWrite {
+  <#
+  .SYNOPSIS
+    Project one source-backed Registry::_Write call into virtual registry evidence.
+  .PARAMETER State
+    Mutable NSIS simulation state.
+  .PARAMETER Path
+    Full registry path containing the hive and key.
+  .PARAMETER Name
+    Registry value name.
+  .PARAMETER Value
+    Registry value data.
+  .PARAMETER Type
+    Registry plug-in type name such as REG_SZ or REG_DWORD.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [AllowEmptyString()][string]$Path,
+    [AllowEmptyString()][string]$Name,
+    [AllowEmptyString()][string]$Value,
+    [AllowEmptyString()][string]$Type
+  )
+
+  $Target = Resolve-NSISRegistryPluginPath -Path $Path
+  $RegistryType = $Type.Trim().ToUpperInvariant()
+  if (-not $Target -or $RegistryType -notmatch '^REG_(?:BINARY|DWORD|DWORD_BIG_ENDIAN|EXPAND_SZ|MULTI_SZ|NONE|SZ|LINK|RESOURCE_LIST|FULL_RESOURCE_DESCRIPTOR|RESOURCE_REQUIREMENTS_LIST|QWORD)$') { return $false }
+
+  $Write = [pscustomobject]@{
+    Root           = $Target.Root
+    Key            = $Target.Key
+    Name           = $Name
+    Value          = $Value
+    Type           = $RegistryType
+    RawType        = $RegistryType
+    RegistryType   = $RegistryType
+    IsUninstallKey = $Target.Key -match $Script:NSIS_UNINSTALL_KEY_PATTERN
+    Opcode         = $Script:NSIS_OPCODE_REGISTER_DLL
+    RawOpcode      = $Script:NSIS_OPCODE_REGISTER_DLL
+    Conditional    = [bool]$State.HasUnknownControlFlow
+    Provenance     = [string[]]@($State.ConditionalReasons)
+    Source         = 'RegistryPlugin'
+  }
+  $State.RegistryWrites.Add($Write)
+  if ($Write.Conditional) {
+    $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields + @('RegistryWrites', 'AppsAndFeaturesEntries') | Select-Object -Unique)
+  }
+  Set-NSISRegistryValue -State $State -Root $Target.Root -Key $Target.Key -Name $Name -Value $Value
+  return $true
+}
+
+function Invoke-NSISRegistryPluginCall {
+  <#
+  .SYNOPSIS
+    Simulate deterministic Instructor Registry plug-in stack operations.
+  .DESCRIPTION
+    Implements the published v4.2 plug-in contracts used for ARP registration
+    without loading the extracted DLL or consulting the parser host registry.
+  .PARAMETER State
+    Mutable NSIS simulation state.
+  .PARAMETER FunctionName
+    Export invoked by the compiled EW_REGISTERDLL command.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [Parameter(Mandatory)][string]$FunctionName
+  )
+
+  switch ($FunctionName.ToLowerInvariant()) {
+    '_write' {
+      $Path = Pop-NSISStackValue -State $State
+      $Name = Pop-NSISStackValue -State $State
+      $Value = Pop-NSISStackValue -State $State
+      $Type = Pop-NSISStackValue -State $State
+      $Succeeded = Add-NSISRegistryPluginWrite -State $State -Path $Path -Name $Name -Value $Value -Type $Type
+      $State.Stack.Add($Succeeded ? '0' : '-1')
+      return $true
+    }
+    '_read' {
+      $Path = Pop-NSISStackValue -State $State
+      $Name = Pop-NSISStackValue -State $State
+      $Target = Resolve-NSISRegistryPluginPath -Path $Path
+      $Exists = $Target -and $State.Registry.ContainsKey($Target.Root) -and $State.Registry[$Target.Root].ContainsKey($Target.Key) -and $State.Registry[$Target.Root][$Target.Key].ContainsKey($Name)
+      $Type = ''
+      $Value = ''
+      if ($Exists) {
+        $Value = Get-NSISRegistryValue -State $State -Root $Target.Root -Key $Target.Key -Name $Name
+        for ($Index = $State.RegistryWrites.Count - 1; $Index -ge 0; $Index--) {
+          $Write = $State.RegistryWrites[$Index]
+          if ($Write.Root -ieq $Target.Root -and $Write.Key -ieq $Target.Key -and $Write.Name -ieq $Name) { $Type = [string]$Write.Type; break }
+        }
+        if (-not $Type) { $Type = 'REG_SZ' }
+      }
+      # registry.c pushes type first and value second, making value the first
+      # result consumed by the macro's following Pop instruction.
+      $State.Stack.Add($Type)
+      $State.Stack.Add($Value)
+      return $true
+    }
+    '_keyexists' {
+      $Target = Resolve-NSISRegistryPluginPath -Path (Pop-NSISStackValue -State $State)
+      $Exists = $Target -and $State.Registry.ContainsKey($Target.Root) -and $State.Registry[$Target.Root].ContainsKey($Target.Key)
+      $State.Stack.Add($Exists ? '0' : '-1')
+      return $true
+    }
+    '_createkey' {
+      $Target = Resolve-NSISRegistryPluginPath -Path (Pop-NSISStackValue -State $State)
+      if (-not $Target) { $State.Stack.Add('-1'); return $true }
+      if (-not $State.Registry.ContainsKey($Target.Root)) { $State.Registry[$Target.Root] = @{} }
+      $Existed = $State.Registry[$Target.Root].ContainsKey($Target.Key)
+      if (-not $Existed) { $State.Registry[$Target.Root][$Target.Key] = @{} }
+      $State.Stack.Add($Existed ? '1' : '0')
+      return $true
+    }
+    '_deletevalue' {
+      $Path = Pop-NSISStackValue -State $State
+      $Name = Pop-NSISStackValue -State $State
+      $Target = Resolve-NSISRegistryPluginPath -Path $Path
+      if ($Target) { Remove-NSISRegistryValue -State $State -Root $Target.Root -Key $Target.Key -Name $Name }
+      $State.Stack.Add($Target ? '0' : '-1')
+      return $true
+    }
+    { $_ -in @('_deletekey', '_deletekeyempty') } {
+      $Target = Resolve-NSISRegistryPluginPath -Path (Pop-NSISStackValue -State $State)
+      if ($Target) { Remove-NSISRegistryValue -State $State -Root $Target.Root -Key $Target.Key -Name '' }
+      $State.Stack.Add($Target ? '0' : '-1')
+      return $true
+    }
+    '_unload' { return $true }
+    default { return $false }
+  }
+}
+
+function Get-NSISRegistryPluginScopeVariable {
+  <#
+  .SYNOPSIS
+    Locate variables that select HKCU or HKLM for Registry plug-in ARP writes.
+  .DESCRIPTION
+    Some dual-scope installers build the complete uninstall path on the stack
+    and call Registry::_Write instead of using SetShellVarContext and
+    EW_WRITEREG. A variable is accepted only when it is referenced by the path
+    immediately pushed before a validated _Write call and has explicit HKCU and
+    HKLM assignments in the compiled command table.
+  .PARAMETER State
+    Mutable NSIS simulation state containing normalized commands and strings.
+  #>
+  [OutputType([int[]])]
+  param ([Parameter(Mandatory)][pscustomobject]$State)
+
+  $Candidates = [Collections.Generic.HashSet[int]]::new()
+  $AssignedRootsByVariable = @{}
+  foreach ($Entry in $State.Entries) {
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_ASSIGN_VAR) { continue }
+    $AssignedValue = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
+    if ($AssignedValue -notin @('HKCU', 'HKLM')) { continue }
+    $VariableIndex = [Math]::Abs($Entry.Values[1])
+    if (-not $AssignedRootsByVariable.ContainsKey($VariableIndex)) {
+      $AssignedRootsByVariable[$VariableIndex] = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    }
+    $null = $AssignedRootsByVariable[$VariableIndex].Add($AssignedValue)
+  }
+
+  for ($EntryIndex = 1; $EntryIndex -lt $State.Entries.Count; $EntryIndex++) {
+    $Entry = $State.Entries[$EntryIndex]
+    if ($Entry.Opcode -ne $Script:NSIS_OPCODE_REGISTER_DLL) { continue }
+    $Library = [IO.Path]::GetFileName((Get-NSISString -State $State -RelativeOffset $Entry.Values[1]))
+    $Function = Get-NSISString -State $State -RelativeOffset $Entry.Values[2]
+    if ($Library -ine 'registry.dll' -or $Function -ine '_Write') { continue }
+
+    # Registry::_Write pops the full path first, so the immediately preceding
+    # Push record must contain the path expression used by this call.
+    $PathPush = $State.Entries[$EntryIndex - 1]
+    if ($PathPush.Opcode -ne $Script:NSIS_OPCODE_PUSH_POP -or $PathPush.Values[2] -ne 0 -or $PathPush.Values[3] -ne 0) { continue }
+    $Path = Get-NSISString -State $State -RelativeOffset $PathPush.Values[1]
+    if ($Path.TrimStart('\') -notmatch $Script:NSIS_UNINSTALL_KEY_PATTERN) { continue }
+
+    foreach ($VariableIndex in @(Get-NSISStringVariableIndex -State $State -RelativeOffset $PathPush.Values[1])) {
+      $AssignedRoots = $AssignedRootsByVariable[$VariableIndex]
+      if (-not $AssignedRoots) { continue }
+      if ($AssignedRoots.Contains('HKCU') -and $AssignedRoots.Contains('HKLM')) { $null = $Candidates.Add([int]$VariableIndex) }
+    }
+  }
+  return [int[]]@($Candidates)
+}
+
+function Set-NSISRegistryPluginScope {
+  <#
+  .SYNOPSIS
+    Select the explicit Registry plug-in root for a caller-requested scope.
+  .PARAMETER State
+    Mutable NSIS simulation state.
+  .PARAMETER VariableIndex
+    Variables proven by Get-NSISRegistryPluginScopeVariable to select both
+    supported uninstall hives.
+  .PARAMETER Scope
+    Requested user or machine installation route.
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [Parameter(Mandatory)][int[]]$VariableIndex,
+    [Parameter(Mandatory)][ValidateSet('user', 'machine')][string]$Scope
+  )
+
+  $Root = if ($Scope -eq 'machine') { 'HKLM' } else { 'HKCU' }
+  foreach ($Index in $VariableIndex) { Set-NSISVariableValue -State $State -Index $Index -Value $Root }
+  $ContextValue = if ($Scope -eq 'machine') { 1 } else { 0 }
+  $State.ExecFlags[$Script:NSIS_EXEC_FLAG_SHELL_VAR_CONTEXT] = $ContextValue
+  $State.ShellVarContext = $Root
+}
+
 function Invoke-NSISSystemPluginCall {
   <#
   .SYNOPSIS
@@ -2747,6 +2995,44 @@ function Invoke-NSISUserInfoPluginCall {
   # NSIS calls the plug-in only after Windows has granted the requested
   # elevated token. Rejecting UAC means installer code never executes.
   $State.Stack.Add('Admin')
+  return $true
+}
+
+function Invoke-NSISUacPluginCall {
+  <#
+  .SYNOPSIS
+    Simulate deterministic stack results from the NSIS UAC plug-in.
+  .DESCRIPTION
+    Static metadata analysis follows a successful installation route. A
+    requested machine scope therefore has an elevated token. A requested user
+    scope remains non-admin unless the installer has an independently selected
+    Registry plug-in hive, in which case elevation and ARP scope are separate.
+    No parser-host token or UAC prompt is consulted.
+  .PARAMETER State
+    Mutable NSIS simulation state whose stack receives plug-in results.
+  .PARAMETER FunctionName
+    Export invoked by the compiled plug-in call.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$State,
+    [Parameter(Mandatory)][string]$FunctionName
+  )
+
+  if ($FunctionName -ieq '_Unload') { return $true }
+  if ($FunctionName -ieq 'GetOuterHwnd') {
+    # This plug-in generation returns scalar helpers through $0 rather than
+    # leaving a value on the NSIS stack.
+    Set-NSISVariableValue -State $State -Index 0 -Value '0'
+    return $true
+  }
+  if ($FunctionName -ine 'IsAdmin') { return $false }
+
+  $HasIndependentScopeSelector = @($State.RegistryPluginScopeVariables).Count -gt 0
+  $IsAdmin = $State.Metadata.RequestedExecutionLevel -eq 'requireAdministrator' -or
+  $State.TargetScope -eq 'machine' -or
+  ($State.TargetScope -eq 'user' -and $HasIndependentScopeSelector)
+  Set-NSISVariableValue -State $State -Index 0 -Value $(if ($IsAdmin) { '1' } else { '0' })
   return $true
 }
 
@@ -4105,7 +4391,9 @@ function Initialize-NSISOpcodeHandlers {
     $Function = Get-NSISString -State $State -RelativeOffset $Values[2]
     if ($Library -ieq 'System.dll') { $null = Invoke-NSISSystemPluginCall -State $State -FunctionName $Function }
     elseif ($Library -ieq 'UserInfo.dll') { $null = Invoke-NSISUserInfoPluginCall -State $State -FunctionName $Function }
+    elseif ($Library -ieq 'UAC.dll') { $null = Invoke-NSISUacPluginCall -State $State -FunctionName $Function }
     elseif ($Library -ieq 'nsProcess.dll') { $null = Invoke-NSISProcessPluginCall -State $State -FunctionName $Function }
+    elseif ($Library -ieq 'registry.dll') { $null = Invoke-NSISRegistryPluginCall -State $State -FunctionName $Function }
     $Script:NSIS_CONTINUE_RESULT
   }
   $Handlers[$Script:NSIS_OPCODE_CREATE_SHORTCUT] = {
@@ -5167,11 +5455,18 @@ function Invoke-NSISStaticSimulation {
       user    = Get-NSISScopeSelectionStart -State $State -Scope user
       machine = Get-NSISScopeSelectionStart -State $State -Scope machine
     }
-    $State.Metadata.SupportedScopes = [string[]]@($ScopeSelectionStarts.Keys | Where-Object { $ScopeSelectionStarts[$_] -ge 0 })
+    $RegistryPluginScopeVariables = @(Get-NSISRegistryPluginScopeVariable -State $State)
+    $State.RegistryPluginScopeVariables = [int[]]$RegistryPluginScopeVariables
+    $State.Metadata.SupportedScopes = [string[]]@(
+      @($ScopeSelectionStarts.Keys | Where-Object { $ScopeSelectionStarts[$_] -ge 0 })
+      if ($RegistryPluginScopeVariables.Count -gt 0) { 'user'; 'machine' }
+    ) | Select-Object -Unique
     $State.Metadata.HasScopeRuntimeCheck = $State.Metadata.SupportedScopes.Count -gt 0
     $ScopeSelectionStart = if (-not [string]::IsNullOrWhiteSpace($Scope)) { $ScopeSelectionStarts[$Scope] } else { -1 }
     $HasTargetArchitectureResolver = $ArchitectureProbeStart -ge 0 -and -not [string]::IsNullOrWhiteSpace($Architecture)
-    $HasTargetScopeResolver = $ScopeSelectionStart -ge 0 -and -not [string]::IsNullOrWhiteSpace($Scope)
+    $HasCompiledTargetScopeResolver = $ScopeSelectionStart -ge 0 -and -not [string]::IsNullOrWhiteSpace($Scope)
+    $HasRegistryPluginTargetScopeResolver = $RegistryPluginScopeVariables.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($Scope)
+    $HasTargetScopeResolver = $HasCompiledTargetScopeResolver -or $HasRegistryPluginTargetScopeResolver
     $UseDirectRegistryFallback = -not ($HasTargetArchitectureResolver -or $HasTargetScopeResolver)
 
     # Prefer direct uninstall registry writes when they already expose a single deterministic ARP identity.
@@ -5217,16 +5512,24 @@ function Invoke-NSISStaticSimulation {
     }
 
     if ($HasTargetScopeResolver) {
+      Initialize-NSISTargetRegistryState -State $State
+    }
+    if ($HasCompiledTargetScopeResolver) {
       # Enter the compiled scope setter directly after initialization. This
       # mirrors the deterministic MultiUser macro branch without emulating UAC,
       # account privilege checks, dialogs, or command-line parsing.
-      Initialize-NSISTargetRegistryState -State $State
       Initialize-NSISScopeSelectionInput -State $State -Position $ScopeSelectionStart -Scope $Scope
       try {
         $null = Invoke-NSISCodeSegment -State $State -Position $ScopeSelectionStart
       } catch {
         $State.Warnings.Add("The compiled '$Scope' scope selector could not be simulated completely: $($_.Exception.Message)")
       }
+    }
+    if ($HasRegistryPluginTargetScopeResolver) {
+      # Registry plug-in based installers can keep the hive in a script
+      # variable rather than SHCTX. Select only variables proven to have both
+      # HKCU and HKLM assignments and to feed an explicit uninstall _Write.
+      Set-NSISRegistryPluginScope -State $State -VariableIndex $RegistryPluginScopeVariables -Scope $Scope
     }
 
     # Initialization commonly establishes SHCTX before install sections begin.

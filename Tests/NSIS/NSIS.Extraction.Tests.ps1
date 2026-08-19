@@ -321,7 +321,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'official'
       CharacterMode    = 'Ansi'
       VariableRoute    = 'legacy-200'
-      WarningPattern   = $null
+      NoticePattern    = $null
     }
     @{
       Name             = 'nsis-2.25-setup.exe'
@@ -331,7 +331,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'official'
       CharacterMode    = 'Ansi'
       VariableRoute    = 'legacy-225'
-      WarningPattern   = $null
+      NoticePattern    = $null
     }
     @{
       Name             = 'nsis204.exe'
@@ -341,7 +341,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'official'
       CharacterMode    = 'Ansi'
       VariableRoute    = 'legacy-225'
-      WarningPattern   = $null
+      NoticePattern    = $null
     }
     @{
       Name             = 'nsis-2.26-setup.exe'
@@ -351,7 +351,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'official'
       CharacterMode    = 'Ansi'
       VariableRoute    = 'current'
-      WarningPattern   = 'does not contain decisive generation control codes'
+      NoticePattern    = 'does not contain decisive generation control codes'
     }
     @{
       Name             = 'nsis-2.46-setup.exe'
@@ -361,7 +361,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'official'
       CharacterMode    = 'Ansi'
       VariableRoute    = 'current'
-      WarningPattern   = 'does not contain decisive generation control codes'
+      NoticePattern    = 'does not contain decisive generation control codes'
     }
     @{
       Name             = 'nsis-2.51-setup.exe'
@@ -371,7 +371,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'official'
       CharacterMode    = 'Ansi'
       VariableRoute    = 'current'
-      WarningPattern   = 'does not contain decisive generation control codes'
+      NoticePattern    = 'does not contain decisive generation control codes'
     }
     @{
       Name             = 'nsis-2.33-Unicode-setup.exe'
@@ -381,7 +381,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'park'
       CharacterMode    = 'Unicode'
       VariableRoute    = 'current'
-      WarningPattern   = $null
+      NoticePattern    = $null
     }
     @{
       Name             = 'nsis-2.46.2-Unicode-setup.exe'
@@ -391,7 +391,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'park'
       CharacterMode    = 'Unicode'
       VariableRoute    = 'current'
-      WarningPattern   = $null
+      NoticePattern    = $null
     }
     @{
       Name             = 'nsis-2.46.3-Unicode-setup.exe'
@@ -401,7 +401,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       EditionId        = 'park'
       CharacterMode    = 'Unicode'
       VariableRoute    = 'current'
-      WarningPattern   = $null
+      NoticePattern    = $null
     }
   ) {
     $Fixture = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name $Name) -Uri $Url -Sha256 $Sha256 -UseSourceForgeMetaRefresh
@@ -412,8 +412,9 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     $Result.CharacterMode | Should -Be $CharacterMode
     $Result.VariableRoute | Should -Be $VariableRoute
     $Result.IsSupported | Should -BeTrue
-    if ($WarningPattern) {
-      @($Result.Warnings | Where-Object { $_ -match $WarningPattern }) | Should -Not -BeNullOrEmpty
+    if ($NoticePattern) {
+      @($Result.Notices | Where-Object { $_ -match $NoticePattern }) | Should -Not -BeNullOrEmpty
+      $Result.Warnings | Should -BeNullOrEmpty
     } else {
       $Result.Warnings | Should -BeNullOrEmpty
     }

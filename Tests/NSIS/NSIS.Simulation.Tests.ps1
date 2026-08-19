@@ -86,6 +86,53 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.Shortcut.Comment | Should -Be 'Unit shortcut'
   }
 
+  It 'Should project Registry plug-in writes into ARP evidence' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        Registry              = @{}
+        RegistryWrites        = [System.Collections.Generic.List[object]]::new()
+        Stack                 = [System.Collections.Generic.List[string]]::new()
+        HasUnknownControlFlow = $false
+        ConditionalReasons    = [System.Collections.Generic.HashSet[string]]::new()
+        Metadata              = [ordered]@{
+          ProductCode = $null; Scope = $null; RegistryValues = @{}; WritesAppsAndFeaturesEntry = $false
+          DisplayName = $null; DisplayVersion = $null; Publisher = $null; DefaultInstallLocation = $null
+          UninstallString = $null; QuietUninstallString = $null; DisplayIcon = $null; SystemComponent = $null
+          UnresolvedFields = [string[]]@()
+        }
+      }
+
+      # _Write pops path, name, data, and type in that order.
+      foreach ($Value in 'REG_SZ', 'Unit App', 'DisplayName', 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Unit.App') { $State.Stack.Add($Value) }
+      $Handled = Invoke-NSISRegistryPluginCall -State $State -FunctionName '_Write'
+      $ReturnCode = Pop-NSISStackValue -State $State
+
+      # _Read pushes type followed by value, so the value is popped first.
+      $State.Stack.Add('DisplayName')
+      $State.Stack.Add('HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Unit.App')
+      $null = Invoke-NSISRegistryPluginCall -State $State -FunctionName '_Read'
+      [pscustomobject]@{
+        Handled    = $Handled
+        ReturnCode = $ReturnCode
+        Value      = Pop-NSISStackValue -State $State
+        Type       = Pop-NSISStackValue -State $State
+        Metadata   = $State.Metadata
+        Write      = $State.RegistryWrites[0]
+      }
+    }
+
+    $Result.Handled | Should -BeTrue
+    $Result.ReturnCode | Should -Be '0'
+    $Result.Value | Should -Be 'Unit App'
+    $Result.Type | Should -Be 'REG_SZ'
+    $Result.Metadata.ProductCode | Should -Be 'Unit.App'
+    $Result.Metadata.Scope | Should -Be 'user'
+    $Result.Metadata.DisplayName | Should -Be 'Unit App'
+    $Result.Metadata.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Result.Write.Source | Should -Be 'RegistryPlugin'
+  }
+
   It 'Should model empty INI operands without PowerShell binding failures' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {

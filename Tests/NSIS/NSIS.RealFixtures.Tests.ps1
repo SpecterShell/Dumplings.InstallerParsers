@@ -117,6 +117,42 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $MachineInfo.Warnings | Should -BeNullOrEmpty
   }
 
+  It 'Should resolve Registry plug-in ARP writes for both MultiCommander architectures and scopes' {
+    $Fixtures = @(
+      [pscustomobject]@{
+        Architecture = 'x86'
+        ProductCode  = 'MultiCommander Win32'
+        RelativePath = 'Installers\NSIS\MathiasSvensson.MultiCommander\16.2.0.3205\MultiCommander_x86.exe'
+        Uri          = 'https://multicommander.com/files/updates/MultiCommander_win32_(16.2.0.3205).exe'
+        Sha256       = 'ABE4966B39E303F504914169EDC220A021536660645FA1779B2323098FBD7833'
+      },
+      [pscustomobject]@{
+        Architecture = 'x64'
+        ProductCode  = 'MultiCommander x64'
+        RelativePath = 'Installers\NSIS\MathiasSvensson.MultiCommander\16.2.0.3205\MultiCommander_x64.exe'
+        Uri          = 'https://multicommander.com/files/updates/MultiCommander_x64_(16.2.0.3205).exe'
+        Sha256       = 'CD24CE9C6E17189CD618FF7AB4DD77BE4587DA947294169E15D797C342AFEEE9'
+      }
+    )
+
+    foreach ($FixtureInfo in $Fixtures) {
+      $Fixture = Get-DumplingsTestFixture -RelativePath $FixtureInfo.RelativePath -Uri $FixtureInfo.Uri -Sha256 $FixtureInfo.Sha256
+      foreach ($Scope in 'user', 'machine') {
+        $InstallMode = $Scope -eq 'user' ? 'User' : 'All'
+        $Info = Get-NSISInfo -Path $Fixture -Architecture $FixtureInfo.Architecture -Scope $Scope -CommandLine ('"' + $Fixture + '" /S /InstallMode=' + $InstallMode)
+
+        $Info.ProductCode | Should -Be $FixtureInfo.ProductCode
+        $Info.DisplayVersion | Should -Be '16.2.0.3205'
+        $Info.Publisher | Should -Be 'Mathias Svensson'
+        $Info.Scope | Should -Be $Scope
+        $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+        $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain $FixtureInfo.ProductCode
+        @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be $(if ($Scope -eq 'user') { @('HKCU') } else { @('HKLM') })
+        $Info.Warnings | Should -BeNullOrEmpty
+      }
+    }
+  }
+
   It 'Should resolve both current electron-builder scopes from the WorkBuddy installer' {
     $Fixture = Get-InstallerFixture -Name 'WorkBuddy-win32-x64-user-5.3.5.34189228-8044e898.exe' -Url 'https://download.codebuddy.cn/workbuddy/saas/win32-x64-user/WorkBuddy-win32-x64-user-5.3.5.34189228-8044e898.exe' -Sha256 '3064D6E873BD74169E62EA2E480382C120125E6B8F99155649EC2389C3CBFAFF'
 
