@@ -2,7 +2,7 @@
 
 Dumplings.InstallerParsers provides process-isolated static parsers for Windows installer formats whose implementations use GPL-compatible licenses. It is consumed by [Dumplings.PackageModule](https://github.com/SpecterShell/Dumplings.PackageModule) through a JSON command-line boundary.
 
-The parsers inspect untrusted installer bytes, decode bounded metadata and payload structures, and return explicit evidence such as version, product identity, scope, Apps & Features registry writes, associations, nested payloads, and warnings.
+The parsers inspect untrusted installer bytes, decode bounded metadata and payload structures, and return explicit evidence such as version, product identity, scope, Apps & Features registry writes, associations, nested payloads, and structured diagnostics.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ Expansion actions return extracted paths or expansion evidence as JSON and alway
 
 `Name` is optional for every expansion action; omitting it selects all catalogued files. The CLI defaults to non-interactive `CollisionAction Rename` (`file (1).ext`). Direct calls and interactive PackageModule bridge calls additionally accept `Prompt`; no question is shown until the parser encounters an existing or already-reserved output path. Interactive bridge calls inherit the parent console while returning JSON through a separate temporary result file. Paths are resolved against PowerShell's current filesystem location before crossing the JSON/.NET boundary.
 
-Do not write informational output to standard output in parser modules because it would corrupt the CLI JSON contract. Return warnings as structured result properties or use the CLI error path for fatal failures.
+Do not write informational output to standard output in parser modules because it would corrupt the CLI JSON contract. Return context-neutral conditions through `Diagnostics`; use the CLI error path only when the requested parser operation cannot return a valid result.
 
 ## Actions
 
@@ -87,8 +87,9 @@ The CLI loads shared infrastructure before the selected parser:
 3. `FileSystem.psm1` resolves PowerShell filesystem paths and rejects extraction-root escapes.
 4. `Archive.psm1` provides bounded compression, archive entry access, and extraction.
 5. `PE.psm1` resolves PE headers, sections, resources, overlays, and metadata.
-6. `InstallerEvidence.psm1` evaluates bounded conditions and interprets explicit protocol and file-extension registry writes.
-7. The selected format module constructs its canonical identity, ARP, and diagnostic result properties directly.
+6. `InstallerDiagnostics.psm1` validates, merges, resolves, and renders structured parser diagnostics.
+7. `InstallerEvidence.psm1` evaluates bounded conditions and interprets explicit protocol and file-extension registry writes.
+8. The selected format module constructs its canonical identity, ARP, and diagnostic result properties directly.
 
 Shared MIT files remain file-level MIT exceptions in PackageModule. Full mirrored files stay byte-identical; the two shared filesystem helper function bodies also stay identical even though PackageModule's filesystem module contains additional task utilities. Format-specific code stays in its parser module.
 
@@ -100,11 +101,11 @@ Every parser should:
 - Open the installer once per operation and pass bounded streams or parsed layouts to internal functions.
 - Validate every offset, size, count, pointer, decompressed length, and extraction path before use.
 - Preserve caller-owned stream position and ownership where a stream parameter is supported.
-- Return structured warnings for unresolved or conditional evidence.
-- Keep existing result properties compatible when adding evidence.
+- Return context-neutral structured diagnostics for unresolved, conditional, unsupported, ambiguous, or invalid evidence.
+- Keep `Suggestions` and `SuggestedNextSteps` for actions; do not encode actions as diagnostics.
 - Never invoke an installer, extracted executable, external extractor, or network endpoint.
 
-Aggregate `Get-*Info` results begin with `Path`, `InstallerType`, `ProductCode`, `UpgradeCode`, `DisplayName`, `DisplayVersion`, `Publisher`, `Scope`, `DefaultInstallLocation`, `WritesAppsAndFeaturesEntry`, `AppsAndFeaturesProductCode`, `AppsAndFeaturesInstallerType`, `Warnings`, and `UnresolvedFields`. Duplicate aliases such as `ProductName` and `ProductVersion` are not returned. Parser modules return warnings as data; only their caller decides how and when to log them.
+Aggregate `Get-*Info` results begin with `Path`, `InstallerType`, `ProductCode`, `UpgradeCode`, `DisplayName`, `DisplayVersion`, `Publisher`, `Scope`, `DefaultInstallLocation`, `WritesAppsAndFeaturesEntry`, `AppsAndFeaturesProductCode`, `AppsAndFeaturesInstallerType`, `Diagnostics`, and `UnresolvedFields`. Duplicate aliases such as `ProductName` and `ProductVersion` are not returned. Raw diagnostics have no `Scenario`, `Level`, or blocking decision. The caller resolves them with `Resolve-InstallerDiagnostics` and renders them with `Write-InstallerDiagnostics` at a workflow boundary.
 
 Detailed binary layouts and parser workflows live in the Dumplings [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md).
 

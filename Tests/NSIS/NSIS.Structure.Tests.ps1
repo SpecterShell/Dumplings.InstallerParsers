@@ -419,7 +419,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Format.FirstHeaderFlagRoute | Should -Be 'standard'
     $Format.CompressionRoute | Should -Be 'Deflate'
     $Format.IsNsisBi | Should -BeFalse
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     $Info.ProductCode | Should -Not -BeNullOrEmpty
   }
 
@@ -429,8 +429,8 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Info = Get-NSISInfo -Path $Fixture -Architecture x86 -Scope machine
 
     $Info.ProductCode | Should -Be 'qqlive'
-    $Info.Warnings | Should -Not -Match 'Cannot bind argument|execution budget'
-    $Info.Notices | Should -Match 'Full section simulation was skipped'
+    $Info.Diagnostics.Message | Should -Not -Match 'Cannot bind argument|execution budget'
+    ($Info.Diagnostics | Where-Object Kind -EQ Information).Message | Should -Match 'Full section simulation was skipped'
   }
 
   It 'Should resolve paired LockWindow records in a vendor NSIS 3 Unicode installer' {
@@ -452,7 +452,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Format.IsSupported | Should -BeTrue
     $Format.FatalInvalidCommandCount | Should -Be 0
     $Format.IgnoredExtensionOperandCount | Should -Be 1
-    $Format.Notices | Should -Match 'vendor-extension operand'
+    ($Format.Diagnostics | Where-Object Kind -EQ Information).Message | Should -Match 'vendor-extension operand'
   }
 
   It 'Should initialize CMDLINE with the quoted installer path for bounded runtime scans' {
@@ -462,7 +462,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
 
     $Info.DisplayName | Should -Be 'Global VPN Client'
     $Info.DisplayVersion | Should -Be '5.0.0.2008'
-    $Info.Warnings | Should -Not -Match 'execution budget'
+    $Info.Diagnostics.Message | Should -Not -Match 'execution budget'
   }
 
   It 'Should recognize bounded vendor LZMA2 header framing' {

@@ -571,7 +571,7 @@ function Get-NSISString {
   )
 
   if ($Depth -ge 16) {
-    if ($State.PSObject.Properties['Warnings']) { $State.Warnings.Add('An NSIS string recursion or language-reference cycle exceeded the supported depth.') }
+    if ($State.PSObject.Properties['Diagnostics']) { $State.Diagnostics.Add('An NSIS string recursion or language-reference cycle exceeded the supported depth.') }
     return '$_ERROR_STRING_RECURSION_'
   }
   $AnsiEncoding = if ($State.PSObject.Properties['AnsiEncoding'] -and $State.AnsiEncoding) { $State.AnsiEncoding } else { Get-NSISAnsiEncoding -LanguageId $Script:NSIS_DEFAULT_LANGUAGE }
@@ -1210,7 +1210,7 @@ function Set-NSISUnknownCondition {
 
   $State.HasUnknownControlFlow = $true
   $null = $State.ConditionalReasons.Add($Reason)
-  $State.Warnings.Add($Reason)
+  $State.Diagnostics.Add($Reason)
 }
 
 function Copy-NSISBranchValue {
@@ -1562,10 +1562,10 @@ function Merge-NSISExecutionStates {
     }
   }
 
-  $Target.Warnings.Clear()
-  foreach ($BranchState in $State) { foreach ($Warning in $BranchState.Warnings) { if (-not $Target.Warnings.Contains($Warning)) { $Target.Warnings.Add($Warning) } } }
-  $Target.Notices.Clear()
-  foreach ($BranchState in $State) { foreach ($Notice in $BranchState.Notices) { if (-not $Target.Notices.Contains($Notice)) { $Target.Notices.Add($Notice) } } }
+  $Target.Diagnostics.Clear()
+  foreach ($BranchState in $State) { foreach ($Warning in $BranchState.Diagnostics) { if (-not $Target.Diagnostics.Contains($Warning)) { $Target.Diagnostics.Add($Warning) } } }
+  $Target.InformationalDiagnosticMessages.Clear()
+  foreach ($BranchState in $State) { foreach ($Message in $BranchState.InformationalDiagnosticMessages) { if (-not $Target.InformationalDiagnosticMessages.Contains($Message)) { $Target.InformationalDiagnosticMessages.Add($Message) } } }
   $Target.ConditionalReasons.Clear()
   foreach ($Reason in $InitialConditionalReasons) { $null = $Target.ConditionalReasons.Add($Reason) }
   $Target.HasUnknownControlFlow = $Target.ConditionalReasons.Count -gt 0
@@ -1573,7 +1573,7 @@ function Merge-NSISExecutionStates {
   # Preserve model fields that agree across all paths and leave divergent
   # package evidence unresolved for the final structured projection.
   foreach ($Key in @($Target.Metadata.Keys)) {
-    if ($Key -in @('UnresolvedFields', 'Warnings', 'RegistryWrites', 'IniWrites', 'CreatedShortcuts', 'ExecutedPayloads')) { continue }
+    if ($Key -in @('UnresolvedFields', 'Diagnostics', 'RegistryWrites', 'IniWrites', 'CreatedShortcuts', 'ExecutedPayloads')) { continue }
     $Values = [Collections.Generic.List[object]]::new()
     foreach ($BranchState in $State) { $Values.Add($BranchState.Metadata[$Key]) }
     if (@($Values | Where-Object { -not (Test-NSISBranchValueEqual -Left $Values[0] -Right $_) }).Count -eq 0) {
@@ -2177,7 +2177,7 @@ function Initialize-NSISState {
   $HeaderData = $FormatContext.HeaderData
   $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
   if (-not $FormatInfo.IsSupported) {
-    throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
+    throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
   }
   $HeaderBytes = $FormatContext.HeaderBytes
   $BlockHeaders = $FormatContext.BlockHeaders
@@ -2205,59 +2205,59 @@ function Initialize-NSISState {
   $HasComponentPage = Test-NSISHasComponentPage -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
   $VersionInfo | Add-Member -NotePropertyName HasComponentPage -NotePropertyValue $HasComponentPage -Force
   $State = [pscustomobject]@{
-    Path                         = $HeaderData.Path
-    Entries                      = $Entries
-    Sections                     = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
-    HasComponentPage             = $HasComponentPage
-    StringsBlock                 = $StringsBlock
-    LanguageTable                = $LanguageTable
-    LanguageTables               = $LanguageTables
-    VersionInfo                  = $VersionInfo
-    AnsiEncoding                 = Get-NSISAnsiEncoding -LanguageId $(if ($LanguageTable) { $LanguageTable.LanguageId } else { $Script:NSIS_DEFAULT_LANGUAGE }) -CodePage $AnsiCodePage
-    Variables                    = @{}
-    Registry                     = @{}
-    RegistryWrites               = [System.Collections.Generic.List[object]]::new()
-    IniFiles                     = @{}
-    IniWrites                    = [System.Collections.Generic.List[object]]::new()
-    CreatedShortcuts             = [System.Collections.Generic.List[object]]::new()
-    ExecutedPayloads             = [System.Collections.Generic.List[object]]::new()
-    ConditionalExtractedFiles    = [System.Collections.Generic.List[object]]::new()
-    Warnings                     = [System.Collections.Generic.List[string]]::new()
-    Notices                      = [System.Collections.Generic.List[string]]::new()
-    Stack                        = [System.Collections.Generic.List[string]]::new()
-    SystemVariableStack          = [System.Collections.Generic.List[object]]::new()
-    Directories                  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    Files                        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    FileSystem                   = @{}
-    FileSystemComplete           = [bool]$FileSystemComplete
-    UnknownFileSystemPredicates  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    UnknownProcessPredicates     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    FileHandles                  = @{}
-    NextFileHandle               = 1
-    NextTempFile                 = 1
-    FindHandles                  = @{}
-    NextFindHandle               = 1
-    ExecFlags                    = @{}
-    LastExecFlags                = @{}
-    UnknownExecFlags             = [System.Collections.Generic.HashSet[int]]::new()
-    UnknownVariables             = [System.Collections.Generic.HashSet[int]]::new()
-    CurrentInstallType           = 0
-    InstallTypeNames             = @{}
-    StatusUpdateFlag             = 0
-    ShellVarContext              = $null
-    HasUnknownControlFlow        = $false
-    ConditionalReasons           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    UnsupportedOpcodes           = [System.Collections.Generic.HashSet[int]]::new()
-    UnknownEnvironment           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    BranchPredicates             = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    ExploredBranchCount          = 0
-    TruncatedBranchCount         = 0
-    TargetArchitecture           = $Architecture
-    TargetScope                  = $Scope
-    RegistryPluginScopeVariables = [int[]]@()
-    Environment                  = @{}
-    CommandLine                  = ''
-    Metadata                     = [ordered]@{
+    Path                            = $HeaderData.Path
+    Entries                         = $Entries
+    Sections                        = Get-NSISSections -HeaderBytes $HeaderBytes -BlockHeaders $BlockHeaders
+    HasComponentPage                = $HasComponentPage
+    StringsBlock                    = $StringsBlock
+    LanguageTable                   = $LanguageTable
+    LanguageTables                  = $LanguageTables
+    VersionInfo                     = $VersionInfo
+    AnsiEncoding                    = Get-NSISAnsiEncoding -LanguageId $(if ($LanguageTable) { $LanguageTable.LanguageId } else { $Script:NSIS_DEFAULT_LANGUAGE }) -CodePage $AnsiCodePage
+    Variables                       = @{}
+    Registry                        = @{}
+    RegistryWrites                  = [System.Collections.Generic.List[object]]::new()
+    IniFiles                        = @{}
+    IniWrites                       = [System.Collections.Generic.List[object]]::new()
+    CreatedShortcuts                = [System.Collections.Generic.List[object]]::new()
+    ExecutedPayloads                = [System.Collections.Generic.List[object]]::new()
+    ConditionalExtractedFiles       = [System.Collections.Generic.List[object]]::new()
+    Diagnostics                     = [System.Collections.Generic.List[object]]::new()
+    InformationalDiagnosticMessages = [System.Collections.Generic.List[string]]::new()
+    Stack                           = [System.Collections.Generic.List[string]]::new()
+    SystemVariableStack             = [System.Collections.Generic.List[object]]::new()
+    Directories                     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Files                           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    FileSystem                      = @{}
+    FileSystemComplete              = [bool]$FileSystemComplete
+    UnknownFileSystemPredicates     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    UnknownProcessPredicates        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    FileHandles                     = @{}
+    NextFileHandle                  = 1
+    NextTempFile                    = 1
+    FindHandles                     = @{}
+    NextFindHandle                  = 1
+    ExecFlags                       = @{}
+    LastExecFlags                   = @{}
+    UnknownExecFlags                = [System.Collections.Generic.HashSet[int]]::new()
+    UnknownVariables                = [System.Collections.Generic.HashSet[int]]::new()
+    CurrentInstallType              = 0
+    InstallTypeNames                = @{}
+    StatusUpdateFlag                = 0
+    ShellVarContext                 = $null
+    HasUnknownControlFlow           = $false
+    ConditionalReasons              = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    UnsupportedOpcodes              = [System.Collections.Generic.HashSet[int]]::new()
+    UnknownEnvironment              = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    BranchPredicates                = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    ExploredBranchCount             = 0
+    TruncatedBranchCount            = 0
+    TargetArchitecture              = $Architecture
+    TargetScope                     = $Scope
+    RegistryPluginScopeVariables    = [int[]]@()
+    Environment                     = @{}
+    CommandLine                     = ''
+    Metadata                        = [ordered]@{
       Path                               = $HeaderData.Path
       InstallerType                      = 'Nullsoft'
       TargetArchitecture                 = $Architecture
@@ -2281,7 +2281,7 @@ function Initialize-NSISState {
       WritesAppsAndFeaturesEntry         = $false
       AppsAndFeaturesProductCode         = $null
       AppsAndFeaturesInstallerType       = $null
-      Warnings                           = [string[]]@()
+      Diagnostics                        = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'NSISSimulation' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'NSISSimulation' -Kind Information -Areas Metadata)))
       UnresolvedFields                   = [string[]]@()
       UninstallString                    = $null
       QuietUninstallString               = $null
@@ -2294,7 +2294,7 @@ function Initialize-NSISState {
       AppsAndFeaturesEntries             = @()
       AppsAndFeaturesEntryEvidence       = @()
       HasLocalizedAppsAndFeaturesEntries = $false
-      Notices                            = [string[]]@()
+
       ExtractedFiles                     = @()
       ConditionalExtractedFiles          = @()
       ExecutedPayloads                   = @()
@@ -2325,7 +2325,7 @@ function Initialize-NSISState {
     $null = Set-NSISVirtualFileRecord @Arguments
   }
 
-  foreach ($Warning in @($FormatInfo.Warnings)) { $State.Warnings.Add([string]$Warning) }
+  foreach ($Diagnostic in @($FormatInfo.Diagnostics)) { $State.Diagnostics.Add($Diagnostic) }
 
   Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_EXEDIR -Value '$EXEDIR'
   $VariableLayout = Get-NSISVariableLayout -State $State
@@ -2336,10 +2336,10 @@ function Initialize-NSISState {
   Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_TEMP -Value '$TEMP'
 
   if ($HeaderData.IsNsisBi) {
-    $State.Warnings.Add('The installer uses the NSISBI large-installer format; metadata was parsed from its expanded first-header and command layouts.')
+    $State.Diagnostics.Add('The installer uses the NSISBI large-installer format; metadata was parsed from its expanded first-header and command layouts.')
   }
   if ($HeaderData.HasExternalFile) {
-    $State.Warnings.Add('The NSISBI installer references an external payload file; embedded script metadata is available, but payload evidence may be incomplete without the sidecar file.')
+    $State.Diagnostics.Add('The NSISBI installer references an external payload file; embedded script metadata is available, but payload evidence may be incomplete without the sidecar file.')
   }
 
   # InstallDir and its auto-append suffix are stored as header pointers instead of script directives.
@@ -4817,16 +4817,16 @@ function Get-NSISAppsAndFeaturesEntryInfo {
     if ($Identities.Count -gt 1) { $LocalizedRegistryKeys.Add($Group.Name) }
   }
 
-  $Notices = [System.Collections.Generic.List[string]]::new()
+  $InformationMessages = [System.Collections.Generic.List[string]]::new()
   if ($LocalizedRegistryKeys.Count -gt 0) {
     $Locales = @($Evidence | Where-Object IsVisible | ForEach-Object { $_.Locale ?? "LANGID-$($_.LanguageId)" } | Select-Object -Unique)
-    $Notices.Add("NSIS uninstall DisplayName or Publisher varies by installer language ($($Locales -join ', ')); AppsAndFeaturesEntries contains $($ManifestEntries.Count) distinct visible ARP identities. Preserve the applicable localized identities and validate installed-language behavior in a VM when authoring the manifest.")
+    $InformationMessages.Add("NSIS uninstall DisplayName or Publisher varies by installer language ($($Locales -join ', ')); AppsAndFeaturesEntries contains $($ManifestEntries.Count) distinct visible ARP identities. Preserve the applicable localized identities and validate installed-language behavior in a VM when authoring the manifest.")
   }
 
   return [pscustomobject][ordered]@{
     AppsAndFeaturesEntries       = $ManifestEntries.ToArray()
     AppsAndFeaturesEntryEvidence = $Evidence.ToArray()
-    Notices                      = [string[]]$Notices.ToArray()
+    Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$InformationMessages.ToArray()) -Source 'NSISSimulation' -Kind Information -Areas Metadata)
     HasLocalizedEntries          = $LocalizedRegistryKeys.Count -gt 0
   }
 }
@@ -5217,18 +5217,18 @@ function Complete-NSISMetadata {
   }
   $State.Metadata.TauriEvidence = [string[]]$TauriInfo.Evidence
   if ($TauriInfo.IsTauri) {
-    if ($TauriInfo.InstallerMode -eq 'currentUser' -and @($State.Metadata.SupportedScopes).Count -eq 0) {
+    if ($TauriInfo.InstallerMode -eq 'currentUser' -and @($State.Metadata.SupportedScopes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) {
       $State.Metadata.SupportedScopes = [string[]]@('user')
-    } elseif ($TauriInfo.InstallerMode -eq 'perMachine' -and @($State.Metadata.SupportedScopes).Count -eq 0) {
+    } elseif ($TauriInfo.InstallerMode -eq 'perMachine' -and @($State.Metadata.SupportedScopes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) {
       $State.Metadata.SupportedScopes = [string[]]@('machine')
     } elseif (-not $TauriInfo.InstallerMode) {
-      $State.Warnings.Add('The standard Tauri NSIS template was detected, but its compiled installer mode could not be resolved from scope and PE execution-level evidence.')
+      $State.Diagnostics.Add('The standard Tauri NSIS template was detected, but its compiled installer mode could not be resolved from scope and PE execution-level evidence.')
     }
 
     if (-not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
       @($State.Metadata.SupportedScopes).Count -gt 0 -and
       $State.Metadata.SupportedScopes -notcontains $State.TargetScope) {
-      $State.Warnings.Add("The Tauri installer supports '$($State.Metadata.SupportedScopes -join ', ')' scope, not the requested '$($State.TargetScope)' scope.")
+      $State.Diagnostics.Add("The Tauri installer supports '$($State.Metadata.SupportedScopes -join ', ')' scope, not the requested '$($State.TargetScope)' scope.")
     }
   }
 
@@ -5245,7 +5245,7 @@ function Complete-NSISMetadata {
     $State.Metadata.PortableEvidence = [string[]]$PortableInfo.Evidence
     if ($PortableInfo.IsPortable) {
       $State.Metadata.DefaultInstallLocation = $null
-      $State.Warnings.Add('The NSIS executable is an electron-builder portable launcher: it sets the PORTABLE_EXECUTABLE_* environment variables, executes the unpacked application from a temporary directory, and writes no visible Apps & Features entry. Treat the outer EXE as portable payload evidence rather than an installed NSIS package.')
+      $State.Diagnostics.Add('The NSIS executable is an electron-builder portable launcher: it sets the PORTABLE_EXECUTABLE_* environment variables, executes the unpacked application from a temporary directory, and writes no visible Apps & Features entry. Treat the outer EXE as portable payload evidence rather than an installed NSIS package.')
     }
   }
 
@@ -5283,27 +5283,27 @@ function Complete-NSISMetadata {
   if (-not $State.Metadata.WritesAppsAndFeaturesEntry -and $NestedInstallerEvidence.Count -gt 0) {
     # A wrapper that extracts or executes another installer may delegate ARP
     # ownership; surface that ambiguity instead of inventing an NSIS ProductCode.
-    $State.Warnings.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
+    $State.Diagnostics.Add('The NSIS installer has nested installer evidence but no visible uninstall registry write was found; inspect the nested payload or validate ARP in a VM.')
   }
   if (-not $SkipLocalizedAppsAndFeaturesEntries -and
     -not $State.Metadata.IsPortable -and
     $State.Metadata.HasArchitectureRuntimeCheck -and
     [string]::IsNullOrWhiteSpace([string]$State.TargetArchitecture) -and
     [string]::IsNullOrWhiteSpace([string]$State.Metadata.ProductCode)) {
-    $State.Warnings.Add('The installer contains a runtime architecture branch; pass -Architecture x86, x64, or arm64 to resolve architecture-specific ARP metadata deterministically.')
+    $State.Diagnostics.Add('The installer contains a runtime architecture branch; pass -Architecture x86, x64, or arm64 to resolve architecture-specific ARP metadata deterministically.')
   }
   if (-not $SkipLocalizedAppsAndFeaturesEntries -and
     $State.Metadata.HasScopeRuntimeCheck -and
     [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
     @($State.Metadata.SupportedScopes).Count -gt 1) {
-    $State.Warnings.Add('The installer contains runtime user and machine scope branches; pass -Scope user or machine to resolve scope-specific ARP metadata deterministically.')
+    $State.Diagnostics.Add('The installer contains runtime user and machine scope branches; pass -Scope user or machine to resolve scope-specific ARP metadata deterministically.')
   }
   if (-not $SkipLocalizedAppsAndFeaturesEntries -and
     $State.Metadata.HasScopeRuntimeCheck -and
     -not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
     -not [string]::IsNullOrWhiteSpace([string]$State.Metadata.Scope) -and
     $State.TargetScope -ne $State.Metadata.Scope) {
-    $State.Warnings.Add("The requested '$($State.TargetScope)' scope did not resolve to matching uninstall registry evidence; the parser observed '$($State.Metadata.Scope)' scope instead.")
+    $State.Diagnostics.Add("The requested '$($State.TargetScope)' scope did not resolve to matching uninstall registry evidence; the parser observed '$($State.Metadata.Scope)' scope instead.")
   }
 
   $State.Metadata.RegistryWrites = @($RegistryWrites)
@@ -5316,10 +5316,12 @@ function Complete-NSISMetadata {
     $AppsAndFeaturesInfo = Get-NSISAppsAndFeaturesEntryInfo -State $State
     $State.Metadata.AppsAndFeaturesEntries = @($AppsAndFeaturesInfo.AppsAndFeaturesEntries)
     $State.Metadata.AppsAndFeaturesEntryEvidence = @($AppsAndFeaturesInfo.AppsAndFeaturesEntryEvidence)
-    $State.Metadata.Notices = [string[]]@(
-      @($State.Notices; $AppsAndFeaturesInfo.Notices) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-        Select-Object -Unique
+    $State.Metadata.Diagnostics = @(
+      Merge-InstallerDiagnostics -Diagnostic @(
+        $State.Metadata.Diagnostics
+        $AppsAndFeaturesInfo.Diagnostics
+        @(ConvertTo-InstallerDiagnostic -InputObject @($State.InformationalDiagnosticMessages) -Source 'NSISSimulation' -Kind Information -Areas Metadata)
+      )
     )
     $State.Metadata.HasLocalizedAppsAndFeaturesEntries = $AppsAndFeaturesInfo.HasLocalizedEntries
 
@@ -5338,14 +5340,19 @@ function Complete-NSISMetadata {
   $State.Metadata.AppsAndFeaturesProductCode = if ($State.Metadata.WritesAppsAndFeaturesEntry) { $State.Metadata.ProductCode } else { $null }
   $State.Metadata.AppsAndFeaturesInstallerType = if ($State.Metadata.WritesAppsAndFeaturesEntry) { 'nullsoft' } else { $null }
   $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
-  foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $State.Warnings.Add($Warning) }
+  foreach ($Warning in @($RegistryAssociationInfo.Diagnostics)) { $State.Diagnostics.Add($Warning) }
   $State.Metadata.RegistryAssociationInfo = $RegistryAssociationInfo
   $State.Metadata.Protocols = $RegistryAssociationInfo.Protocols
   $State.Metadata.FileExtensions = $RegistryAssociationInfo.FileExtensions
   $State.Metadata.ExtractedFiles = @($ExtractedFiles)
   $State.Metadata.ConditionalExtractedFiles = @($State.ConditionalExtractedFiles)
   $State.Metadata.ExecutedPayloads = @($ExecutedPayloads)
-  $State.Metadata.Warnings = [string[]]@($State.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+  $State.Metadata.Diagnostics = @(
+    Merge-InstallerDiagnostics -Diagnostic @(
+      $State.Metadata.Diagnostics
+      @(ConvertTo-InstallerDiagnostic -InputObject @($State.Diagnostics) -Source 'NSISSimulation' -Kind Incomplete -Areas Metadata -AffectedFields $State.Metadata.UnresolvedFields)
+    )
+  )
   $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
   $State.VersionInfo | Add-Member -NotePropertyName UnresolvedFileSystemPredicates -NotePropertyValue ([string[]]@($State.UnknownFileSystemPredicates | Sort-Object)) -Force
   $State.VersionInfo | Add-Member -NotePropertyName UnresolvedProcessPredicates -NotePropertyValue ([string[]]@($State.UnknownProcessPredicates | Sort-Object)) -Force
@@ -5419,7 +5426,7 @@ function Invoke-NSISStaticSimulation {
     if ($PSCmdlet.ParameterSetName -eq 'Path') { $FormatContext = Get-NSISFormatContext -Path $Path }
     $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
     if (-not $FormatInfo.IsSupported) {
-      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
     }
     $HeaderData = $FormatContext.HeaderData
     $InitializationArguments = @{ FormatContext = $FormatContext; FileSystem = $FileSystem }
@@ -5457,10 +5464,10 @@ function Invoke-NSISStaticSimulation {
     }
     $RegistryPluginScopeVariables = @(Get-NSISRegistryPluginScopeVariable -State $State)
     $State.RegistryPluginScopeVariables = [int[]]$RegistryPluginScopeVariables
-    $State.Metadata.SupportedScopes = [string[]]@(
-      @($ScopeSelectionStarts.Keys | Where-Object { $ScopeSelectionStarts[$_] -ge 0 })
-      if ($RegistryPluginScopeVariables.Count -gt 0) { 'user'; 'machine' }
-    ) | Select-Object -Unique
+    $State.Metadata.SupportedScopes = [string[]]@(@(
+        @($ScopeSelectionStarts.Keys | Where-Object { $ScopeSelectionStarts[$_] -ge 0 })
+        if ($RegistryPluginScopeVariables.Count -gt 0) { 'user'; 'machine' }
+      ) | Select-Object -Unique)
     $State.Metadata.HasScopeRuntimeCheck = $State.Metadata.SupportedScopes.Count -gt 0
     $ScopeSelectionStart = if (-not [string]::IsNullOrWhiteSpace($Scope)) { $ScopeSelectionStarts[$Scope] } else { -1 }
     $HasTargetArchitectureResolver = $ArchitectureProbeStart -ge 0 -and -not [string]::IsNullOrWhiteSpace($Architecture)
@@ -5492,7 +5499,7 @@ function Invoke-NSISStaticSimulation {
         # Initialization can establish variables and scope used by every later
         # section. Retain partial evidence, but mark subsequent effects conditional.
         $InitializationCompleted = $false
-        $State.Warnings.Add("The .onInit callback could not be simulated completely: $($_.Exception.Message)")
+        $State.Diagnostics.Add("The .onInit callback could not be simulated completely: $($_.Exception.Message)")
         $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields + 'Callback:.onInit' | Select-Object -Unique)
       }
     }
@@ -5505,7 +5512,7 @@ function Invoke-NSISStaticSimulation {
         try {
           $null = Invoke-NSISCodeSegment -State $State -Position $ArchitectureProbeStart
         } catch {
-          $State.Warnings.Add("The source-backed architecture probe could not be simulated completely: $($_.Exception.Message)")
+          $State.Diagnostics.Add("The source-backed architecture probe could not be simulated completely: $($_.Exception.Message)")
           $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields + 'Architecture' | Select-Object -Unique)
         }
       }
@@ -5522,7 +5529,7 @@ function Invoke-NSISStaticSimulation {
       try {
         $null = Invoke-NSISCodeSegment -State $State -Position $ScopeSelectionStart
       } catch {
-        $State.Warnings.Add("The compiled '$Scope' scope selector could not be simulated completely: $($_.Exception.Message)")
+        $State.Diagnostics.Add("The compiled '$Scope' scope selector could not be simulated completely: $($_.Exception.Message)")
       }
     }
     if ($HasRegistryPluginTargetScopeResolver) {
@@ -5547,7 +5554,7 @@ function Invoke-NSISStaticSimulation {
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayName) -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.DisplayVersion) -and
       -not [string]::IsNullOrWhiteSpace($InitializedMetadata.ProductCode)) {
-      $State.Notices.Add("Full section simulation was skipped after deterministic uninstall metadata was recovered because the validated NSIS command table contains $($State.Entries.Count) entries.")
+      $State.InformationalDiagnosticMessages.Add("Full section simulation was skipped after deterministic uninstall metadata was recovered because the validated NSIS command table contains $($State.Entries.Count) entries.")
       return [pscustomobject]@{
         State           = $State
         Layout          = $Layout
@@ -5567,7 +5574,7 @@ function Invoke-NSISStaticSimulation {
       try {
         $Result = Invoke-NSISCodeSegment -State $State -Position $Section.CodeOffset
       } catch {
-        $State.Warnings.Add("NSIS section $($Section.Index) could not be simulated completely: $($_.Exception.Message)")
+        $State.Diagnostics.Add("NSIS section $($Section.Index) could not be simulated completely: $($_.Exception.Message)")
         $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields + "Section:$($Section.Index)" | Select-Object -Unique)
         continue
       }
@@ -5578,7 +5585,7 @@ function Invoke-NSISStaticSimulation {
       try {
         $null = Invoke-NSISCodeSegment -State $State -Position $Layout.CodeOnInstSuccess
       } catch {
-        $State.Warnings.Add("The .onInstSuccess callback could not be simulated completely: $($_.Exception.Message)")
+        $State.Diagnostics.Add("The .onInstSuccess callback could not be simulated completely: $($_.Exception.Message)")
         $State.Metadata.UnresolvedFields = [string[]]@($State.Metadata.UnresolvedFields + 'Callback:.onInstSuccess' | Select-Object -Unique)
       }
     }
@@ -5758,7 +5765,7 @@ function Get-NSISInstallerSwitchInfo {
       SilentSwitches             = @($Switches | Where-Object { $_.IsSilentSwitch } | Select-Object -ExpandProperty Switch)
       CommandLineParsingEvidence = $ParsingMarkers
       RejectedSwitchCandidates   = $RejectedSwitches.ToArray()
-      Warnings                   = [string[]]$Warnings.ToArray()
+      Diagnostics                = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'NSISSimulation' -Kind Incomplete -Areas Metadata)
     }
   }
 }

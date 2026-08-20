@@ -138,7 +138,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.MetadataRecordCounts.Run | Should -Be 1
     $Info.PascalScriptInfo.Present | Should -BeFalse
     $Info.PascalScriptInfo.AnalysisStatus | Should -Be 'NotPresent'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should parse the controlled historical Hyper-V fixture <Name>' -ForEach @(
@@ -171,7 +171,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     if ($Name -eq 'inno-catalog-3.0.7-a.exe') {
       $Info.PascalScriptInfo.Present | Should -BeFalse
       $Info.PascalScriptInfo.AnalysisStatus | Should -Be 'NotPresent'
-      @($Info.Warnings -like '*Pascal Script*') | Should -BeNullOrEmpty
+      @($Info.Diagnostics | Where-Object Message -Like '*Pascal Script*') | Should -BeNullOrEmpty
     }
 
     $ExpandedPath = Join-Path $TestDrive "expanded-controlled-historical-$Id"
@@ -296,7 +296,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.ParserVersionInfo.FileLocationDigestAlgorithm | Should -Be 'MD5'
     $Info.ParserVersionInfo.FileLocationEntrySize | Should -Be 70
     $Info.ParserVersionInfo.UsesLegacyCallTransform | Should -BeTrue
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should extract and verify an Inno 5.3.3 payload with legacy MD5 records' {
@@ -341,7 +341,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.ParserVersionInfo.UsesInt64BlockHeader | Should -BeTrue
     $Info.ParserVersionInfo.OffsetTableVersion | Should -Be 2
     $Info.PascalScriptInfo.AnalysisStatus | Should -Be 'Analyzed'
-    $Info.Warnings | Should -Contain 'CreateUninstallRegKey or Uninstallable is a dynamic expression, so Apps & Features registration cannot be determined statically.'
+    $Info.Diagnostics.Message | Should -Contain 'CreateUninstallRegKey or Uninstallable is a dynamic expression, so Apps & Features registration cannot be determined statically.'
   }
 
   It 'Should detect a default-user dual-scope Inno installer' {

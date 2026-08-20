@@ -469,7 +469,7 @@ function Get-AdvancedInstallerArchiveInfo {
       HasMsi              = $HasMsi
       EntryCount          = $EntryCount
       EncryptedEntryCount = $EncryptedEntryCount
-      Warnings            = [string[]]@()
+      Diagnostics         = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
     }
   } catch {
     # SharpCompress reaches its 7z AES decoder while reading an encrypted header and emits this
@@ -483,7 +483,7 @@ function Get-AdvancedInstallerArchiveInfo {
         HasMsi              = $null
         EntryCount          = $null
         EncryptedEntryCount = $null
-        Warnings            = [string[]]@('The Advanced Installer 7z header is encrypted, so nested paths cannot be enumerated without the authoring password.')
+        Diagnostics         = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@('The Advanced Installer 7z header is encrypted, so nested paths cannot be enumerated without the authoring password.')) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
       }
     }
     throw
@@ -1487,18 +1487,18 @@ function Get-AdvancedInstallerAnalysisContext {
     $MsiPayloadSelection = Get-AdvancedInstallerMsiPayloadSelection -File $Files -GeneralOptions $GeneralOptions -PayloadRoute $PayloadRoute
     $PlatformPayloadSelection = Get-AdvancedInstallerPlatformPayloadSelection -File $Files -GeneralOptions $GeneralOptions -PayloadRoute $PayloadRoute -MsiPayloadSelection $MsiPayloadSelection
     $MediaInfo = Get-AdvancedInstallerMediaInfo -File $Files -GeneralOptions $GeneralOptions -PayloadRoute $PayloadRoute -PlatformPayloadSelection $PlatformPayloadSelection
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
     if ($SelectedFormatProfile.IsFallback) {
-      $Warnings.Add("Advanced Installer structure version '$($Footer.StructureVersion)' used the strictly validated compatibility profile.")
+      $Warnings.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.Format.CompatibleFallback' -Source 'AdvancedInstaller' -Message "Advanced Installer structure version '$($Footer.StructureVersion)' used the strictly validated compatibility profile." -Kind Fallback -Areas Detection, Metadata, Extraction -Evidence ([ordered]@{ StructureVersion = $Footer.StructureVersion })))
     }
     if ($MediaInfo.HasOpaquePayloadTransform) {
-      $Warnings.Add('One or more Advanced Installer payloads use an unsupported transform; format metadata is available but full extraction is not.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.Extraction.UnsupportedTransform' -Source 'AdvancedInstaller' -Message 'One or more Advanced Installer payloads use an unsupported transform; format metadata is available but full extraction is not.' -Kind Unsupported -Areas Extraction))
     }
     foreach ($MissingExternalResource in $MediaInfo.MissingExternalResources) {
-      $Warnings.Add("Advanced Installer external resource '$($MissingExternalResource.Name)' is not present beside the bootstrapper; format evidence is retained but extraction is incomplete.")
+      $Warnings.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.Extraction.ExternalResourceMissing' -Source 'AdvancedInstaller' -Message "Advanced Installer external resource '$($MissingExternalResource.Name)' is not present beside the bootstrapper; format evidence is retained but extraction is incomplete." -Kind Incomplete -Areas Extraction -Evidence ([ordered]@{ Name = $MissingExternalResource.Name })))
     }
     if ($PlatformPayloadSelection -and $PlatformPayloadSelection.LegacyMsiSelection) {
-      $Warnings.Add('Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems; analyze both nested packages before updating installed-state metadata.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.Payload.PlatformConditionalTypes' -Source 'AdvancedInstaller' -Message 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems; analyze both nested packages before updating installed-state metadata.' -Kind Ambiguous -Areas Metadata, Installability -AffectedFields InstallerType, NestedInstallerType, Architecture))
     }
 
     [pscustomobject][ordered]@{
@@ -1517,7 +1517,7 @@ function Get-AdvancedInstallerAnalysisContext {
       MediaInfo                = $MediaInfo
       MsiPayloadSelection      = $MsiPayloadSelection
       PlatformPayloadSelection = $PlatformPayloadSelection
-      Warnings                 = [string[]]$Warnings.ToArray()
+      Diagnostics              = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata))
       Evidence                 = [string[]]@(@(
           "Footer magic ADVINSTSFX at 0x$('{0:X}' -f ($Footer.Offset + 64))"
           "Structure version $($Footer.StructureVersion)"
@@ -1588,7 +1588,7 @@ function ConvertTo-AdvancedInstallerFormatInfo {
     ValidationNotes               = $Context.Profile.ValidationNotes
     IsFallback                    = [bool]$Context.Profile.IsFallback
     Evidence                      = [string[]]$Context.Evidence
-    Warnings                      = [string[]]$Context.Warnings
+    Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Context.Diagnostics) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1636,7 +1636,7 @@ function Get-AdvancedInstallerFormatInfo {
         Capabilities                  = [string[]]@()
         IsFallback                    = $false
         Evidence                      = [string[]]@()
-        Warnings                      = [string[]]@($_.Exception.Message)
+        Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($_.Exception.Message)) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
       }
     }
   }
@@ -1676,7 +1676,7 @@ function Get-AdvancedInstallerInfo {
       WritesAppsAndFeaturesEntry    = $null
       AppsAndFeaturesProductCode    = $null
       AppsAndFeaturesInstallerType  = $null
-      Warnings                      = [string[]]$Context.Warnings
+      Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Context.Diagnostics) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
       UnresolvedFields              = [string[]]@()
       FooterOffset                  = [long]$Context.Footer.Offset
       InfoOffset                    = [long]$Context.Footer.CatalogOffset
@@ -1998,7 +1998,7 @@ function Get-AdvancedInstallerMsiInfo {
         WritesAppsAndFeaturesEntry    = $MsiInfo.WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode    = $MsiInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType  = $MsiInfo.AppsAndFeaturesInstallerType
-        Warnings                      = [string[]]@($MsiInfo.Warnings)
+        Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($MsiInfo.Diagnostics)) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
         UnresolvedFields              = [string[]]@($MsiInfo.UnresolvedFields)
         Name                          = $MsiFile.Name
         PackageArchitecture           = $MsiInfo.PackageArchitecture

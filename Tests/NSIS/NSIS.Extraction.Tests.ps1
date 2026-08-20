@@ -413,10 +413,10 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     $Result.VariableRoute | Should -Be $VariableRoute
     $Result.IsSupported | Should -BeTrue
     if ($NoticePattern) {
-      @($Result.Notices | Where-Object { $_ -match $NoticePattern }) | Should -Not -BeNullOrEmpty
-      $Result.Warnings | Should -BeNullOrEmpty
+      @($Result.Diagnostics.Message | Where-Object { $_ -match $NoticePattern }) | Should -Not -BeNullOrEmpty
+      @($Result.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     } else {
-      $Result.Warnings | Should -BeNullOrEmpty
+      @($Result.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     }
   }
 

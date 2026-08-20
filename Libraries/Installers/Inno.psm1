@@ -723,13 +723,13 @@ function Get-InnoFormatInfo {
     $OffsetTable = Get-InnoOffsetTable -Path $InstallerPath
     $SignatureInfo = Get-InnoSignatureInfo -Path $InstallerPath -OffsetTable $OffsetTable
     $Layout = Get-InnoLayout -SignatureInfo $SignatureInfo -LoaderRoute $OffsetTable.LoaderRoute
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
     if ($Layout.SupportStatus -eq 'Unsupported') {
-      $Warnings.Add("The Inno edition '$($Layout.Edition)' is identified, but no trustworthy record specification is available.")
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Format.RecordSpecificationUnsupported' -Source 'Inno' -Message "The Inno edition '$($Layout.Edition)' is identified, but no trustworthy record specification is available." -Kind Unsupported -Areas Detection, Metadata, Extraction))
     } elseif ($Layout.LayoutResolution -eq 'NearestOlderPendingValidation') {
-      $Warnings.Add('The signature is newer than the catalogued layout. Full parsing must validate every count, range, record boundary, checksum, and stream boundary before accepting the fallback.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Format.NewerCompatibleFallback' -Source 'Inno' -Message 'The signature is newer than the catalogued layout. Full parsing must validate every count, range, record boundary, checksum, and stream boundary before accepting the fallback.' -Kind Fallback -Areas Detection, Metadata, Extraction))
     } elseif ($Layout.LayoutResolution -eq 'ExactSignatureAlias') {
-      $Warnings.Add('Multiple catalog rows share this byte-equivalent setup-data signature. The source-defined canonical structure was selected and all alias IDs are reported.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Format.SignatureAlias' -Source 'Inno' -Message 'Multiple catalog rows share this byte-equivalent setup-data signature. The source-defined canonical structure was selected and all alias IDs are reported.' -Kind Ambiguous -Areas Detection))
     }
 
     $GetLayoutValue = {
@@ -760,7 +760,7 @@ function Get-InnoFormatInfo {
       CandidateIds             = [string[]]@($Layout.CandidateIds)
       SupportStatus            = $Layout.SupportStatus
       IsSupported              = $Layout.SupportStatus -eq 'Supported'
-      Warnings                 = $Warnings.ToArray()
+      Diagnostics              = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'Inno' -Kind Incomplete -Areas Metadata))
     }
   }
 }
@@ -1511,7 +1511,7 @@ function Get-InnoHeaderArchitectureData {
     [pscustomobject]$Layout
   )
 
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
 
   if ($Layout.ArchitecturesEncoding -eq 'None') {
     # Historical compilers predate architecture directives. Their x86 loader
@@ -1528,7 +1528,7 @@ function Get-InnoHeaderArchitectureData {
       PackedArchitecturesAllowed               = $null
       PackedArchitecturesInstallIn64BitMode    = $null
       IsKnown                                  = $true
-      Warnings                                 = [string[]]@()
+      Diagnostics                              = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Inno' -Kind Incomplete -Areas Metadata)
     }
   }
 
@@ -1567,7 +1567,7 @@ function Get-InnoHeaderArchitectureData {
       PackedArchitecturesAllowed               = $AllowedValue
       PackedArchitecturesInstallIn64BitMode    = $Install64Value
       IsKnown                                  = $true
-      Warnings                                 = $Warnings.ToArray()
+      Diagnostics                              = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'Inno' -Kind Incomplete -Areas Metadata)
     }
   }
 
@@ -1607,7 +1607,7 @@ function Get-InnoHeaderArchitectureData {
     PackedArchitecturesAllowed               = $null
     PackedArchitecturesInstallIn64BitMode    = $null
     IsKnown                                  = $IsKnown
-    Warnings                                 = $Warnings.ToArray()
+    Diagnostics                              = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'Inno' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -3149,7 +3149,7 @@ function ConvertTo-InnoPascalScriptInfo {
       Types = [pscustomobject[]]@(); GlobalVariables = [pscustomobject[]]@()
       Functions = [pscustomobject[]]@(); StringConstants = [string[]]@()
       RuntimeEffects = [pscustomobject[]]@(); StaticReturnValues = [pscustomobject[]]@()
-      Disassembly = $null; DisassemblyTruncated = $false; Warnings = [string[]]@()
+      Disassembly = $null; DisassemblyTruncated = $false; Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Inno' -Kind Incomplete -Areas Metadata)
       Parser = 'IFPSTools.NET IFPSLib'; ParserVersion = $null
     }
   }
@@ -3312,7 +3312,7 @@ function ConvertTo-InnoPascalScriptInfo {
   }
 
   $UsesExtendedType = @($PascalScript.Types | Where-Object { [string]$_.BaseType -ceq 'Extended' }).Count -gt 0
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   if ($UsesExtendedType) {
     $Warnings.Add('The IFPS program uses Extended values. IFPSLib decodes them as x86 80-bit values; scripts compiled for a non-x86 runtime may use a 64-bit representation.')
   }
@@ -3367,7 +3367,7 @@ function ConvertTo-InnoPascalScriptInfo {
     StaticReturnValues             = [pscustomobject[]]$StaticReturnValues.ToArray()
     Disassembly                    = $Disassembly
     DisassemblyTruncated           = $DisassemblyTruncated
-    Warnings                       = [string[]]$Warnings.ToArray()
+    Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'Inno' -Kind Incomplete -Areas Metadata)
     Parser                         = 'IFPSTools.NET IFPSLib'
     ParserVersion                  = [IFPSLib.Script].Assembly.GetName().Version.ToString()
   }
@@ -3438,8 +3438,8 @@ function Get-InnoInfo {
     $ExtractionHeader = $ParsedLayout.ExtractionHeader
     $HeaderFixedData = Read-InnoHeaderFixedData -Bytes $HeaderBytes -Layout $Layout
     $HeaderArchitectureData = Get-InnoHeaderArchitectureData -HeaderValues $HeaderValues -PEInfo $PEInfo -HeaderFixedData $HeaderFixedData -Layout $Layout
-    $Warnings = [System.Collections.Generic.List[string]]::new()
-    foreach ($Warning in $HeaderArchitectureData.Warnings) { $Warnings.Add($Warning) }
+    $Warnings = [System.Collections.Generic.List[object]]::new()
+    foreach ($Warning in $HeaderArchitectureData.Diagnostics) { $Warnings.Add($Warning) }
     $PascalScriptInfo = $null
     $HeaderFields = $Layout.HeaderFields
     $ManifestHeaderValues = [string[]]@(
@@ -3474,10 +3474,10 @@ function Get-InnoInfo {
     $AppsAndFeaturesEntryInfo = Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $HeaderValues -Layout $Layout `
       -HeaderFixedData $HeaderFixedData -StaticReturnValues $PascalScriptReturnMap
     if ($HeaderBlockInfo.EncryptionHeader.EncryptionUse -eq 'Files') {
-      $Warnings.Add('The installer payload files are encrypted; static metadata is available, but extraction requires the setup password.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Extraction.PasswordRequired' -Source 'Inno' -Message 'The installer payload files are encrypted; static metadata is available, but extraction requires the setup password.' -Kind Unsupported -Areas Extraction))
     }
     if (-not $AppsAndFeaturesEntryInfo.IsResolved) {
-      $Warnings.Add('CreateUninstallRegKey or Uninstallable is a dynamic expression, so Apps & Features registration cannot be determined statically.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.ARP.DynamicRegistrationExpression' -Source 'Inno' -Message 'CreateUninstallRegKey or Uninstallable is a dynamic expression, so Apps & Features registration cannot be determined statically.' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries))
     }
 
     # The file table supplies an exact boundary for the icon, INI, registry,
@@ -3606,9 +3606,9 @@ function Get-InnoInfo {
       WritesAppsAndFeaturesEntry               = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode               = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
       AppsAndFeaturesInstallerType             = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? 'inno' : $null
-      Warnings                                 = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                              = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'Inno' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                         = [string[]]@($UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-      Notices                                  = [string[]]@()
+
       RegistryWrites                           = [pscustomobject[]]@($PostFileRecordInfo.RegistryEntries)
       FileExtensions                           = [string[]]@($AssociationInfo.FileExtensions)
       Protocols                                = [string[]]@($AssociationInfo.Protocols)

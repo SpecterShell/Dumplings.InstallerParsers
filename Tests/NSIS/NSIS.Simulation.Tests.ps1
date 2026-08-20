@@ -340,11 +340,11 @@ Describe 'NSIS command simulation' -Tag Unit {
       $null = $State.UnknownExecFlags.Add($Script:NSIS_EXEC_FLAG_ERROR)
       $Outcome = Invoke-NSISCodeSegment -State $State -Position 0
       [pscustomobject]@{
-        Outcome   = $Outcome
-        IsUnknown = $State.UnknownVariables.Contains(0)
-        Value     = Get-NSISVariableValue -State $State -Index 0
-        Branches  = $State.ExploredBranchCount
-        Warnings  = [string[]]$State.Warnings
+        Outcome     = $Outcome
+        IsUnknown   = $State.UnknownVariables.Contains(0)
+        Value       = Get-NSISVariableValue -State $State -Index 0
+        Branches    = $State.ExploredBranchCount
+        Diagnostics = [object[]]$State.Diagnostics
       }
     } $Fixture
 
@@ -352,7 +352,7 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.IsUnknown | Should -BeTrue
     $Result.Value | Should -Be '$_NSIS_UNKNOWN_VAR_0_'
     $Result.Branches | Should -Be 1
-    $Result.Warnings | Should -BeNullOrEmpty
+    $Result.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should bound exponential branch exploration and retain truncation evidence' {
@@ -397,7 +397,7 @@ Describe 'NSIS command simulation' -Tag Unit {
         ExploredPredicates  = $State.ExploredBranchCount
         TruncatedBranches   = $State.TruncatedBranchCount
         HasUnresolvedBranch = $State.Metadata.UnresolvedFields -contains 'ControlFlowBranches'
-        Warnings            = [string[]]$State.Warnings
+        Diagnostics         = [object[]]$State.Diagnostics
       }
     } $Fixture
 
@@ -405,7 +405,7 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.ExploredPredicates | Should -Be 5
     $Result.TruncatedBranches | Should -Be 1
     $Result.HasUnresolvedBranch | Should -BeTrue
-    $Result.Warnings | Should -BeNullOrEmpty
+    $Result.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should parse command-line options and file versions with source-defined operand order' {

@@ -25,7 +25,7 @@ Describe 'Inno Pascal Script analysis' -Tag Unit {
     $Info.Disassembly.Length | Should -Be 2048
     $Info.Disassembly | Should -Match '^\.version 23'
     $Info.DisassemblyTruncated | Should -BeTrue
-    $Info.Warnings | Should -Contain 'The IFPS disassembly was truncated at 2048 characters.'
+    $Info.Diagnostics.Message | Should -Contain 'The IFPS disassembly was truncated at 2048 characters.'
   }
 
   It 'Should resolve a straight-line constant Pascal Script return' {

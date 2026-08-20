@@ -134,7 +134,7 @@ function Get-NSISInfo {
     $Context = Get-NSISFormatContext -Path (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf)
     $FormatInfo = ConvertTo-NSISFormatInfo -Context $Context
     if (-not $FormatInfo.IsSupported) {
-      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
     }
     $SimulationArguments = @{ FormatContext = $Context; Environment = $Environment; FileSystem = $FileSystem }
     if ($PSBoundParameters.ContainsKey('CommandLine')) { $SimulationArguments.CommandLine = $CommandLine }
@@ -150,16 +150,7 @@ function Get-NSISInfo {
     # Structural ambiguity and external-media warnings are discovered before
     # simulation. Merge them into the aggregate result so Get-NSISInfo callers
     # do not need a second parse through Get-NSISFormatInfo.
-    $Metadata.Warnings = [string[]]@(
-      @($Metadata.Warnings; $FormatInfo.Warnings) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        Select-Object -Unique
-    )
-    $Metadata.Notices = [string[]]@(
-      @($Metadata.Notices; $FormatInfo.Notices) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        Select-Object -Unique
-    )
+    $Metadata.Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Metadata.Diagnostics, $FormatInfo.Diagnostics))
 
     # Invoke-NSISStaticSimulation constructs the canonical aggregate result;
     # return it unchanged so bridge callers see exactly the parser's evidence.

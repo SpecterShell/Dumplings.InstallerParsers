@@ -11,6 +11,7 @@ BeforeAll {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerDiagnostics.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Installers' 'QtInstallerFramework.psm1') -Force
 
@@ -347,7 +348,7 @@ Describe 'Qt Installer Framework parser' {
     $FutureInfo = Get-QtInstallerFrameworkFormatInfo -Path $Future
     $FutureInfo.IsFallback | Should -BeTrue
     $FutureInfo.FormatProfileId | Should -Be 'ifw-modern-compatible'
-    $FutureInfo.Warnings | Should -Contain 'The Qt IFW media uses a structurally compatible fallback profile; release-specific capabilities require review.'
+    $FutureInfo.Diagnostics.Message | Should -Contain 'The Qt IFW media uses a structurally compatible fallback profile; release-specific capabilities require review.'
   }
 
   It 'Should resolve the source-defined unversioned Qt IFW 1.2 layout without treating it as a future fallback' {
@@ -361,7 +362,7 @@ Describe 'Qt Installer Framework parser' {
     $Info.FrameworkVersionRange | Should -Be '1.2-1.x'
     $Info.FormatProfileId | Should -Be 'ifw-1.x-legacy'
     $Info.IsFallback | Should -BeFalse
-    $Info.Warnings | Should -Contain 'No source-defined Qt IFW version marker was found; the framework version is reported as a structurally validated range.'
+    $Info.Diagnostics.Message | Should -Contain 'No source-defined Qt IFW version marker was found; the framework version is reported as a structurally validated range.'
   }
 
   It 'Should reject an unversioned package index when configuration evidence cannot distinguish 1.x from 2.0+' {
@@ -371,7 +372,7 @@ Describe 'Qt Installer Framework parser' {
 
     $Info.IsQtInstallerFramework | Should -BeTrue
     $Info.IsSupported | Should -BeFalse
-    $Info.Warnings -join ' ' | Should -BeLike '*structurally ambiguous between legacy and modern routes*'
+    $Info.Diagnostics.Message -join ' ' | Should -BeLike '*structurally ambiguous between legacy and modern routes*'
   }
 
   It 'Should diagnose every media marker and executable or DAT cookie' -ForEach @(
@@ -400,7 +401,7 @@ Describe 'Qt Installer Framework parser' {
     $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
     $Info.IsQtInstallerFramework | Should -BeTrue
     $Info.IsSupported | Should -BeFalse
-    $Info.Warnings -join ' ' | Should -BeLike '*format route is unsupported or malformed*'
+    $Info.Diagnostics.Message -join ' ' | Should -BeLike '*format route is unsupported or malformed*'
     { Get-QtInstallerFrameworkInfo -Path $Fixture } | Should -Throw '*unsupported or malformed*'
   }
 
@@ -417,7 +418,7 @@ Describe 'Qt Installer Framework parser' {
     $Info = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
 
     $Info.IsSupported | Should -BeFalse
-    $Info.Warnings -join ' ' | Should -BeLike '*performed-operation count footer*'
+    $Info.Diagnostics.Message -join ' ' | Should -BeLike '*performed-operation count footer*'
   }
 
   It 'Should parse official Windows media at catalog capability boundaries' {
@@ -440,7 +441,7 @@ Describe 'Qt Installer Framework parser' {
       if ($Case.ContainsKey('Payload')) {
         $Info.PayloadAvailability | Should -Be $Case.Payload
         $Info.Evidence.EmbeddedPackageArchiveCount | Should -Be 0
-        $Info.Warnings | Should -Contain 'Package metadata declares or implies external payload files, but no embedded, sidecar, or online repository source was resolved.'
+        $Info.Diagnostics.Message | Should -Contain 'Package metadata declares or implies external payload files, but no embedded, sidecar, or online repository source was resolved.'
       }
     }
   }
@@ -672,8 +673,8 @@ function Controller() {
     $Info.PackageName | Should -Be 'Example.RandomCode'
     $Info.ProductCode | Should -BeNullOrEmpty
     $Info.RequiresExplicitInstallLocation | Should -BeTrue
-    $Info.Warnings | Should -Contain 'No embedded ProductUUID was found. Qt IFW generates the Windows uninstall key at install time unless a script/config sets ProductUUID.'
-    $Info.Warnings | Should -Contain 'The embedded TargetDir is empty, so command-line installation requires --root with an absolute installation path.'
+    $Info.Diagnostics.Message | Should -Contain 'No embedded ProductUUID was found. Qt IFW generates the Windows uninstall key at install time unless a script/config sets ProductUUID.'
+    $Info.Diagnostics.Message | Should -Contain 'The embedded TargetDir is empty, so command-line installation requires --root with an absolute installation path.'
     { Read-ProductCodeFromQtInstallerFramework -Path $Fixture } | Should -Throw
   }
 
@@ -698,7 +699,7 @@ function Controller() {
     $Info.SupportsSilentInstallation | Should -BeFalse
     $Info.UserScopeSwitch | Should -BeNullOrEmpty
     $Info.MachineScopeSwitch | Should -BeNullOrEmpty
-    $Info.Warnings | Should -Contain 'The embedded IFW config disables the command-line interface, so silent installation and AllUsers scope overrides are unavailable.'
+    $Info.Diagnostics.Message | Should -Contain 'The embedded IFW config disables the command-line interface, so silent installation and AllUsers scope overrides are unavailable.'
   }
 
   It 'Should identify the Qt Linguist installer as GUI-only' {
@@ -715,7 +716,7 @@ function Controller() {
     $Info.SupportsDualScope | Should -BeFalse
     $Info.UserScopeSwitch | Should -BeNullOrEmpty
     $Info.MachineScopeSwitch | Should -BeNullOrEmpty
-    $Info.Warnings | Should -Contain 'The Qt IFW launcher does not contain the modern command-line interface; GUI-only installers do not support WinGet-compatible silent installation.'
+    $Info.Diagnostics.Message | Should -Contain 'The Qt IFW launcher does not contain the modern command-line interface; GUI-only installers do not support WinGet-compatible silent installation.'
     Test-QtInstallerFrameworkCLI -Path $Fixture | Should -BeFalse
     Test-QtInstallerFrameworkSilentInstallation -Path $Fixture | Should -BeFalse
   }

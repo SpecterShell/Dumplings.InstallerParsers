@@ -5,7 +5,7 @@ BeforeAll {
   $Script:DumplingsRepositoryRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModulesRoot '..'))
   . (Join-Path $Script:DumplingsTestRoot 'Support\TestFixture.ps1')
   $LibraryPath = Join-Path $Script:DumplingsModuleRoot 'Libraries'
-  foreach ($ModuleName in @('Runtime', 'Binary', 'Archive', 'PE', 'InstallerEvidence')) {
+  foreach ($ModuleName in @('Runtime', 'Binary', 'Archive', 'PE', 'InstallerDiagnostics', 'InstallerEvidence')) {
     Import-Module (Join-Path $LibraryPath "Infrastructure\$ModuleName.psm1") -Force
   }
   Import-Module (Join-Path $LibraryPath 'Installers\NSIS.psm1') -Force

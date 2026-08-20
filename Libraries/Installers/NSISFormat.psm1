@@ -2621,24 +2621,24 @@ function ConvertTo-NSISFormatInfo {
 
   $VersionInfo = $Context.VersionInfo
   $HeaderData = $Context.HeaderData
-  $Warnings = [System.Collections.Generic.List[string]]::new()
-  $Notices = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
+  $InformationMessages = [System.Collections.Generic.List[string]]::new()
   if ($VersionInfo.HasSemanticAmbiguity) {
-    $Warnings.Add('Multiple equally valid NSIS command layouts assign different meanings to opcodes used by this installer. Static command simulation is disabled rather than guessing a compiler feature set or reordered command table.')
+    $Warnings.Add((New-InstallerDiagnostic -Id 'NSIS.Format.CommandLayoutAmbiguous' -Source 'NSISFormat' -Message 'Multiple equally valid NSIS command layouts assign different meanings to opcodes used by this installer. Static command simulation is disabled rather than guessing a compiler feature set or reordered command table.' -Kind Ambiguous -Areas Detection, Metadata))
   } elseif ($VersionInfo.DetectionConfidence -eq 'Ambiguous') {
     # NSIS 2 and NSIS 3 share most command numbers. When every tied candidate
     # gives all used opcodes the same meaning, generation uncertainty does not
     # make simulation uncertain and belongs in diagnostic evidence, not warnings.
-    $Notices.Add('The installer does not contain decisive generation control codes; equivalent command profiles were tied, so the earliest compatible profile was selected.')
+    $InformationMessages.Add('The installer does not contain decisive generation control codes; equivalent command profiles were tied, so the earliest compatible profile was selected.')
   }
   if ($VersionInfo.BadCommandCount -gt 0) {
-    $Warnings.Add("The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) with invalid opcodes or source-defined operand semantics.")
+    $Warnings.Add((New-InstallerDiagnostic -Id 'NSIS.Format.InvalidCommandRecords' -Source 'NSISFormat' -Message "The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) with invalid opcodes or source-defined operand semantics." -Kind Incomplete -Areas Detection, Metadata -Evidence ([ordered]@{ Count = $VersionInfo.BadCommandCount })))
   }
   if ($VersionInfo.IgnoredExtensionOperandCount -gt 0) {
-    $Notices.Add("The selected command layout contains $($VersionInfo.IgnoredExtensionOperandCount) nonzero trailing vendor-extension operand(s); the parser used the documented command operands and retained the opaque values as format evidence.")
+    $InformationMessages.Add("The selected command layout contains $($VersionInfo.IgnoredExtensionOperandCount) nonzero trailing vendor-extension operand(s); the parser used the documented command operands and retained the opaque values as format evidence.")
   }
   if ($HeaderData.HasExternalFile) {
-    $Warnings.Add('The NSISBI installer references an external payload sidecar; embedded format evidence does not describe the complete payload set.')
+    $Warnings.Add((New-InstallerDiagnostic -Id 'NSIS.Extraction.ExternalPayloadRequired' -Source 'NSISFormat' -Message 'The NSISBI installer references an external payload sidecar; embedded format evidence does not describe the complete payload set.' -Kind Incomplete -Areas Extraction))
   }
 
   return [pscustomobject][ordered]@{
@@ -2680,8 +2680,8 @@ function ConvertTo-NSISFormatInfo {
     IgnoredExtensionOperandCount = $VersionInfo.IgnoredExtensionOperandCount
     IgnoredExtensionOperands     = $VersionInfo.IgnoredExtensionOperands
     IsSupported                  = [bool]$VersionInfo.Profile.Supported -and $VersionInfo.BadCommandCount -eq 0 -and -not $VersionInfo.HasSemanticAmbiguity
-    Warnings                     = [string[]]$Warnings.ToArray()
-    Notices                      = [string[]]$Notices.ToArray()
+    Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'NSISFormat' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$InformationMessages.ToArray()) -Source 'NSISFormat' -Kind Information -Areas Metadata)))
+
   }
 }
 
@@ -3506,7 +3506,7 @@ function Expand-NSISPayload {
     $FormatContext = Get-NSISFormatContext -Path $InstallerPath
     $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
     if (-not $FormatInfo.IsSupported) {
-      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Warnings))"
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
     }
     $HeaderData = $FormatContext.HeaderData
     $Initialized = & $StateInitializer $FormatContext

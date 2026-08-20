@@ -22,7 +22,7 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
       $HklmSignedValue = [System.BitConverter]::ToInt32([System.BitConverter]::GetBytes($HklmRawValue), 0)
 
       $State = [pscustomobject]@{
-        Entries          = @(
+        Entries                         = @(
           [pscustomobject]@{
             Opcode    = $Script:NSIS_OPCODE_WRITE_REG
             RawOpcode = $Script:NSIS_OPCODE_WRITE_REG
@@ -30,20 +30,21 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
             Values    = [int[]]@($Script:NSIS_OPCODE_WRITE_REG, $HklmSignedValue, $KeyOffset, $NameOffset, $ValueOffset, 1, 1)
           }
         )
-        StringsBlock     = $StringBytes.ToArray()
-        VersionInfo      = [pscustomobject]@{
+        StringsBlock                    = $StringBytes.ToArray()
+        VersionInfo                     = [pscustomobject]@{
           Unicode = $true
           IsV3    = $true
           Type    = 'NSIS3'
         }
-        Variables        = @{}
-        Registry         = @{}
-        RegistryWrites   = [System.Collections.Generic.List[object]]::new()
-        ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
-        Warnings         = [System.Collections.Generic.List[string]]::new()
-        Files            = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        ShellVarContext  = 'HKLM'
-        Metadata         = [ordered]@{
+        Variables                       = @{}
+        Registry                        = @{}
+        RegistryWrites                  = [System.Collections.Generic.List[object]]::new()
+        ExecutedPayloads                = [System.Collections.Generic.List[object]]::new()
+        Diagnostics                     = [System.Collections.Generic.List[object]]::new()
+        InformationalDiagnosticMessages = [System.Collections.Generic.List[string]]::new()
+        Files                           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        ShellVarContext                 = 'HKLM'
+        Metadata                        = [ordered]@{
           DisplayVersion             = $null
           DisplayName                = $null
           Publisher                  = $null
@@ -59,7 +60,8 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
           RegistryWrites             = @()
           ExtractedFiles             = @()
           ExecutedPayloads           = @()
-          Warnings                   = @()
+          Diagnostics                = @()
+          UnresolvedFields           = @()
           ParserVersionInfo          = $null
         }
       }
@@ -98,28 +100,29 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
       $RawOpcode = [uint32]53
       $LayoutOpcode = ConvertFrom-NSISBiOpcode -Opcode $RawOpcode
       $State = [pscustomobject]@{
-        Entries          = @([pscustomobject]@{
+        Entries                         = @([pscustomobject]@{
             Opcode       = $LayoutOpcode
             RawOpcode    = $RawOpcode
             LayoutOpcode = $LayoutOpcode
             Raw          = [uint32[]]@($RawOpcode, $HklmRawValue, $KeyOffset, $NameOffset, $ValueOffset, 0, 1, 1, 0)
             Values       = [int[]]@($RawOpcode, $HklmSignedValue, $KeyOffset, $NameOffset, $ValueOffset, 0, 1, 1, 0)
           })
-        StringsBlock     = $StringBytes.ToArray()
-        VersionInfo      = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3'; IsNsisBi = $true }
-        Variables        = @{}
-        Registry         = @{}
-        RegistryWrites   = [System.Collections.Generic.List[object]]::new()
-        ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
-        Warnings         = [System.Collections.Generic.List[string]]::new()
-        Files            = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        ShellVarContext  = 'HKLM'
-        Metadata         = [ordered]@{
+        StringsBlock                    = $StringBytes.ToArray()
+        VersionInfo                     = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3'; IsNsisBi = $true }
+        Variables                       = @{}
+        Registry                        = @{}
+        RegistryWrites                  = [System.Collections.Generic.List[object]]::new()
+        ExecutedPayloads                = [System.Collections.Generic.List[object]]::new()
+        Diagnostics                     = [System.Collections.Generic.List[object]]::new()
+        InformationalDiagnosticMessages = [System.Collections.Generic.List[string]]::new()
+        Files                           = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        ShellVarContext                 = 'HKLM'
+        Metadata                        = [ordered]@{
           DisplayVersion = $null; DisplayName = $null; Publisher = $null; ProductCode = $null
           DefaultInstallLocation = $null; UninstallString = $null; QuietUninstallString = $null
           DisplayIcon = $null; SystemComponent = $null; Scope = $null; WritesAppsAndFeaturesEntry = $false
           RegistryValues = @{}; RegistryWrites = @(); ExtractedFiles = @(); ExecutedPayloads = @()
-          Warnings = @(); ParserVersionInfo = $null
+          Diagnostics = @(); UnresolvedFields = @(); ParserVersionInfo = $null
         }
       }
 
@@ -159,7 +162,7 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
       $HklmSignedValue = [System.BitConverter]::ToInt32([System.BitConverter]::GetBytes($HklmRawValue), 0)
 
       $State = [pscustomobject]@{
-        Entries          = @(
+        Entries                         = @(
           [pscustomobject]@{
             Opcode    = $RegEnumOpcode
             RawOpcode = $RegEnumOpcode
@@ -167,16 +170,17 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
             Values    = [int[]]@($RegEnumOpcode, $HklmSignedValue, $KeyOffset, $NameOffset, $ValueOffset, 1, 1)
           }
         )
-        StringsBlock     = $StringBytes.ToArray()
-        VersionInfo      = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3' }
-        Variables        = @{}
-        Registry         = @{}
-        RegistryWrites   = [System.Collections.Generic.List[object]]::new()
-        ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
-        Warnings         = [System.Collections.Generic.List[string]]::new()
-        Files            = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        ShellVarContext  = 'HKLM'
-        Metadata         = [ordered]@{
+        StringsBlock                    = $StringBytes.ToArray()
+        VersionInfo                     = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3' }
+        Variables                       = @{}
+        Registry                        = @{}
+        RegistryWrites                  = [System.Collections.Generic.List[object]]::new()
+        ExecutedPayloads                = [System.Collections.Generic.List[object]]::new()
+        Diagnostics                     = [System.Collections.Generic.List[object]]::new()
+        InformationalDiagnosticMessages = [System.Collections.Generic.List[string]]::new()
+        Files                           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        ShellVarContext                 = 'HKLM'
+        Metadata                        = [ordered]@{
           DisplayVersion             = $null
           DisplayName                = $null
           Publisher                  = $null
@@ -192,7 +196,8 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
           RegistryWrites             = @()
           ExtractedFiles             = @()
           ExecutedPayloads           = @()
-          Warnings                   = @()
+          Diagnostics                = @()
+          UnresolvedFields           = @()
           ParserVersionInfo          = $null
         }
       }
@@ -234,7 +239,7 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
       $HkcuSignedValue = [System.BitConverter]::ToInt32([System.BitConverter]::GetBytes($HkcuRawValue), 0)
 
       $State = [pscustomobject]@{
-        Entries          = @(
+        Entries                         = @(
           [pscustomobject]@{
             Opcode    = $Script:NSIS_OPCODE_WRITE_REG
             RawOpcode = $Script:NSIS_OPCODE_WRITE_REG
@@ -254,16 +259,17 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
             Values    = [int[]]@($Script:NSIS_OPCODE_WRITE_REG, $HkcuSignedValue, $KeyOffset, $SystemComponentOffset, $HiddenValueOffset, $Script:NSIS_REG_TYPE_DWORD, $Script:NSIS_REG_TYPE_DWORD)
           }
         )
-        StringsBlock     = $StringBytes.ToArray()
-        VersionInfo      = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3' }
-        Variables        = @{}
-        Registry         = @{}
-        RegistryWrites   = [System.Collections.Generic.List[object]]::new()
-        ExecutedPayloads = [System.Collections.Generic.List[object]]::new()
-        Warnings         = [System.Collections.Generic.List[string]]::new()
-        Files            = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        ShellVarContext  = 'HKCU'
-        Metadata         = [ordered]@{
+        StringsBlock                    = $StringBytes.ToArray()
+        VersionInfo                     = [pscustomobject]@{ Unicode = $true; IsV3 = $true; Type = 'NSIS3' }
+        Variables                       = @{}
+        Registry                        = @{}
+        RegistryWrites                  = [System.Collections.Generic.List[object]]::new()
+        ExecutedPayloads                = [System.Collections.Generic.List[object]]::new()
+        Diagnostics                     = [System.Collections.Generic.List[object]]::new()
+        InformationalDiagnosticMessages = [System.Collections.Generic.List[string]]::new()
+        Files                           = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        ShellVarContext                 = 'HKCU'
+        Metadata                        = [ordered]@{
           DisplayVersion             = $null
           DisplayName                = $null
           Publisher                  = $null
@@ -279,7 +285,8 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
           RegistryWrites             = @()
           ExtractedFiles             = @()
           ExecutedPayloads           = @()
-          Warnings                   = @()
+          Diagnostics                = @()
+          UnresolvedFields           = @()
           ParserVersionInfo          = $null
         }
       }
@@ -359,7 +366,7 @@ Describe 'NSIS registry and scope projection' -Tag Unit {
     $Result.AppsAndFeaturesEntries.Publisher | Should -Contain '腾讯科技（深圳）有限公司'
     $Result.AppsAndFeaturesEntryEvidence.Locale | Should -Contain 'en-US'
     $Result.AppsAndFeaturesEntryEvidence.Locale | Should -Contain 'zh-CN'
-    $Result.Notices | Should -HaveCount 1
-    $Result.Notices[0] | Should -Match 'varies by installer language'
+    @($Result.Diagnostics | Where-Object Kind -EQ Information) | Should -HaveCount 1
+    $Result.Diagnostics.Message | Should -Match 'varies by installer language'
   }
 }

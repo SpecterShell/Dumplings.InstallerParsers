@@ -14,7 +14,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.PortableEvidence | Should -BeNullOrEmpty
     @($Info.AppsAndFeaturesEntries).Count | Should -Be 1
     $Info.HasLocalizedAppsAndFeaturesEntries | Should -BeFalse
-    $Info.Notices | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -EQ Information) | Should -BeNullOrEmpty
   }
 
   It 'Should follow the elevated UserInfo branch in the Fluent Bit CPack installer' {
@@ -33,11 +33,11 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.DisplayVersion | Should -Be '5.1.0'
     $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\fluent-bit'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
 
     $RequestedUserInfo.Scope | Should -Be 'machine'
     @($RequestedUserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
-    $RequestedUserInfo.Warnings | Should -Contain "The requested 'user' scope did not resolve to matching uninstall registry evidence; the parser observed 'machine' scope instead."
+    $RequestedUserInfo.Diagnostics.Message | Should -Contain "The requested 'user' scope did not resolve to matching uninstall registry evidence; the parser observed 'machine' scope instead."
   }
 
   It 'Should resolve architecture-specific ARP identities from the BitComet installer' {
@@ -73,7 +73,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain 'tutor-electron-student'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'Should select BeeDrive machine ARP writes when dormant user writes are also compiled' {
@@ -91,7 +91,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain '986aaad0-133f-5ad2-87e6-59ea820cbbad'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be @('HKLM')
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'Should resolve scope-specific ARP identities from the DBeaver installer' {
@@ -114,7 +114,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $MachineInfo.Scope | Should -Be 'machine'
     $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\DBeaver'
     $MachineInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver'
-    $MachineInfo.Warnings | Should -BeNullOrEmpty
+    @($MachineInfo.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'Should resolve Registry plug-in ARP writes for both MultiCommander architectures and scopes' {
@@ -148,7 +148,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
         $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
         $Info.AppsAndFeaturesEntries.ProductCode | Should -Contain $FixtureInfo.ProductCode
         @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Select-Object -Unique | Should -Be $(if ($Scope -eq 'user') { @('HKCU') } else { @('HKLM') })
-        $Info.Warnings | Should -BeNullOrEmpty
+        @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
       }
     }
   }
@@ -166,14 +166,14 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $UserInfo.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\WorkBuddy'
     $UserInfo.UninstallString | Should -Be '"%LocalAppData%\Programs\WorkBuddy\Uninstall WorkBuddy.exe" /currentuser'
     @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKCU'
-    $UserInfo.Warnings | Should -BeNullOrEmpty
+    @($UserInfo.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
 
     $MachineInfo.ProductCode | Should -Be 'BFD312E9-1019-4F57-9F44-F86246833B50'
     $MachineInfo.Scope | Should -Be 'machine'
     $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\WorkBuddy'
     $MachineInfo.UninstallString | Should -Be '"%ProgramFiles%\WorkBuddy\Uninstall WorkBuddy.exe" /allusers'
     @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
-    $MachineInfo.Warnings | Should -BeNullOrEmpty
+    @($MachineInfo.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'Should recover one explicit scoped ARP identity after custom AionUi hooks stop section simulation' {
@@ -193,7 +193,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info.QuietUninstallString | Should -BeNullOrEmpty
       $Info.UnresolvedFields | Should -Contain 'UninstallString'
       $Info.UnresolvedFields | Should -Contain 'QuietUninstallString'
-      $Info.Warnings | Should -BeNullOrEmpty
+      @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     }
 
     $UserInfo.Scope | Should -Be 'user'
@@ -220,7 +220,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info.SupportedScopes | Should -Contain 'user'
       $Info.SupportedScopes | Should -Contain 'machine'
       $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
-      $Info.Warnings | Should -BeNullOrEmpty
+      @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     }
 
     $UserInfo.Scope | Should -Be 'user'
@@ -274,7 +274,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info.TauriInstallerMode | Should -Be 'both'
       $Info.SupportedScopes | Should -Be @('user', 'machine')
       $Info.ProductCode | Should -Be 'TranslatorX'
-      $Info.Warnings | Should -BeNullOrEmpty
+      @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     }
 
     $UserInfo.Scope | Should -Be 'user'
@@ -359,8 +359,8 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.PortableEvidence | Should -Contain 'EnvironmentVariable:PORTABLE_EXECUTABLE_FILE'
     $Info.PortableEvidence | Should -Contain 'EnvironmentVariable:PORTABLE_EXECUTABLE_APP_FILENAME'
     $Info.PortableEvidence | Should -Contain 'NoAppsAndFeaturesEntry'
-    $Info.Warnings | Should -HaveCount 1
-    $Info.Warnings[0] | Should -Match 'portable launcher'
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -HaveCount 1
+    $Info.Diagnostics.Message | Should -Match 'portable launcher'
     $ElectronBuilderInfo.IsElectronBuilder | Should -BeTrue
     $ElectronBuilderInfo.IsPortable | Should -BeTrue
     $ElectronBuilderInfo.Evidence.PortableEvidence | Should -Contain 'NoAppsAndFeaturesEntry'
@@ -381,7 +381,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.UninstallString | Should -Be "`"$InstallRoot\3.44.10.457\WeMeetUninstall.exe`""
     $Info.DisplayIcon | Should -Be "`"$InstallRoot\WeMeetApp.exe`""
     $Info.Scope | Should -Be 'machine'
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'Should resolve GoTo electron-builder uninstall commands from StrCpy assignments' {
@@ -400,7 +400,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.QuietUninstallString | Should -Be "`"$InstallRoot\Uninstall GoTo.exe`" /currentuser /S"
     $Info.DisplayIcon | Should -Be "$InstallRoot\GoTo.exe,0"
     $Info.Scope | Should -Be 'user'
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'Should read NetEase UU Remote metadata from a vendor LZMA2 NSIS header' {
@@ -417,6 +417,6 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.Scope | Should -Be 'user'
     $Info.ParserVersionInfo.HasComponentPage | Should -BeFalse
     $Info.ParserVersionInfo.UnresolvedProcessPredicates | Should -Contain 'GameViewer.exe'
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 }

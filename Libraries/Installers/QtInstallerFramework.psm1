@@ -868,7 +868,7 @@ function ConvertTo-QtInstallerFrameworkOperationEffect {
 
   $Arguments = [string[]]@($Operation.PerformArguments)
   $Effects = [Collections.Generic.List[object]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $ScopedRoot = if ($Scope -eq 'machine') { 'HKLM' } else { 'HKCU' }
   $AddFileEffect = {
     param([string]$Action, [hashtable]$Properties)
@@ -997,7 +997,7 @@ function ConvertTo-QtInstallerFrameworkOperationEffect {
   }
   [pscustomobject][ordered]@{
     Effects  = [object[]]$Effects.ToArray()
-    Warnings = [string[]]$Warnings.ToArray()
+    Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1017,13 +1017,13 @@ function Get-QtInstallerFrameworkOperationEffectInfo {
   )
 
   $Effects = [Collections.Generic.List[object]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   foreach ($Item in @($Operation)) {
     $Projection = ConvertTo-QtInstallerFrameworkOperationEffect -Operation $Item -Scope $Scope
     foreach ($Effect in @($Projection.Effects)) { $Effects.Add($Effect) }
-    foreach ($Warning in @($Projection.Warnings)) { $Warnings.Add($Warning) }
+    foreach ($Warning in @($Projection.Diagnostics)) { $Warnings.Add($Warning) }
     $Item | Add-Member -NotePropertyName Effects -NotePropertyValue ([object[]]@($Projection.Effects)) -Force
-    $Item | Add-Member -NotePropertyName Warnings -NotePropertyValue ([string[]]@($Projection.Warnings)) -Force
+    $Item | Add-Member -NotePropertyName Diagnostics -NotePropertyValue ([object[]]@($Projection.Diagnostics)) -Force
   }
 
   [pscustomobject][ordered]@{
@@ -1033,7 +1033,7 @@ function Get-QtInstallerFrameworkOperationEffectInfo {
     ShortcutEffects    = [object[]]@($Effects | Where-Object Category -CEQ 'Shortcut')
     EnvironmentEffects = [object[]]@($Effects | Where-Object Category -CEQ 'Environment')
     ExecutionEffects   = [object[]]@($Effects | Where-Object Category -CEQ 'Process')
-    Warnings           = [string[]]@($Warnings | Select-Object -Unique)
+    Diagnostics           = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -2071,7 +2071,7 @@ function Open-QtInstallerFrameworkPackageArchive {
   try {
     $FilterStream = switch ($Filter) {
       'GZip' { [IO.Compression.GZipStream]::new($Source, [IO.Compression.CompressionMode]::Decompress, $true) }
-      'BZip2' { [SharpCompress.Compressors.BZip2.BZip2Stream]::new($Source, [SharpCompress.Compressors.CompressionMode]::Decompress, $true) }
+      'BZip2' { New-InstallerDecompressionStream -Algorithm BZip2 -Stream $Source -LeaveOpen }
       'Xz' { [SharpCompress.Compressors.Xz.XZStream]::new($Source) }
     }
     try {
@@ -2385,7 +2385,7 @@ function Expand-QtInstallerFramework {
       if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
       $PELayout = try { Get-PELayout -Stream $InstallerStream } catch { $null }
       $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout -Stream $InstallerStream -PELayout $PELayout
-      if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
+      if (-not $FormatInfo.IsSupported) { throw (@($FormatInfo.Diagnostics).Message -join ' ') }
 
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
         $DestinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "Dumplings-QtIFW-$([System.Guid]::NewGuid())"
@@ -2970,7 +2970,7 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
     )) {
     $null = Get-QtInstallerFrameworkRouteHandler -Category $RouteCategory.Category -Route $RouteCategory.Route
   }
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   if (-not $VersionEvidence.FrameworkVersion) {
     $Warnings.Add('No source-defined Qt IFW version marker was found; the framework version is reported as a structurally validated range.')
   }
@@ -3055,7 +3055,7 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
       OperationCount              = $Operations.Count
       ProfileSelection            = $Resolution.SelectionEvidence
     }
-    Warnings                     = [string[]]$Warnings.ToArray()
+    Diagnostics                     = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
     Layout                       = $Layout
     PackageCollections           = @($Resolution.Collections)
     Operations                   = @($Operations)
@@ -3107,7 +3107,7 @@ function Get-QtInstallerFrameworkAnalysisContext {
     $Layout = Get-QtInstallerFrameworkBinaryLayout -Path $InstallerPath -Stream $Stream
     $PELayout = try { Get-PELayout -Stream $Stream } catch { $null }
     $FormatInfo = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout -Stream $Stream -PELayout $PELayout
-    if (-not $FormatInfo.IsSupported) { throw ($FormatInfo.Warnings -join ' ') }
+    if (-not $FormatInfo.IsSupported) { throw (@($FormatInfo.Diagnostics).Message -join ' ') }
     $MetadataResources = @($FormatInfo.MetadataResources)
     $InstallerXmlResource = @($MetadataResources | Where-Object { $_.Root -eq 'Installer' } | Select-Object -First 1)
     $InstallerConfig = if ($InstallerXmlResource) {
@@ -3205,7 +3205,7 @@ function Get-QtInstallerFrameworkInterfaceInfo {
   $RequiredOptionMarkers = @('accept-licenses', 'default-answer', 'confirm-command')
   $CommandMarkers = @('check-updates', 'create-offline', 'clear-cache')
   $FoundMarkers = [System.Collections.Generic.List[string]]::new()
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   $PESubsystemInfo = try {
     Get-QtInstallerFrameworkPESubsystemInfo -Path $Path -PELayout $PELayout
   } catch {
@@ -3271,9 +3271,9 @@ function Get-QtInstallerFrameworkInterfaceInfo {
   $SupportsSilentInstallation = $CommandLineInterface -eq 'Enabled'
 
   if ($InterfaceVariant -eq 'GUI') {
-    $Warnings.Add('The Qt IFW launcher does not contain the modern command-line interface; GUI-only installers do not support WinGet-compatible silent installation.')
+    $Warnings.Add((New-InstallerDiagnostic -Id 'QtIFW.Installability.GuiOnly' -Source 'QtInstallerFramework' -Message 'The Qt IFW launcher does not contain the modern command-line interface; GUI-only installers do not support WinGet-compatible silent installation.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
   } elseif ($DisabledByConfig) {
-    $Warnings.Add('The embedded IFW config disables the command-line interface, so silent installation and AllUsers scope overrides are unavailable.')
+    $Warnings.Add((New-InstallerDiagnostic -Id 'QtIFW.Installability.CommandLineDisabled' -Source 'QtInstallerFramework' -Message 'The embedded IFW config disables the command-line interface, so silent installation and AllUsers scope overrides are unavailable.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes, Scope))
   }
 
   [pscustomobject]@{
@@ -3294,7 +3294,7 @@ function Get-QtInstallerFrameworkInterfaceInfo {
       SourceRule            = 'Qt IFW 4.0+ may include the command-line interface; within that generation the Windows CUI subsystem identifies the headless launcher and DisableCommandLineInterface can disable it.'
       InterfaceRoute        = if ($FormatInfo) { $FormatInfo.InterfaceRoute } else { $null }
     }
-    Warnings                    = $Warnings.ToArray()
+    Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -3504,14 +3504,14 @@ function Get-QtInstallerFrameworkAppsAndFeaturesEffectInfo {
   $Effects = [Collections.Generic.List[object]]::new()
   $RegistryWrites = [Collections.Generic.List[object]]::new()
   $Entries = [Collections.Generic.List[object]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   if (-not $InstallerConfig) {
-    return [pscustomobject][ordered]@{ Effects = @(); RegistryWrites = @(); Entries = @(); Warnings = @() }
+    return [pscustomobject][ordered]@{ Effects = @(); RegistryWrites = @(); Entries = @(); Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @(@()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata) }
   }
 
   $ProductCode = [string]$InstallerConfig.ProductCode
   if ([string]::IsNullOrWhiteSpace($ProductCode)) {
-    return [pscustomobject][ordered]@{ Effects = @(); RegistryWrites = @(); Entries = @(); Warnings = [string[]]$Warnings.ToArray() }
+    return [pscustomobject][ordered]@{ Effects = @(); RegistryWrites = @(); Entries = @(); Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata) }
   }
 
   $Root = if ($Scope -eq 'machine') { 'HKLM' } else { 'HKCU' }
@@ -3567,7 +3567,7 @@ function Get-QtInstallerFrameworkAppsAndFeaturesEffectInfo {
     Effects        = [object[]]$Effects.ToArray()
     RegistryWrites = [object[]]$RegistryWrites.ToArray()
     Entries        = [object[]]$Entries.ToArray()
-    Warnings       = [string[]]$Warnings.ToArray()
+    Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -3612,17 +3612,17 @@ function Get-QtInstallerFrameworkInfo {
     $RegistryWrites = [object[]]@($OperationEffectInfo.RegistryWrites) + [object[]]@($AppsAndFeaturesEffectInfo.RegistryWrites)
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
 
-    $Warnings = [System.Collections.Generic.List[string]]::new()
-    foreach ($Warning in @($FormatInfo.Warnings)) { $Warnings.Add([string]$Warning) }
-    foreach ($Warning in @($OperationEffectInfo.Warnings)) { $Warnings.Add([string]$Warning) }
-    foreach ($Warning in @($AppsAndFeaturesEffectInfo.Warnings)) { $Warnings.Add([string]$Warning) }
-    foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add([string]$Warning) }
+    $Warnings = [System.Collections.Generic.List[object]]::new()
+    foreach ($Diagnostic in @($FormatInfo.Diagnostics)) { $Warnings.Add($Diagnostic) }
+    foreach ($Diagnostic in @($OperationEffectInfo.Diagnostics)) { $Warnings.Add($Diagnostic) }
+    foreach ($Diagnostic in @($AppsAndFeaturesEffectInfo.Diagnostics)) { $Warnings.Add($Diagnostic) }
+    foreach ($Diagnostic in @($RegistryAssociationInfo.Diagnostics)) { $Warnings.Add($Diagnostic) }
     if (-not $InstallerConfig) {
       $Warnings.Add('No IFW installer-config/config.xml metadata was recovered from the embedded resources.')
     } elseif ($FormatInfo.PackageIndexRoute -ne 'component-index-v1' -and [string]::IsNullOrWhiteSpace($InstallerConfig.ProductCode)) {
       $Warnings.Add('No embedded ProductUUID was found. Qt IFW generates the Windows uninstall key at install time unless a script/config sets ProductUUID.')
     }
-    foreach ($Warning in @($InterfaceInfo.Warnings)) { $Warnings.Add($Warning) }
+    foreach ($Warning in @($InterfaceInfo.Diagnostics)) { $Warnings.Add($Warning) }
     if ($InstallLocationInfo.RequiresExplicitInstallLocation -eq $true) {
       $Warnings.Add('The embedded TargetDir is empty, so command-line installation requires --root with an absolute installation path.')
     }
@@ -3646,7 +3646,7 @@ function Get-QtInstallerFrameworkInfo {
       AppsAndFeaturesProductCode           = $InstallerConfig.ProductCode
       AppsAndFeaturesInstallerType         = 'exe'
       AppsAndFeaturesEntries               = [object[]]$AppsAndFeaturesEffectInfo.Entries
-      Warnings                             = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                             = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                     = [string[]]@()
       BinaryMarker                         = $Layout.MagicMarkerName
       IsQtInstallerFramework               = $FormatInfo.IsQtInstallerFramework

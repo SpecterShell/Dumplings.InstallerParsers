@@ -120,7 +120,7 @@ function Expand-SetupFactoryCompressedBytes {
       # Setup Factory 7 can use PKWARE implode. Load the small bounded decoder only when its
       # dictionary/literal property pair is structurally valid.
       if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.PkwareBlast').Type) {
-  $DecoderSource = Join-Path $PSScriptRoot '..\..\Assets\Source\SetupFactory\PkwareBlast.cs'
+        $DecoderSource = Join-Path $PSScriptRoot '..\..\Assets\Source\SetupFactory\PkwareBlast.cs'
         if (-not (Test-Path -LiteralPath $DecoderSource)) { throw "The PKWARE decoder source is missing: $DecoderSource" }
         Add-Type -Path $DecoderSource
       }
@@ -416,7 +416,7 @@ function Get-SetupFactoryInfo {
     $Overlay = Get-SetupFactoryOverlayInfo -Path $File.FullName
     if ($Overlay.Version -eq 0) { throw 'The file is not a recognized Setup Factory 7-9 installer' }
     $Temporary = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-SetupFactory-Info-' + [guid]::NewGuid().ToString('N'))
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
     try {
       # irsetup.dat owns session variables and scripted actions, so extract only that record rather
       # than expanding every application payload.
@@ -454,7 +454,7 @@ function Get-SetupFactoryInfo {
       else { $null }
       if (-not $Variables.Count) { $Warnings.Add('CSessionVar records were not found or were malformed') }
       if (-not $HasBuiltInUninstall -and -not $RegistryWrites.Count) { $Warnings.Add('No explicit built-in uninstall configuration or literal registry writes were found') }
-      foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
+      foreach ($Warning in @($RegistryAssociationInfo.Diagnostics)) { $Warnings.Add($Warning) }
 
       $WritesAppsAndFeaturesEntry = [bool]($HasBuiltInUninstall -or $RegistryWrites.Count)
 
@@ -474,7 +474,7 @@ function Get-SetupFactoryInfo {
         WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
         AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
-        Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'SetupFactory' -Kind Incomplete -Areas Metadata))
         UnresolvedFields             = [string[]]@()
         RegistryWrites               = $RegistryWrites
         RegistryAssociationInfo      = $RegistryAssociationInfo

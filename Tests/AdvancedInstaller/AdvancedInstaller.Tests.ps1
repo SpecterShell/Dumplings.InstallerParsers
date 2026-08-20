@@ -11,6 +11,7 @@ BeforeAll {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'FileSystem.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerDiagnostics.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Installers' 'AdvancedInstaller.psm1') -Force
 
@@ -431,7 +432,7 @@ Describe 'Advanced Installer parser' {
     $Info.PlatformPayloadSelection.ModernPayloads[0].Name | Should -Be 'Sparse Package-x64.msix'
     $Info.PlatformPayloadSelection.ModernPayloads[0].SelectorType | Should -Be 1
     $Info.PlatformPayloadSelection.ModernPayloads[0].SelectorGroup | Should -Be 18
-    $Info.Warnings | Should -Contain 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems; analyze both nested packages before updating installed-state metadata.'
+    $Info.Diagnostics.Message | Should -Contain 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems; analyze both nested packages before updating installed-state metadata.'
 
     $Destination = Join-Path $TestDrive 'advanced-installer-mixed-platform'
     Expand-AdvancedInstaller -Installer $Info -DestinationPath $Destination -CollisionAction Error | Out-Null
@@ -449,7 +450,7 @@ Describe 'Advanced Installer parser' {
     $Info = Get-AdvancedInstallerFormatInfo -Path $Fixture
 
     $Info.IsAdvancedInstaller | Should -BeFalse
-    $Info.Warnings | Should -Not -BeNullOrEmpty
+    $Info.Diagnostics | Should -Not -BeNullOrEmpty
   }
 
   It 'Should reject a bare ADVINSTSFX marker without a valid footer and catalog' {
@@ -460,7 +461,7 @@ Describe 'Advanced Installer parser' {
 
     $FormatInfo.IsAdvancedInstaller | Should -BeFalse
     $FormatInfo.IsSupported | Should -BeFalse
-    $FormatInfo.Warnings | Should -Not -BeNullOrEmpty
+    $FormatInfo.Diagnostics | Should -Not -BeNullOrEmpty
   }
 
   It 'Should resolve every catalog profile to registered routes' {
@@ -501,7 +502,7 @@ Describe 'Advanced Installer parser' {
     $Info.IsAdvancedInstaller | Should -BeTrue
     $Info.IsFallback | Should -BeTrue
     $Info.IsSupported | Should -BeFalse
-    $Info.Warnings | Should -Contain 'One or more Advanced Installer payloads use an unsupported transform; format metadata is available but full extraction is not.'
+    $Info.Diagnostics.Message | Should -Contain 'One or more Advanced Installer payloads use an unsupported transform; format metadata is available but full extraction is not.'
   }
 
   It 'Should report AES-256 evidence and release the controlled encrypted payload' {

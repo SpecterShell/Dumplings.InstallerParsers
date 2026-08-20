@@ -91,6 +91,7 @@ try {
   Import-Module (Join-Path $InfrastructurePath 'FileSystem.psm1') -Force
   Import-Module (Join-Path $InfrastructurePath 'Archive.psm1') -Force
   Import-Module (Join-Path $InfrastructurePath 'PE.psm1') -Force
+  Import-Module (Join-Path $InfrastructurePath 'InstallerDiagnostics.psm1') -Force
   Import-Module (Join-Path $InfrastructurePath 'InstallerEvidence.psm1') -Force
   $Result = switch ($Action) {
     'NSIS.GetFormatInfo' {
