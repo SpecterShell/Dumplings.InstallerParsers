@@ -242,3 +242,5 @@
   'Reasonix-windows-amd64-installer-1.17.13.exe'               = 'Installers\NSIS\ESEngine.ReasonixDesktop\1.17.13\Reasonix-windows-amd64-installer-1.17.13.exe'
   'TI-Connect-4.0.0.218.exe'                                   = 'Installers\Wise\TexasInstruments.TIConnect\4.0.0.218\TI-Connect-4.0.0.218.exe'
 }
+  'TI-Connect-4.0.0.218.exe'                                   = 'Installers\Wise\TexasInstruments.TIConnect\4.0.0.218\TI-Connect-4.0.0.218.exe'
+}

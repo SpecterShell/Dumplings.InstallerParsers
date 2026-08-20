@@ -240,6 +240,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $BothInfo = Get-NSISInfo -Path $Readest -Scope user
     $UserInfo = Get-NSISInfo -Path $Yaak
     $MachineInfo = Get-NSISInfo -Path $ClashVerge
+    $MachineMismatchInfo = Get-NSISInfo -Path $ClashVerge -Scope user
 
     $BothInfo.IsTauri | Should -BeTrue
     $BothInfo.TauriInstallerMode | Should -Be 'both'
@@ -259,6 +260,21 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $MachineInfo.RequestedExecutionLevel | Should -Be 'requireAdministrator'
     $MachineInfo.SupportedScopes | Should -Be @('machine')
     $MachineInfo.DefaultInstallLocation | Should -Be '%ProgramFiles%\Clash Verge'
+    @($MachineMismatchInfo.Diagnostics | Where-Object Id -EQ 'NSIS.Tauri.ScopeMismatch').Count | Should -Be 1
+  }
+
+  It 'Should not treat an empty branch-merge scope as a Tauri scope mismatch' {
+    $Fixture = Get-InstallerFixture -Name 'Reader-v1.4.3-windows-x64-setup.exe' `
+      -Url 'https://github.com/hadc188/reader/releases/download/v1.4.3/Reader-v1.4.3-windows-x64-setup.exe' `
+      -Sha256 'A1ACF58663DDE433165C344129871972AB60721F9E9CA77A103EEE4BF64DE382'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+
+    $Info.IsTauri | Should -BeTrue
+    $Info.TauriInstallerMode | Should -Be 'currentUser'
+    $Info.Scope | Should -Be 'user'
+    $Info.SupportedScopes | Should -Be @('user')
+    @($Info.Diagnostics | Where-Object Id -EQ 'NSIS.Tauri.ScopeMismatch') | Should -BeNullOrEmpty
   }
 
   It 'Should resolve the equality-guarded machine scope in the TranslatorX Tauri installer' {
@@ -417,6 +433,40 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.Scope | Should -Be 'user'
     $Info.ParserVersionInfo.HasComponentPage | Should -BeFalse
     $Info.ParserVersionInfo.UnresolvedProcessPredicates | Should -Contain 'GameViewer.exe'
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
+  }
+
+  It 'Should validate a vendor-replaced first-header signature through NSIS stub and CRC evidence' {
+    $Fixture = Get-InstallerFixture -Name '115br_v36.0.1.exe' `
+      -Url 'https://down.115.com/client/win/115br_v36.0.1.exe' `
+      -Sha256 'CE016B4A56FAC2CAF6DBC09009782D744F98C75B928CB42DE07A4BFD7E78A719'
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x86
+
+    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.DisplayName | Should -Be '115浏览器'
+    $Info.Scope | Should -Be 'user'
+    $Info.ParserVersionInfo.FirstHeaderSignatureRoute | Should -Be 'validated-custom-nsis-stub'
+    $Info.ParserVersionInfo.FirstHeaderSignature | Should -Be '450819A7653F0D988381E4AD3F731726'
+    $Info.ParserVersionInfo.StubManifestIdentity | Should -Be 'Nullsoft.NSIS.exehead'
+    $Info.ParserVersionInfo.StubCompilerVersion | Should -Be '2.46.5-Unicode'
+    $Info.ParserVersionInfo.ExtensionOperandSampleTruncated | Should -BeTrue
+    @($Info.ParserVersionInfo.IgnoredExtensionOperands).Count | Should -BeLessOrEqual 128
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
+  }
+
+  It 'Should terminate vivo NSISBI drive enumeration without treating compiler padding as extensions' {
+    $Fixture = Get-InstallerFixture -Name 'vivo-OfficeKit-6.7.3.0.exe' `
+      -Url 'https://pcsuite-api-static.vivo.com/upgrade-pre/pcsuite_upgrade_v6.7.3.0-cn_1783682219434.exe' `
+      -Sha256 'FE2DBCBA4CC3728FDEB76DC7B6A2EE107B977B9C9D3807C54EDD419F88FCF559'
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $Info.ProductCode | Should -Be 'pcsuite'
+    $Info.DisplayName | Should -Be 'vivo办公套件'
+    $Info.DisplayVersion | Should -Be '6.7.3.0'
+    $Info.Scope | Should -Be 'machine'
+    $Info.ParserVersionInfo.IsNsisBi | Should -BeTrue
+    $Info.ParserVersionInfo.IgnoredExtensionOperandCount | Should -Be 0
+    $Info.Diagnostics.Message | Should -Not -Match 'execution budget|vendor-extension operand'
     @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 }

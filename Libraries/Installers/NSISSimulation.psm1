@@ -2336,7 +2336,7 @@ function Initialize-NSISState {
   Set-NSISVariableValue -State $State -Index $Script:NSIS_PREDEFINED_VAR_TEMP -Value '$TEMP'
 
   if ($HeaderData.IsNsisBi) {
-    $State.Diagnostics.Add('The installer uses the NSISBI large-installer format; metadata was parsed from its expanded first-header and command layouts.')
+    $State.InformationalDiagnosticMessages.Add('The installer uses the NSISBI large-installer format; metadata was parsed from its expanded first-header and command layouts.')
   }
   if ($HeaderData.HasExternalFile) {
     $State.Diagnostics.Add('The NSISBI installer references an external payload file; embedded script metadata is available, but payload evidence may be incomplete without the sidecar file.')
@@ -2792,6 +2792,23 @@ function Invoke-NSISSystemPluginCall {
     [string]$FunctionName
   )
 
+  if ($FunctionName -in @('Alloc', 'StrAlloc')) {
+    # Buffers.c pops a size and pushes a zero-filled GlobalAlloc pointer. The
+    # simulator represents the pointer with a stable nonzero scalar; APIs that
+    # receive it below project their written text back into the referenced NSIS
+    # register instead of exposing parser-host memory.
+    $Size = 0L
+    $null = [long]::TryParse((Pop-NSISStackValue -State $State), [ref]$Size)
+    $State.Stack.Add($(if ($Size -gt 0) { '65536' } else { '0' }))
+    return $true
+  }
+
+  if ($FunctionName -ieq 'Free') {
+    # System::Free consumes one pointer and has no script-visible output.
+    $null = Pop-NSISStackValue -State $State
+    return $true
+  }
+
   if ($FunctionName -ieq 'Int64Op') {
     # System::Int64Op pops ARG1, OP, and ARG2, then pushes one result. x64.nsh
     # uses bitwise OR to combine IsWow64Process2 with its legacy fallback.
@@ -2884,6 +2901,31 @@ function Invoke-NSISSystemPluginCall {
   if ($Command -match '(?i)OLE32::CoTaskMemFree\(') {
     # The allocation belongs to the simulated shell call; freeing it has no
     # additional script-visible output.
+    return $true
+  }
+
+  if ($Command -match '(?i)kernel32::GetLogicalDriveStrings(?:W|A)?\([^)]*\)\s*i\([^,]+,\s*r(?<BufferRegister>\d+)\)') {
+    # Drive enumeration depends on the target machine. Project an empty,
+    # correctly terminated MULTI_SZ into the caller's buffer so metadata
+    # simulation follows the no-drive-effects path instead of repeatedly
+    # walking an opaque allocation that can never acquire a NUL terminator.
+    Set-NSISVariableValue -State $State -Index ([int]$Matches.BufferRegister) -Value ''
+    if ($Command -match '(?i)\)\s*i\.r(?<ResultRegister>\d+)') {
+      Set-NSISVariableValue -State $State -Index ([int]$Matches.ResultRegister) -Value '0'
+    }
+    return $true
+  }
+
+  if ($Command -match '(?i)kernel32::lstrlen(?:W|A)?\([^)]*\)\s*i\(i\s+r(?<InputRegister>\d+)\)\s*\.r(?<ResultRegister>\d+)') {
+    $Value = Get-NSISVariableValue -State $State -Index ([int]$Matches.InputRegister)
+    Set-NSISVariableValue -State $State -Index ([int]$Matches.ResultRegister) -Value ([string]$Value.Length)
+    return $true
+  }
+
+  if ($Command -match '(?i)kernel32::GetDriveType(?:W|A)?\([^)]*\)\s*i\([^)]*\)\s*\.r(?<ResultRegister>\d+)') {
+    # DRIVE_UNKNOWN is the conservative result when no caller-provided target
+    # filesystem can establish the drive kind.
+    Set-NSISVariableValue -State $State -Index ([int]$Matches.ResultRegister) -Value '0'
     return $true
   }
 
@@ -5206,6 +5248,16 @@ function Complete-NSISMetadata {
     }
   }
 
+  # Control-flow joins can represent an unresolved empty array element as an
+  # empty string. Normalize parser-owned scope evidence before Tauri mode
+  # inference so that absence is not mistaken for an unsupported scope.
+  $State.Metadata.SupportedScopes = [string[]]@(
+    @($State.Metadata.SupportedScopes) |
+      ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
+      Where-Object { $_ -in @('user', 'machine') } |
+      Select-Object -Unique
+  )
+
   # Tauri's standard template has three install-mode variants. Record only a
   # mode proven by its template markers plus compiled scope/execution evidence;
   # custom templates remain ordinary NSIS when those markers do not agree.
@@ -5217,18 +5269,25 @@ function Complete-NSISMetadata {
   }
   $State.Metadata.TauriEvidence = [string[]]$TauriInfo.Evidence
   if ($TauriInfo.IsTauri) {
-    if ($TauriInfo.InstallerMode -eq 'currentUser' -and @($State.Metadata.SupportedScopes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) {
+    if ($TauriInfo.InstallerMode -eq 'currentUser' -and $State.Metadata.SupportedScopes.Count -eq 0) {
       $State.Metadata.SupportedScopes = [string[]]@('user')
-    } elseif ($TauriInfo.InstallerMode -eq 'perMachine' -and @($State.Metadata.SupportedScopes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) {
+    } elseif ($TauriInfo.InstallerMode -eq 'perMachine' -and $State.Metadata.SupportedScopes.Count -eq 0) {
       $State.Metadata.SupportedScopes = [string[]]@('machine')
     } elseif (-not $TauriInfo.InstallerMode) {
-      $State.Diagnostics.Add('The standard Tauri NSIS template was detected, but its compiled installer mode could not be resolved from scope and PE execution-level evidence.')
+      $State.Diagnostics.Add((New-InstallerDiagnostic -Id 'NSIS.Tauri.InstallModeUnresolved' -Source 'NSIS' -Message 'The standard Tauri NSIS template was detected, but its compiled installer mode could not be resolved from scope and PE execution-level evidence.' -Kind Ambiguous -Areas Metadata, Installability -AffectedFields Scope -Evidence ([ordered]@{
+              RequestedExecutionLevel = $TauriInfo.RequestedExecutionLevel
+              ObservedScope           = $State.Metadata.Scope
+              SupportedScopes         = [string[]]$State.Metadata.SupportedScopes
+            })))
     }
 
     if (-not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
-      @($State.Metadata.SupportedScopes).Count -gt 0 -and
+      $State.Metadata.SupportedScopes.Count -gt 0 -and
       $State.Metadata.SupportedScopes -notcontains $State.TargetScope) {
-      $State.Diagnostics.Add("The Tauri installer supports '$($State.Metadata.SupportedScopes -join ', ')' scope, not the requested '$($State.TargetScope)' scope.")
+      $State.Diagnostics.Add((New-InstallerDiagnostic -Id 'NSIS.Tauri.ScopeMismatch' -Source 'NSIS' -Message "The Tauri installer supports '$($State.Metadata.SupportedScopes -join ', ')' scope, not the requested '$($State.TargetScope)' scope." -Kind Mismatch -Areas Metadata, Installability -AffectedFields Scope -Evidence ([ordered]@{
+              RequestedScope  = $State.TargetScope
+              SupportedScopes = [string[]]$State.Metadata.SupportedScopes
+            })))
     }
   }
 

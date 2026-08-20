@@ -570,6 +570,52 @@ Describe 'NSIS command simulation' -Tag Unit {
     [int]$Result.arm64 | Should -BeGreaterThan 0
   }
 
+  It 'Should model System plug-in allocation and drive-enumeration buffer outputs' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $State = [pscustomobject]@{
+        Variables = @{}
+        Stack     = [System.Collections.Generic.List[string]]::new()
+      }
+
+      $State.Stack.Add('1024')
+      $Allocated = Invoke-NSISSystemPluginCall -State $State -FunctionName 'StrAlloc'
+      $Pointer = Pop-NSISStackValue -State $State
+      Set-NSISVariableValue -State $State -Index 2 -Value $Pointer
+
+      $State.Stack.Add('kernel32::GetLogicalDriveStrings(i,i) i(1024, r2)')
+      $Enumerated = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+      $State.Stack.Add('kernel32::lstrlen(t) i(i r2) .r4')
+      $Measured = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+      $State.Stack.Add('kernel32::GetDriveType(t) i(i r2) .r5')
+      $Typed = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Call'
+
+      $State.Stack.Add($Pointer)
+      $Freed = Invoke-NSISSystemPluginCall -State $State -FunctionName 'Free'
+      [pscustomobject]@{
+        Allocated  = $Allocated
+        Enumerated = $Enumerated
+        Measured   = $Measured
+        Typed      = $Typed
+        Freed      = $Freed
+        Buffer     = $State.Variables[2]
+        Length     = $State.Variables[4]
+        DriveType  = $State.Variables[5]
+        StackCount = $State.Stack.Count
+      }
+    }
+
+    $Result.Allocated | Should -BeTrue
+    $Result.Enumerated | Should -BeTrue
+    $Result.Measured | Should -BeTrue
+    $Result.Typed | Should -BeTrue
+    $Result.Freed | Should -BeTrue
+    $Result.Buffer | Should -Be ''
+    $Result.Length | Should -Be '0'
+    $Result.DriveType | Should -Be '0'
+    $Result.StackCount | Should -Be 0
+  }
+
   It 'Should model the nsProcess fresh-install stack contract' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {

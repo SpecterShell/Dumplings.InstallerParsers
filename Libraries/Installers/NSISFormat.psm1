@@ -121,9 +121,11 @@ $NSISBI_CURRENT_FLAG_HAS_EXTERNAL_FILE = [uint32]0x20
 $NSISBI_CURRENT_FLAG_IS_STUB_INSTALLER = [uint32]0x40
 $NSIS_ARCHIVE_ALIGNMENT = 512
 $NSIS_MAX_BACKWARD_PE_SCAN = 1048576
+$NSIS_MAX_CUSTOM_SIGNATURE_SCAN = 1048576
 $NSIS_MAX_FILE_SIZE = [uint64]4294967295
 $NSIS_MAX_HEADER_SIZE = 134217728
 $NSIS_MAX_ENTRY_COUNT = 33554432
+$NSIS_MAX_EXTENSION_RECORD_SAMPLES = 128
 $NSIS_MAX_FULL_SIMULATION_ENTRY_COUNT = 16384
 $NSIS_MAX_EXTRACTION_FILE_COUNT = 262144
 $NSIS_DEFAULT_MAXIMUM_EXPANDED_BYTES = 1073741824
@@ -736,6 +738,133 @@ function Test-NSISPre304FirstHeader {
   (Test-NSISCodecStart -Bytes $Bytes -Offset 36)
 }
 
+function Get-NSISPEStubManifestInfo {
+  <#
+  .SYNOPSIS
+    Read source-backed NSIS identity from an owning PE stub manifest.
+  .DESCRIPTION
+    Some vendors replace the 16-byte NSIS first-header signature while leaving
+    the stock archive framing intact. A custom signature is considered only
+    when the PE manifest explicitly names Nullsoft.NSIS.exehead; generic PE
+    strings and product-version resources are not sufficient.
+  .PARAMETER Stream
+    Caller-owned seekable stream containing the complete installer.
+  .PARAMETER StubOffset
+    Absolute offset of the owning PE image.
+  .PARAMETER StubEndOffset
+    Absolute exclusive end of the PE image before archive padding.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][long]$StubOffset,
+    [Parameter(Mandatory)][long]$StubEndOffset
+  )
+
+  if ($StubOffset -lt 0 -or $StubEndOffset -le $StubOffset -or $StubEndOffset -gt $Stream.Length) { return $null }
+  $StubStream = New-BoundedReadStream -Stream $Stream -Offset $StubOffset -Length ($StubEndOffset - $StubOffset) -LeaveOpen
+  try {
+    $Layout = Get-PELayout -Stream $StubStream
+    if (-not $Layout) { return $null }
+    $Manifest = @(Get-PEResourceInfo -Stream $StubStream -Layout $Layout -MaximumResources 4096 | Where-Object { $_.TypeId -eq 24 -and $_.Id -eq 1 } | Select-Object -First 1)
+    if ($Manifest.Count -eq 0 -or $Manifest[0].Size -gt 1048576) { return $null }
+    $Bytes = Read-PEResourceData -Resource $Manifest[0] -MaximumBytes 1048576
+    $Text = if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+      [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+      [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    } else {
+      [Text.Encoding]::UTF8.GetString($Bytes).TrimStart([char]0xFEFF)
+    }
+    if ($Text -notmatch '(?is)<assemblyIdentity\b[^>]*\bname\s*=\s*["'']Nullsoft\.NSIS\.exehead["'']') { return $null }
+    $VersionMatch = [regex]::Match($Text, '(?i)Nullsoft Install System\s+v(?<Version>[^<"'']+)')
+    return [pscustomobject]@{
+      IsNsisStub      = $true
+      Identity        = 'Nullsoft.NSIS.exehead'
+      CompilerVersion = if ($VersionMatch.Success) { $VersionMatch.Groups['Version'].Value.Trim() } else { $null }
+      ManifestText    = $Text
+      Layout          = $Layout
+    }
+  } catch {
+    return $null
+  } finally {
+    $StubStream.Dispose()
+  }
+}
+
+function Get-NSISCustomSignatureFirstHeaderCandidate {
+  <#
+  .SYNOPSIS
+    Locate a stock NSIS archive whose vendor replaced the first-header signature.
+  .DESCRIPTION
+    This route is deliberately narrower than ordinary signature discovery. It
+    requires an NSIS exehead PE manifest, a root-PE-relative aligned archive,
+    stock flags and sizes, an archive ending immediately before Authenticode or
+    EOF, and a valid source-defined NSIS archive CRC32.
+  .PARAMETER Stream
+    Caller-owned seekable installer stream.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][System.IO.Stream]$Stream)
+
+  try { $Layout = Get-PELayout -Stream $Stream } catch { return $null }
+  if (-not $Layout) { return $null }
+  $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
+  $StubManifest = Get-NSISPEStubManifestInfo -Stream $Stream -StubOffset 0 -StubEndOffset $OverlayOffset
+  if (-not $StubManifest) { return $null }
+
+  $Certificate = $Layout.DataDirectories['Certificate']
+  $ArchiveTerminal = if ($Certificate -and $Certificate.Offset -gt 0) { [long]$Certificate.Offset } else { [long]$Stream.Length }
+  $StartOffset = [long]([Math]::Ceiling($OverlayOffset / [double]$Script:NSIS_ARCHIVE_ALIGNMENT) * $Script:NSIS_ARCHIVE_ALIGNMENT)
+  $ScanEnd = [Math]::Min($ArchiveTerminal, $StartOffset + $Script:NSIS_MAX_CUSTOM_SIGNATURE_SCAN)
+  for ($Offset = $StartOffset; $Offset + $Script:NSIS_FIRST_HEADER_SIZE -le $ScanEnd; $Offset += $Script:NSIS_ARCHIVE_ALIGNMENT) {
+    $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Script:NSIS_FIRST_HEADER_SIZE
+    $Signature = [byte[]]$Header[4..19]
+    if (Test-BinarySequence -Left $Signature -Right $Script:NSIS_FIRST_HEADER_SIGNATURE) { continue }
+    if (@($Signature | Where-Object { $_ -ne 0 }).Count -lt 8) { continue }
+
+    $Flags = [BitConverter]::ToUInt32($Header, 0)
+    $InvalidFlagMask = [uint32]([uint64]4294967295 - [uint64]$Script:NSIS_FIRST_HEADER_FLAGS_MASK)
+    if (($Flags -band $InvalidFlagMask) -ne 0) { continue }
+    $LengthOfHeader = [BitConverter]::ToUInt32($Header, 20)
+    $LengthOfFollowingData = [BitConverter]::ToUInt32($Header, 24)
+    if ($LengthOfHeader -eq 0 -or $LengthOfHeader -gt $Script:NSIS_MAX_HEADER_SIZE) { continue }
+    if ($LengthOfFollowingData -le $Script:NSIS_FIRST_HEADER_SIZE -or $LengthOfFollowingData -gt $Stream.Length - $Offset) { continue }
+    $ArchiveEnd = $Offset + [long]$LengthOfFollowingData
+    $TerminalPadding = $ArchiveTerminal - $ArchiveEnd
+    if ($TerminalPadding -lt 0 -or $TerminalPadding -ge $Script:NSIS_ARCHIVE_ALIGNMENT) { continue }
+
+    $FlagInfo = Get-NSISFirstHeaderFlagInfo -Flags $Flags
+    $Candidate = [pscustomobject]@{
+      Offset                    = $Offset
+      StubOffset                = 0L
+      Flags                     = $Flags
+      FirstHeaderSize           = $Script:NSIS_FIRST_HEADER_SIZE
+      FirstHeaderSignatureRoute = 'validated-custom-nsis-stub'
+      FirstHeaderSignature      = [Convert]::ToHexString($Signature)
+      StubManifestIdentity      = $StubManifest.Identity
+      StubCompilerVersion       = $StubManifest.CompilerVersion
+      IsNsisBi                  = $false
+      FlagRoute                 = $FlagInfo.FlagRoute
+      HasLongDataBlockOffsets   = $false
+      HasLargeFileSource        = $false
+      SupportsExternalFiles     = $false
+      HasExternalFile           = $false
+      IsStubInstaller           = $false
+      ExternalFileCount         = 0
+      ExternalSegmentSize       = 0L
+      DataBlockLength           = [uint64]0
+      LengthOfHeader            = $LengthOfHeader
+      LengthOfFollowingData     = $LengthOfFollowingData
+    }
+    $ArchiveCrcInfo = Get-NSISArchiveCrcInfo -Stream $Stream -FirstHeader $Candidate
+    if (-not $ArchiveCrcInfo.IsVerified -or -not $ArchiveCrcInfo.IsValid) { continue }
+    $Candidate | Add-Member -NotePropertyName ArchiveCrcInfo -NotePropertyValue $ArchiveCrcInfo
+    return $Candidate
+  }
+  return $null
+}
+
 function Get-NSISFirstHeaderCandidate {
   <#
   .SYNOPSIS
@@ -751,7 +880,8 @@ function Get-NSISFirstHeaderCandidate {
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, ParameterSetName = 'Bytes', HelpMessage = 'The installer bytes')][byte[]]$Bytes,
-    [Parameter(Mandatory, ParameterSetName = 'Stream', HelpMessage = 'The installer stream')][System.IO.Stream]$Stream
+    [Parameter(Mandatory, ParameterSetName = 'Stream', HelpMessage = 'The installer stream')][System.IO.Stream]$Stream,
+    [Parameter(HelpMessage = 'Allow a CRC-verified custom signature owned by an explicit NSIS PE stub manifest')][switch]$AllowCustomSignature
   )
 
   if ($PSCmdlet.ParameterSetName -eq 'Stream') {
@@ -795,27 +925,32 @@ function Get-NSISFirstHeaderCandidate {
         $StubOffset = Get-NSISPEStubOffsetStream -Stream $Stream -FirstHeaderOffset $Offset
         if ($StubOffset -lt 0) { continue }
         return [pscustomobject]@{
-          Offset                  = $Offset
-          StubOffset              = $StubOffset
-          Flags                   = $Flags
-          FirstHeaderSize         = $FirstHeaderSize
-          IsNsisBi                = $FlagInfo.IsNsisBi
-          FlagRoute               = $FlagInfo.FlagRoute
-          HasLongDataBlockOffsets = $FlagInfo.HasLongDataBlockOffsets
-          HasLargeFileSource      = $FlagInfo.HasLargeFileSource
-          SupportsExternalFiles   = $FlagInfo.SupportsExternalFiles
-          HasExternalFile         = $FlagInfo.HasExternalFile
-          IsStubInstaller         = $FlagInfo.IsStubInstaller
-          ExternalFileCount       = $FlagInfo.ExternalFileCount
-          ExternalSegmentSize     = $FlagInfo.ExternalSegmentSize
-          DataBlockLength         = $FlagInfo.DataBlockLength
-          LengthOfHeader          = $LengthOfHeader
-          LengthOfFollowingData   = $LengthOfFollowingData
+          Offset                    = $Offset
+          StubOffset                = $StubOffset
+          Flags                     = $Flags
+          FirstHeaderSize           = $FirstHeaderSize
+          FirstHeaderSignatureRoute = 'standard'
+          FirstHeaderSignature      = [Convert]::ToHexString($Script:NSIS_FIRST_HEADER_SIGNATURE)
+          StubManifestIdentity      = $null
+          StubCompilerVersion       = $null
+          IsNsisBi                  = $FlagInfo.IsNsisBi
+          FlagRoute                 = $FlagInfo.FlagRoute
+          HasLongDataBlockOffsets   = $FlagInfo.HasLongDataBlockOffsets
+          HasLargeFileSource        = $FlagInfo.HasLargeFileSource
+          SupportsExternalFiles     = $FlagInfo.SupportsExternalFiles
+          HasExternalFile           = $FlagInfo.HasExternalFile
+          IsStubInstaller           = $FlagInfo.IsStubInstaller
+          ExternalFileCount         = $FlagInfo.ExternalFileCount
+          ExternalSegmentSize       = $FlagInfo.ExternalSegmentSize
+          DataBlockLength           = $FlagInfo.DataBlockLength
+          LengthOfHeader            = $LengthOfHeader
+          LengthOfFollowingData     = $LengthOfFollowingData
         }
       }
       if ($SearchLength -eq $Stream.Length - $SearchStart) { break }
       $SearchStart += $SearchLength - ($Script:NSIS_FIRST_HEADER_SIGNATURE.Length - 1)
     }
+    if ($AllowCustomSignature) { return Get-NSISCustomSignatureFirstHeaderCandidate -Stream $Stream }
     return $null
   }
 
@@ -855,25 +990,34 @@ function Get-NSISFirstHeaderCandidate {
     if ($StubOffset -lt 0) { continue }
 
     return [pscustomobject]@{
-      Offset                  = $Offset
-      StubOffset              = [long]$StubOffset
-      Flags                   = $Flags
-      FirstHeaderSize         = $FirstHeaderSize
-      IsNsisBi                = $FlagInfo.IsNsisBi
-      FlagRoute               = $FlagInfo.FlagRoute
-      HasLongDataBlockOffsets = $FlagInfo.HasLongDataBlockOffsets
-      HasLargeFileSource      = $FlagInfo.HasLargeFileSource
-      SupportsExternalFiles   = $FlagInfo.SupportsExternalFiles
-      HasExternalFile         = $FlagInfo.HasExternalFile
-      IsStubInstaller         = $FlagInfo.IsStubInstaller
-      ExternalFileCount       = $FlagInfo.ExternalFileCount
-      ExternalSegmentSize     = $FlagInfo.ExternalSegmentSize
-      DataBlockLength         = $FlagInfo.DataBlockLength
-      LengthOfHeader          = $LengthOfHeader
-      LengthOfFollowingData   = $LengthOfFollowingData
+      Offset                    = $Offset
+      StubOffset                = [long]$StubOffset
+      Flags                     = $Flags
+      FirstHeaderSize           = $FirstHeaderSize
+      FirstHeaderSignatureRoute = 'standard'
+      FirstHeaderSignature      = [Convert]::ToHexString($Script:NSIS_FIRST_HEADER_SIGNATURE)
+      StubManifestIdentity      = $null
+      StubCompilerVersion       = $null
+      IsNsisBi                  = $FlagInfo.IsNsisBi
+      FlagRoute                 = $FlagInfo.FlagRoute
+      HasLongDataBlockOffsets   = $FlagInfo.HasLongDataBlockOffsets
+      HasLargeFileSource        = $FlagInfo.HasLargeFileSource
+      SupportsExternalFiles     = $FlagInfo.SupportsExternalFiles
+      HasExternalFile           = $FlagInfo.HasExternalFile
+      IsStubInstaller           = $FlagInfo.IsStubInstaller
+      ExternalFileCount         = $FlagInfo.ExternalFileCount
+      ExternalSegmentSize       = $FlagInfo.ExternalSegmentSize
+      DataBlockLength           = $FlagInfo.DataBlockLength
+      LengthOfHeader            = $LengthOfHeader
+      LengthOfFollowingData     = $LengthOfFollowingData
     }
   }
 
+  if ($AllowCustomSignature) {
+    $ByteStream = [IO.MemoryStream]::new($Bytes, $false)
+    try { return Get-NSISCustomSignatureFirstHeaderCandidate -Stream $ByteStream }
+    finally { $ByteStream.Dispose() }
+  }
   return $null
 }
 
@@ -1406,7 +1550,7 @@ function Read-NSISHeaderDataCandidate {
   if ([uint64]$InstallerItem.Length -gt $Script:NSIS_MAX_FILE_SIZE) { throw 'The NSIS installer exceeds the supported 4 GiB executable size' }
   $InstallerStream = [IO.File]::Open($InstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
-    $FirstHeader = Get-NSISFirstHeaderCandidate -Stream $InstallerStream
+    $FirstHeader = Get-NSISFirstHeaderCandidate -Stream $InstallerStream -AllowCustomSignature
     if (-not $FirstHeader) { throw 'The NSIS installer header could not be located at a valid aligned archive start' }
 
     # NSISBI 3.03 did not reserve a first-header flag. Its two extra words can
@@ -1438,7 +1582,13 @@ function Read-NSISHeaderDataCandidate {
     $FirstHeaderOffset = $FirstHeader.Offset
     $LengthOfHeader = $FirstHeader.LengthOfHeader
     $LengthOfFollowingData = $FirstHeader.LengthOfFollowingData
-    $ArchiveCrcInfo = Get-NSISArchiveCrcInfo -Stream $InstallerStream -FirstHeader $FirstHeader
+    # The custom-signature discovery route already verifies the whole archive
+    # to distinguish a real NSIS frame from aligned random overlay data.
+    $ArchiveCrcInfo = if ($FirstHeader.PSObject.Properties['ArchiveCrcInfo']) {
+      $FirstHeader.ArchiveCrcInfo
+    } else {
+      Get-NSISArchiveCrcInfo -Stream $InstallerStream -FirstHeader $FirstHeader
+    }
     if ($ArchiveCrcInfo.IsVerified -and -not $ArchiveCrcInfo.IsValid) {
       throw "The NSIS archive CRC32 does not match: expected $($ArchiveCrcInfo.Expected.ToString('X8')), got $($ArchiveCrcInfo.Actual.ToString('X8'))."
     }
@@ -1563,35 +1713,39 @@ function Read-NSISHeaderDataCandidate {
           if ($Read -ne $HeaderBytes.Length) { throw 'The NSIS header stream is truncated' }
 
           return [pscustomobject]@{
-            Path                    = $InstallerPath
-            FirstHeaderOffset       = $FirstHeaderOffset
-            StubOffset              = $FirstHeader.StubOffset
-            FirstHeaderFlags        = $FirstHeader.Flags
-            FirstHeaderSize         = $FirstHeader.FirstHeaderSize
-            FirstHeaderFlagRoute    = $FirstHeader.FlagRoute
-            IsNsisBi                = $FirstHeader.IsNsisBi
-            HasLongDataBlockOffsets = $FirstHeader.HasLongDataBlockOffsets
-            HasLargeFileSource      = $FirstHeader.HasLargeFileSource
-            SupportsExternalFiles   = $FirstHeader.SupportsExternalFiles
-            HasExternalFile         = $FirstHeader.HasExternalFile
-            IsStubInstaller         = $FirstHeader.IsStubInstaller
-            ExternalFileCount       = $FirstHeader.ExternalFileCount
-            ExternalSegmentSize     = $FirstHeader.ExternalSegmentSize
-            DataBlockLength         = $FirstHeader.DataBlockLength
-            ArchiveSize             = $LengthOfFollowingData
-            ArchiveCrcInfo          = $ArchiveCrcInfo
-            HeaderSize              = $LengthOfHeader
-            PayloadOffset           = $PayloadOffset
-            PayloadLength           = $PayloadLength
-            PayloadDataOffset       = $PayloadDataOffset
-            PayloadDataLength       = $PayloadDataLength
-            PackedSizeWidth         = $PackedSizeWidth
-            CompressedHeaderSize    = $CompressedHeaderSize
-            Compression             = $EffectiveCompression
-            MtwBlockCount           = $MtwBlockCount
-            IsSolid                 = $IsSolid
-            HeaderBytes             = $HeaderBytes
-            PEInfo                  = Get-PEInfo -Path $InstallerPath
+            Path                      = $InstallerPath
+            FirstHeaderOffset         = $FirstHeaderOffset
+            StubOffset                = $FirstHeader.StubOffset
+            FirstHeaderFlags          = $FirstHeader.Flags
+            FirstHeaderSize           = $FirstHeader.FirstHeaderSize
+            FirstHeaderFlagRoute      = $FirstHeader.FlagRoute
+            FirstHeaderSignatureRoute = $FirstHeader.FirstHeaderSignatureRoute
+            FirstHeaderSignature      = $FirstHeader.FirstHeaderSignature
+            StubManifestIdentity      = $FirstHeader.StubManifestIdentity
+            StubCompilerVersion       = $FirstHeader.StubCompilerVersion
+            IsNsisBi                  = $FirstHeader.IsNsisBi
+            HasLongDataBlockOffsets   = $FirstHeader.HasLongDataBlockOffsets
+            HasLargeFileSource        = $FirstHeader.HasLargeFileSource
+            SupportsExternalFiles     = $FirstHeader.SupportsExternalFiles
+            HasExternalFile           = $FirstHeader.HasExternalFile
+            IsStubInstaller           = $FirstHeader.IsStubInstaller
+            ExternalFileCount         = $FirstHeader.ExternalFileCount
+            ExternalSegmentSize       = $FirstHeader.ExternalSegmentSize
+            DataBlockLength           = $FirstHeader.DataBlockLength
+            ArchiveSize               = $LengthOfFollowingData
+            ArchiveCrcInfo            = $ArchiveCrcInfo
+            HeaderSize                = $LengthOfHeader
+            PayloadOffset             = $PayloadOffset
+            PayloadLength             = $PayloadLength
+            PayloadDataOffset         = $PayloadDataOffset
+            PayloadDataLength         = $PayloadDataLength
+            PackedSizeWidth           = $PackedSizeWidth
+            CompressedHeaderSize      = $CompressedHeaderSize
+            Compression               = $EffectiveCompression
+            MtwBlockCount             = $MtwBlockCount
+            IsSolid                   = $IsSolid
+            HeaderBytes               = $HeaderBytes
+            PEInfo                    = Get-PEInfo -Path $InstallerPath
           }
         } catch {
           $LastError = $_
@@ -2166,15 +2320,16 @@ function Get-NSISVersionInfo {
     $ScoredCandidates = @($Candidates | ForEach-Object {
         $Score = Measure-NSISCommandLayoutCandidate -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled -IsNsisBi:$IsNsisBi
         [pscustomobject]@{
-          Type                         = $_.Type
-          LogCmdIsEnabled              = $_.LogCmdIsEnabled
-          Priority                     = $_.Priority
-          BadCommandCount              = $Score.FatalInvalidCommandCount
-          FatalInvalidCommandCount     = $Score.FatalInvalidCommandCount
-          IgnoredExtensionOperandCount = $Score.IgnoredExtensionOperandCount
-          IgnoredExtensionOperands     = $Score.IgnoredExtensionOperands
-          SemanticPenalty              = $Score.SemanticPenalty + $(if ($LogEvidenceByType[$_.Type] -and -not $_.LogCmdIsEnabled) { 1 } else { 0 })
-          SemanticSignature            = Get-NSISCommandLayoutSemanticSignature -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
+          Type                            = $_.Type
+          LogCmdIsEnabled                 = $_.LogCmdIsEnabled
+          Priority                        = $_.Priority
+          BadCommandCount                 = $Score.FatalInvalidCommandCount
+          FatalInvalidCommandCount        = $Score.FatalInvalidCommandCount
+          IgnoredExtensionOperandCount    = $Score.IgnoredExtensionOperandCount
+          IgnoredExtensionOperands        = $Score.IgnoredExtensionOperands
+          ExtensionOperandSampleTruncated = $Score.ExtensionOperandSampleTruncated
+          SemanticPenalty                 = $Score.SemanticPenalty + $(if ($LogEvidenceByType[$_.Type] -and -not $_.LogCmdIsEnabled) { 1 } else { 0 })
+          SemanticSignature               = Get-NSISCommandLayoutSemanticSignature -Entries $Entries -Type $_.Type -Unicode $Unicode -LogCmdIsEnabled $_.LogCmdIsEnabled
         }
       } | Sort-Object -Property BadCommandCount, SemanticPenalty, IgnoredExtensionOperandCount, Priority)
     $BestCandidate = $ScoredCandidates[0]
@@ -2183,6 +2338,7 @@ function Get-NSISVersionInfo {
     $BestCandidate | Add-Member -NotePropertyName FatalInvalidCommandCount -NotePropertyValue 0 -Force
     $BestCandidate | Add-Member -NotePropertyName IgnoredExtensionOperandCount -NotePropertyValue 0 -Force
     $BestCandidate | Add-Member -NotePropertyName IgnoredExtensionOperands -NotePropertyValue ([object[]]@()) -Force
+    $BestCandidate | Add-Member -NotePropertyName ExtensionOperandSampleTruncated -NotePropertyValue $false -Force
     $BestCandidate | Add-Member -NotePropertyName SemanticPenalty -NotePropertyValue 0 -Force
     $BestCandidate | Add-Member -NotePropertyName SemanticSignature -NotePropertyValue '' -Force
     $ScoredCandidates = @($BestCandidate)
@@ -2208,28 +2364,29 @@ function Get-NSISVersionInfo {
   }
 
   return [pscustomobject]@{
-    Unicode                      = $Unicode
-    Type                         = $BestCandidate.Type
-    IsV3                         = $BestCandidate.Type -eq 'NSIS3'
-    IsPark                       = $BestCandidate.Type -like 'Park*'
-    IsNsisBi                     = $IsNsisBi
-    LogCmdIsEnabled              = [bool]$BestCandidate.LogCmdIsEnabled
-    BadCommandCount              = [int]$BestCandidate.BadCommandCount
-    FatalInvalidCommandCount     = [int]$BestCandidate.FatalInvalidCommandCount
-    IgnoredExtensionOperandCount = [int]$BestCandidate.IgnoredExtensionOperandCount
-    IgnoredExtensionOperands     = [object[]]@($BestCandidate.IgnoredExtensionOperands)
-    Profile                      = $CatalogProfile
-    CatalogProfileId             = $CatalogProfile.Id
-    EditionId                    = $CatalogProfile.EditionId
-    Edition                      = $CatalogProfile.Edition
-    CharacterMode                = $CatalogProfile.CharacterMode
-    Generation                   = $CatalogProfile.Generation
-    VersionRange                 = $CatalogProfile.VersionRange
-    CompilerVersion              = $null
-    DetectionConfidence          = $DetectionConfidence
-    HasSemanticAmbiguity         = $HasSemanticAmbiguity
-    CandidateLayouts             = [pscustomobject[]]$ScoredCandidates
-    StringCodeCounts             = [pscustomobject]@{
+    Unicode                         = $Unicode
+    Type                            = $BestCandidate.Type
+    IsV3                            = $BestCandidate.Type -eq 'NSIS3'
+    IsPark                          = $BestCandidate.Type -like 'Park*'
+    IsNsisBi                        = $IsNsisBi
+    LogCmdIsEnabled                 = [bool]$BestCandidate.LogCmdIsEnabled
+    BadCommandCount                 = [int]$BestCandidate.BadCommandCount
+    FatalInvalidCommandCount        = [int]$BestCandidate.FatalInvalidCommandCount
+    IgnoredExtensionOperandCount    = [int]$BestCandidate.IgnoredExtensionOperandCount
+    IgnoredExtensionOperands        = [object[]]@($BestCandidate.IgnoredExtensionOperands)
+    ExtensionOperandSampleTruncated = [bool]$BestCandidate.ExtensionOperandSampleTruncated
+    Profile                         = $CatalogProfile
+    CatalogProfileId                = $CatalogProfile.Id
+    EditionId                       = $CatalogProfile.EditionId
+    Edition                         = $CatalogProfile.Edition
+    CharacterMode                   = $CatalogProfile.CharacterMode
+    Generation                      = $CatalogProfile.Generation
+    VersionRange                    = $CatalogProfile.VersionRange
+    CompilerVersion                 = $null
+    DetectionConfidence             = $DetectionConfidence
+    HasSemanticAmbiguity            = $HasSemanticAmbiguity
+    CandidateLayouts                = [pscustomobject[]]$ScoredCandidates
+    StringCodeCounts                = [pscustomobject]@{
       NSIS2 = $NSIS2Count
       NSIS3 = $NSIS3Count
       Park  = $ParkCount
@@ -2424,6 +2581,7 @@ function Measure-NSISCommandLayoutCandidate {
 
   $FatalInvalidCommandCount = 0
   $IgnoredExtensionOperandCount = 0
+  $CapturedExtensionOperandCount = 0
   $IgnoredExtensionOperands = [Collections.Generic.List[object]]::new()
   $LockWindowShapeValues = [Collections.Generic.HashSet[int]]::new()
   $FileWriteLockShapeCount = 0
@@ -2512,27 +2670,39 @@ function Measure-NSISCommandLayoutCandidate {
     } else {
       $Script:NSIS_COMMAND_PARAMETER_COUNTS[$Opcode]
     }
-    if ($ExpectedOperandCount -lt $LastNonZeroParameter) {
+    # NSISBI widens every serialized entry to eight operands. Its compiler can
+    # reuse one zero-initialized entry while expanding a single source command
+    # into several runtime commands, leaving values from File/RegisterDLL in
+    # slots that the later opcode never reads. These are source-defined padding,
+    # not vendor extensions. Stock six-operand records retain extension evidence
+    # because there is no wider ABI padding to explain an extra value.
+    if (-not $IsNsisBi -and $ExpectedOperandCount -lt $LastNonZeroParameter) {
       $OperandIndexes = [Collections.Generic.List[int]]::new()
       for ($Index = $ExpectedOperandCount + 1; $Index -le $MaximumOperand; $Index++) {
         if ($Entry.Raw[$Index] -ne 0) { $OperandIndexes.Add($Index) }
       }
       $IgnoredExtensionOperandCount += $OperandIndexes.Count
-      $IgnoredExtensionOperands.Add([pscustomobject][ordered]@{
-          EntryIndex           = $EntryIndex
-          RawOpcode            = [uint32]$Entry.RawOpcode
-          CanonicalOpcode      = $Opcode
-          ExpectedOperandCount = $ExpectedOperandCount
-          OperandIndexes       = [int[]]$OperandIndexes.ToArray()
-        })
+      # Keep the exact count for scoring while bounding retained PowerShell
+      # objects from vendor-modified installers with pervasive opaque padding.
+      if ($IgnoredExtensionOperands.Count -lt $Script:NSIS_MAX_EXTENSION_RECORD_SAMPLES) {
+        $IgnoredExtensionOperands.Add([pscustomobject][ordered]@{
+            EntryIndex           = $EntryIndex
+            RawOpcode            = [uint32]$Entry.RawOpcode
+            CanonicalOpcode      = $Opcode
+            ExpectedOperandCount = $ExpectedOperandCount
+            OperandIndexes       = [int[]]$OperandIndexes.ToArray()
+          })
+        $CapturedExtensionOperandCount += $OperandIndexes.Count
+      }
     }
   }
 
   return [pscustomobject][ordered]@{
-    FatalInvalidCommandCount     = $FatalInvalidCommandCount
-    IgnoredExtensionOperandCount = $IgnoredExtensionOperandCount
-    IgnoredExtensionOperands     = [object[]]$IgnoredExtensionOperands.ToArray()
-    SemanticPenalty              = $LockWindowShapeValues.Count -eq 2 ? $FileWriteLockShapeCount : 0
+    FatalInvalidCommandCount        = $FatalInvalidCommandCount
+    IgnoredExtensionOperandCount    = $IgnoredExtensionOperandCount
+    IgnoredExtensionOperands        = [object[]]$IgnoredExtensionOperands.ToArray()
+    ExtensionOperandSampleTruncated = $IgnoredExtensionOperandCount -gt $CapturedExtensionOperandCount
+    SemanticPenalty                 = $LockWindowShapeValues.Count -eq 2 ? $FileWriteLockShapeCount : 0
   }
 }
 
@@ -2585,6 +2755,10 @@ function Get-NSISFormatContext {
 
   $VersionInfo | Add-Member -NotePropertyName FirstHeaderRoute -NotePropertyValue $VersionInfo.Profile.FirstHeaderRoute
   $VersionInfo | Add-Member -NotePropertyName FirstHeaderFlagRoute -NotePropertyValue $HeaderData.FirstHeaderFlagRoute
+  $VersionInfo | Add-Member -NotePropertyName FirstHeaderSignatureRoute -NotePropertyValue $HeaderData.FirstHeaderSignatureRoute
+  $VersionInfo | Add-Member -NotePropertyName FirstHeaderSignature -NotePropertyValue $HeaderData.FirstHeaderSignature
+  $VersionInfo | Add-Member -NotePropertyName StubManifestIdentity -NotePropertyValue $HeaderData.StubManifestIdentity
+  $VersionInfo | Add-Member -NotePropertyName StubCompilerVersion -NotePropertyValue $HeaderData.StubCompilerVersion
   $VersionInfo | Add-Member -NotePropertyName HeaderRoute -NotePropertyValue $VersionInfo.Profile.HeaderRoute
   $VersionInfo | Add-Member -NotePropertyName BlockHeaderRoute -NotePropertyValue $(if ($HeaderData.PEInfo.Is64Bit) { 'uint64-offset' } else { 'uint32-offset' })
   $VersionInfo | Add-Member -NotePropertyName EntryRoute -NotePropertyValue $VersionInfo.Profile.EntryRoute
@@ -2635,52 +2809,61 @@ function ConvertTo-NSISFormatInfo {
     $Warnings.Add((New-InstallerDiagnostic -Id 'NSIS.Format.InvalidCommandRecords' -Source 'NSISFormat' -Message "The selected command layout contains $($VersionInfo.BadCommandCount) command record(s) with invalid opcodes or source-defined operand semantics." -Kind Incomplete -Areas Detection, Metadata -Evidence ([ordered]@{ Count = $VersionInfo.BadCommandCount })))
   }
   if ($VersionInfo.IgnoredExtensionOperandCount -gt 0) {
-    $InformationMessages.Add("The selected command layout contains $($VersionInfo.IgnoredExtensionOperandCount) nonzero trailing vendor-extension operand(s); the parser used the documented command operands and retained the opaque values as format evidence.")
+    $Retention = if ($VersionInfo.ExtensionOperandSampleTruncated) { 'retained a bounded sample of the opaque values' } else { 'retained the opaque values' }
+    $InformationMessages.Add("The selected command layout contains $($VersionInfo.IgnoredExtensionOperandCount) nonzero trailing vendor-extension operand(s); the parser used the documented command operands and $Retention as format evidence.")
+  }
+  if ($HeaderData.FirstHeaderSignatureRoute -eq 'validated-custom-nsis-stub') {
+    $InformationMessages.Add("The NSIS exehead manifest and archive CRC32 validated stock NSIS framing with a vendor-replaced first-header signature '$($HeaderData.FirstHeaderSignature)'.")
   }
   if ($HeaderData.HasExternalFile) {
     $Warnings.Add((New-InstallerDiagnostic -Id 'NSIS.Extraction.ExternalPayloadRequired' -Source 'NSISFormat' -Message 'The NSISBI installer references an external payload sidecar; embedded format evidence does not describe the complete payload set.' -Kind Incomplete -Areas Extraction))
   }
 
   return [pscustomobject][ordered]@{
-    Path                         = $HeaderData.Path
-    InstallerType                = 'Nullsoft'
-    EditionId                    = $VersionInfo.EditionId
-    Edition                      = $VersionInfo.Edition
-    CompilerVersion              = $VersionInfo.CompilerVersion
-    VersionRange                 = $VersionInfo.VersionRange
-    Generation                   = $VersionInfo.Generation
-    CharacterMode                = $VersionInfo.CharacterMode
-    StubArchitecture             = $VersionInfo.StubArchitecture
-    CatalogProfileId             = $VersionInfo.CatalogProfileId
-    FirstHeaderRoute             = $VersionInfo.FirstHeaderRoute
-    FirstHeaderFlagRoute         = $VersionInfo.FirstHeaderFlagRoute
-    HeaderRoute                  = $VersionInfo.HeaderRoute
-    BlockHeaderRoute             = $VersionInfo.BlockHeaderRoute
-    EntryRoute                   = $VersionInfo.EntryRoute
-    StringRoute                  = $VersionInfo.StringRoute
-    OpcodeRoute                  = $VersionInfo.OpcodeRoute
-    VariableRoute                = $VersionInfo.VariableRoute
-    CompressionRoute             = $VersionInfo.CompressionRoute
-    PayloadRoute                 = $VersionInfo.PayloadRoute
-    ChecksumRoute                = $VersionInfo.ChecksumRoute
-    ArchiveCrcStatus             = $HeaderData.ArchiveCrcInfo.Status
-    ArchiveCrcVerified           = $HeaderData.ArchiveCrcInfo.IsVerified
-    LogCommandEnabled            = $VersionInfo.LogCmdIsEnabled
-    IsSolid                      = $HeaderData.IsSolid
-    IsNsisBi                     = $HeaderData.IsNsisBi
-    SupportsExternalFiles        = $HeaderData.SupportsExternalFiles
-    HasExternalFile              = $HeaderData.HasExternalFile
-    IsStubInstaller              = $HeaderData.IsStubInstaller
-    ExternalFileCount            = $HeaderData.ExternalFileCount
-    ExternalSegmentSize          = $HeaderData.ExternalSegmentSize
-    DetectionConfidence          = $VersionInfo.DetectionConfidence
-    HasSemanticAmbiguity         = [bool]$VersionInfo.HasSemanticAmbiguity
-    CandidateLayouts             = $VersionInfo.CandidateLayouts
-    FatalInvalidCommandCount     = $VersionInfo.FatalInvalidCommandCount
-    IgnoredExtensionOperandCount = $VersionInfo.IgnoredExtensionOperandCount
-    IgnoredExtensionOperands     = $VersionInfo.IgnoredExtensionOperands
-    IsSupported                  = [bool]$VersionInfo.Profile.Supported -and $VersionInfo.BadCommandCount -eq 0 -and -not $VersionInfo.HasSemanticAmbiguity
-    Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'NSISFormat' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$InformationMessages.ToArray()) -Source 'NSISFormat' -Kind Information -Areas Metadata)))
+    Path                            = $HeaderData.Path
+    InstallerType                   = 'Nullsoft'
+    EditionId                       = $VersionInfo.EditionId
+    Edition                         = $VersionInfo.Edition
+    CompilerVersion                 = $VersionInfo.CompilerVersion
+    VersionRange                    = $VersionInfo.VersionRange
+    Generation                      = $VersionInfo.Generation
+    CharacterMode                   = $VersionInfo.CharacterMode
+    StubArchitecture                = $VersionInfo.StubArchitecture
+    CatalogProfileId                = $VersionInfo.CatalogProfileId
+    FirstHeaderRoute                = $VersionInfo.FirstHeaderRoute
+    FirstHeaderFlagRoute            = $VersionInfo.FirstHeaderFlagRoute
+    FirstHeaderSignatureRoute       = $VersionInfo.FirstHeaderSignatureRoute
+    FirstHeaderSignature            = $HeaderData.FirstHeaderSignature
+    StubManifestIdentity            = $HeaderData.StubManifestIdentity
+    StubCompilerVersion             = $HeaderData.StubCompilerVersion
+    HeaderRoute                     = $VersionInfo.HeaderRoute
+    BlockHeaderRoute                = $VersionInfo.BlockHeaderRoute
+    EntryRoute                      = $VersionInfo.EntryRoute
+    StringRoute                     = $VersionInfo.StringRoute
+    OpcodeRoute                     = $VersionInfo.OpcodeRoute
+    VariableRoute                   = $VersionInfo.VariableRoute
+    CompressionRoute                = $VersionInfo.CompressionRoute
+    PayloadRoute                    = $VersionInfo.PayloadRoute
+    ChecksumRoute                   = $VersionInfo.ChecksumRoute
+    ArchiveCrcStatus                = $HeaderData.ArchiveCrcInfo.Status
+    ArchiveCrcVerified              = $HeaderData.ArchiveCrcInfo.IsVerified
+    LogCommandEnabled               = $VersionInfo.LogCmdIsEnabled
+    IsSolid                         = $HeaderData.IsSolid
+    IsNsisBi                        = $HeaderData.IsNsisBi
+    SupportsExternalFiles           = $HeaderData.SupportsExternalFiles
+    HasExternalFile                 = $HeaderData.HasExternalFile
+    IsStubInstaller                 = $HeaderData.IsStubInstaller
+    ExternalFileCount               = $HeaderData.ExternalFileCount
+    ExternalSegmentSize             = $HeaderData.ExternalSegmentSize
+    DetectionConfidence             = $VersionInfo.DetectionConfidence
+    HasSemanticAmbiguity            = [bool]$VersionInfo.HasSemanticAmbiguity
+    CandidateLayouts                = $VersionInfo.CandidateLayouts
+    FatalInvalidCommandCount        = $VersionInfo.FatalInvalidCommandCount
+    IgnoredExtensionOperandCount    = $VersionInfo.IgnoredExtensionOperandCount
+    IgnoredExtensionOperands        = $VersionInfo.IgnoredExtensionOperands
+    ExtensionOperandSampleTruncated = $VersionInfo.ExtensionOperandSampleTruncated
+    IsSupported                     = [bool]$VersionInfo.Profile.Supported -and $VersionInfo.BadCommandCount -eq 0 -and -not $VersionInfo.HasSemanticAmbiguity
+    Diagnostics                     = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'NSISFormat' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$InformationMessages.ToArray()) -Source 'NSISFormat' -Kind Information -Areas Metadata)))
 
   }
 }
