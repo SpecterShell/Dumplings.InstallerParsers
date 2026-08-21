@@ -1665,7 +1665,7 @@ function Get-AdvancedInstallerInfo {
     # nested package's identity or visible ARP registration.
     return [pscustomobject][ordered]@{
       Path                          = $Context.Path
-      InstallerType                 = 'AdvancedInstaller'
+      InstallerType                 = 'exe'
       ProductCode                   = $null
       UpgradeCode                   = $null
       DisplayName                   = $null
@@ -1678,6 +1678,7 @@ function Get-AdvancedInstallerInfo {
       AppsAndFeaturesInstallerType  = $null
       Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Context.Diagnostics) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
       UnresolvedFields              = [string[]]@()
+      Family                        = 'Advanced Installer'
       FooterOffset                  = [long]$Context.Footer.Offset
       InfoOffset                    = [long]$Context.Footer.CatalogOffset
       CatalogEndOffset              = [long]$Context.Footer.CatalogEndOffset

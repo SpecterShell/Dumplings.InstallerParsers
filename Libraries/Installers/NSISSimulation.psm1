@@ -2259,12 +2259,14 @@ function Initialize-NSISState {
     CommandLine                     = ''
     Metadata                        = [ordered]@{
       Path                               = $HeaderData.Path
-      InstallerType                      = 'Nullsoft'
+      InstallerType                      = 'nullsoft'
       TargetArchitecture                 = $Architecture
       HasArchitectureRuntimeCheck        = $false
       TargetScope                        = $Scope
       HasScopeRuntimeCheck               = $false
       SupportedScopes                    = [string[]]@()
+      UserScopeSwitch                    = $null
+      MachineScopeSwitch                 = $null
       RequestedExecutionLevel            = $RequestedExecutionLevel
       IsTauri                            = $false
       TauriInstallerMode                 = $null
@@ -2283,6 +2285,7 @@ function Initialize-NSISState {
       AppsAndFeaturesInstallerType       = $null
       Diagnostics                        = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'NSISSimulation' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'NSISSimulation' -Kind Information -Areas Metadata)))
       UnresolvedFields                   = [string[]]@()
+      Family                             = 'NSIS/Nullsoft'
       UninstallString                    = $null
       QuietUninstallString               = $null
       DisplayIcon                        = $null
@@ -5257,6 +5260,10 @@ function Complete-NSISMetadata {
       Where-Object { $_ -in @('user', 'machine') } |
       Select-Object -Unique
   )
+  if ($State.Metadata.HasScopeRuntimeCheck -and $State.Metadata.SupportedScopes -contains 'user' -and $State.Metadata.SupportedScopes -contains 'machine') {
+    $State.Metadata.UserScopeSwitch = '/CurrentUser'
+    $State.Metadata.MachineScopeSwitch = '/AllUsers'
+  }
 
   # Tauri's standard template has three install-mode variants. Record only a
   # mode proven by its template markers plus compiled scope/execution evidence;
@@ -5814,7 +5821,8 @@ function Get-NSISInstallerSwitchInfo {
 
     [pscustomobject]@{
       Path                       = (Get-Item -Path $Path -Force).FullName
-      InstallerType              = 'Nullsoft'
+      InstallerType              = 'nullsoft'
+      Family                     = 'NSIS/Nullsoft'
       IsTauri                    = $TauriInfo.IsTauri
       TauriInstallerMode         = $TauriInfo.InstallerMode
       Switches                   = $Switches.ToArray()
@@ -5979,7 +5987,7 @@ function Get-ElectronBuilderNSISInfo {
 
     [pscustomobject]@{
       Path                   = (Get-Item -Path $Path -Force).FullName
-      InstallerType          = 'Nullsoft'
+      InstallerType          = 'exe'
       Family                 = 'electron-builder'
       IsElectronBuilder      = $Detection.IsElectronBuilder
       IsPortable             = $Detection.IsPortable

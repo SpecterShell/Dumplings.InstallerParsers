@@ -470,7 +470,8 @@ function Get-QtInstallerFrameworkBinaryLayout {
 
       [pscustomobject]@{
         Path                       = $File.FullName
-        InstallerType              = 'Qt Installer Framework'
+        InstallerType              = 'exe'
+        Family                     = 'Qt Installer Framework'
         CookieKind                 = $Cookie.Kind
         EndOfExecutable            = $EndOfExecutable
         EndOfBinaryContent         = $EndOfBinaryContent
@@ -996,7 +997,7 @@ function ConvertTo-QtInstallerFrameworkOperationEffect {
     $Warnings.Add("Qt IFW performed operation '$($Operation.Name)' has no usable arguments.")
   }
   [pscustomobject][ordered]@{
-    Effects  = [object[]]$Effects.ToArray()
+    Effects     = [object[]]$Effects.ToArray()
     Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
   }
 }
@@ -1033,7 +1034,7 @@ function Get-QtInstallerFrameworkOperationEffectInfo {
     ShortcutEffects    = [object[]]@($Effects | Where-Object Category -CEQ 'Shortcut')
     EnvironmentEffects = [object[]]@($Effects | Where-Object Category -CEQ 'Environment')
     ExecutionEffects   = [object[]]@($Effects | Where-Object Category -CEQ 'Process')
-    Diagnostics           = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata))
+    Diagnostics        = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -3055,7 +3056,7 @@ function Get-QtInstallerFrameworkFormatInfoInternal {
       OperationCount              = $Operations.Count
       ProfileSelection            = $Resolution.SelectionEvidence
     }
-    Diagnostics                     = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
+    Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
     Layout                       = $Layout
     PackageCollections           = @($Resolution.Collections)
     Operations                   = @($Operations)
@@ -3294,7 +3295,7 @@ function Get-QtInstallerFrameworkInterfaceInfo {
       SourceRule            = 'Qt IFW 4.0+ may include the command-line interface; within that generation the Windows CUI subsystem identifies the headless launcher and DisableCommandLineInterface can disable it.'
       InterfaceRoute        = if ($FormatInfo) { $FormatInfo.InterfaceRoute } else { $null }
     }
-    Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
+    Diagnostics                 = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -3567,7 +3568,7 @@ function Get-QtInstallerFrameworkAppsAndFeaturesEffectInfo {
     Effects        = [object[]]$Effects.ToArray()
     RegistryWrites = [object[]]$RegistryWrites.ToArray()
     Entries        = [object[]]$Entries.ToArray()
-    Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
+    Diagnostics    = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -3634,7 +3635,7 @@ function Get-QtInstallerFrameworkInfo {
     # maintenance-tool uninstall identity. Emit that evidence explicitly.
     [pscustomobject][ordered]@{
       Path                                 = $File.FullName
-      InstallerType                        = 'Qt Installer Framework'
+      InstallerType                        = 'exe'
       ProductCode                          = $InstallerConfig.ProductCode
       UpgradeCode                          = $null
       DisplayName                          = $InstallerConfig.DisplayName
@@ -3646,8 +3647,9 @@ function Get-QtInstallerFrameworkInfo {
       AppsAndFeaturesProductCode           = $InstallerConfig.ProductCode
       AppsAndFeaturesInstallerType         = 'exe'
       AppsAndFeaturesEntries               = [object[]]$AppsAndFeaturesEffectInfo.Entries
-      Diagnostics                             = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata))
+      Diagnostics                          = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QtInstallerFramework' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                     = [string[]]@()
+      Family                               = 'Qt Installer Framework'
       BinaryMarker                         = $Layout.MagicMarkerName
       IsQtInstallerFramework               = $FormatInfo.IsQtInstallerFramework
       IsSupported                          = $FormatInfo.IsSupported

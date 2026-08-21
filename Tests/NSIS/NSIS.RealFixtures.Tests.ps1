@@ -6,7 +6,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'alist-desktop'
     $Info.DisplayVersion | Should -Be '3.60.0'
     $Info.ProductCode | Should -Be 'alist-desktop'
@@ -307,7 +307,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info = Get-NSISInfo -Path $Fixture
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'BongoCat'
     $Info.DisplayVersion | Should -Be '1.1.0'
     $Info.ProductCode | Should -Be 'BongoCat'
@@ -338,7 +338,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info = Get-NSISInfo -Path $Fixture
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'Red Panda C++ (x64)'
     $Info.DisplayVersion | Should -Be '3.4'
     $Info.ProductCode | Should -Be 'RedPanda-C++'
@@ -351,7 +351,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info = Get-NSISInfo -Path $Fixture
     $SwitchInfo = Get-NSISInstallerSwitchInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'CCFLink'
     $Info.DisplayVersion | Should -Be '7.7.0-Release.80131'
     $Info.ProductCode | Should -Be 'CCFLink'
@@ -425,7 +425,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
       -Sha256 '237EB74939A62935AE3E2B1FD43C484D634CCD96FB1094BA764C8CB64065DC9A'
     $Info = Get-NSISInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'UU远程'
     $Info.DisplayVersion | Should -Be '4.34.0.8979'
     $Info.ProductCode | Should -Be 'GameViewer'
@@ -442,7 +442,7 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
       -Sha256 'CE016B4A56FAC2CAF6DBC09009782D744F98C75B928CB42DE07A4BFD7E78A719'
     $Info = Get-NSISInfo -Path $Fixture -Architecture x86
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be '115浏览器'
     $Info.Scope | Should -Be 'user'
     $Info.ParserVersionInfo.FirstHeaderSignatureRoute | Should -Be 'validated-custom-nsis-stub'

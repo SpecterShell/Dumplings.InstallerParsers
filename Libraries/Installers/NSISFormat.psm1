@@ -2821,7 +2821,8 @@ function ConvertTo-NSISFormatInfo {
 
   return [pscustomobject][ordered]@{
     Path                            = $HeaderData.Path
-    InstallerType                   = 'Nullsoft'
+    InstallerType                   = 'nullsoft'
+    Family                          = 'NSIS/Nullsoft'
     EditionId                       = $VersionInfo.EditionId
     Edition                         = $VersionInfo.Edition
     CompilerVersion                 = $VersionInfo.CompilerVersion

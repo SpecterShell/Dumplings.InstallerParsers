@@ -463,7 +463,7 @@ function Get-SetupFactoryInfo {
       # writes prove that the outer installer owns an ARP entry.
       [pscustomobject][ordered]@{
         Path                         = $File.FullName
-        InstallerType                = 'setupfactory'
+        InstallerType                = 'exe'
         ProductCode                  = $ProductCode
         UpgradeCode                  = $null
         DisplayName                  = $DisplayName
@@ -476,6 +476,7 @@ function Get-SetupFactoryInfo {
         AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
         Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'SetupFactory' -Kind Incomplete -Areas Metadata))
         UnresolvedFields             = [string[]]@()
+        Family                       = 'Setup Factory'
         RegistryWrites               = $RegistryWrites
         RegistryAssociationInfo      = $RegistryAssociationInfo
         Protocols                    = $RegistryAssociationInfo.Protocols

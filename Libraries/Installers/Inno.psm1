@@ -3595,7 +3595,7 @@ function Get-InnoInfo {
     # values proven by the decoded setup header in the canonical envelope.
     return [pscustomobject][ordered]@{
       Path                                     = $InstallerPath
-      InstallerType                            = 'Inno'
+      InstallerType                            = 'inno'
       ProductCode                              = $ProductCode
       UpgradeCode                              = $null
       DisplayName                              = $DisplayName
@@ -3608,6 +3608,7 @@ function Get-InnoInfo {
       AppsAndFeaturesInstallerType             = $AppsAndFeaturesEntryInfo.WritesAppsAndFeaturesEntry -eq $true ? 'inno' : $null
       Diagnostics                              = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'Inno' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                         = [string[]]@($UnresolvedFields | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Family                                   = 'Inno Setup'
 
       RegistryWrites                           = [pscustomobject[]]@($PostFileRecordInfo.RegistryEntries)
       FileExtensions                           = [string[]]@($AssociationInfo.FileExtensions)
@@ -3634,6 +3635,8 @@ function Get-InnoInfo {
       PrivilegesRequired                       = $HeaderFixedData.PrivilegesRequired
       PrivilegesRequiredOverridesAllowed       = $HeaderFixedData.PrivilegesRequiredOverridesAllowed
       SupportsCommandLineScopeOverride         = $HeaderFixedData.SupportsCommandLineScopeOverride
+      UserScopeSwitch                          = $HeaderFixedData.SupportsCommandLineScopeOverride ? '/CURRENTUSER' : $null
+      MachineScopeSwitch                       = $HeaderFixedData.SupportsCommandLineScopeOverride ? '/ALLUSERS' : $null
       CreateUninstallRegKey                    = $AppsAndFeaturesEntryInfo.CreateUninstallRegKey
       Uninstallable                            = $AppsAndFeaturesEntryInfo.Uninstallable
       CreatesUninstallRegistryKey              = $AppsAndFeaturesEntryInfo.CreatesUninstallRegistryKey

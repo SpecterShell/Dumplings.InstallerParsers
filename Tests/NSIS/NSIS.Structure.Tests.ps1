@@ -571,7 +571,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Fixture = Get-InstallerFixture -Name 'FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe' -Url 'https://cdn.isealsuite.com/windows/FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe'
     $Info = Get-NSISInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'FeiLian'
     $Info.DisplayVersion | Should -Be '3.2.16.4828'
     $Info.ProductCode | Should -Be 'CorpLink'

@@ -526,7 +526,7 @@ Describe 'Qt Installer Framework parser' {
 
     $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Qt Installer Framework'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.BinaryMarker | Should -Be 'Installer'
     $Info.PackageName | Should -Be 'Example.QtIFW'
     $Info.DisplayVersion | Should -Be '1.2.3'

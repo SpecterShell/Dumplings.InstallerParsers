@@ -128,7 +128,7 @@ Describe 'Advanced Installer parser' {
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -Name 'ComputerLink.msi'
 
-    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.FormatProfileId | Should -Be 'classic-unicode-v1'
     $Info.BuilderVersionRange | Should -Be '8.6-23.9'
     $Info.ArchitectureSelectionEvidence.BaseMsiPath | Should -Be 'ComputerLink.msi'
@@ -144,7 +144,7 @@ Describe 'Advanced Installer parser' {
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -Name 'DFLM.msi'
 
-    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.Files.Name | Should -Contain 'DFLM.msi'
     $MsiInfo.DisplayVersion | Should -Be '3.0.3'
     $MsiInfo.UpgradeCode | Should -Be '{8B866AEB-E879-4DA6-9CC8-AE81326B30E1}'
@@ -156,7 +156,7 @@ Describe 'Advanced Installer parser' {
     $X86Info = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x86
     $X64Info = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x64
 
-    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.Files.Name | Should -Contain '5DE3EEA\TeraCopy.7z'
     $Info.Files.Where({ $_.Name -eq '5DE3EEA\TeraCopy.7z' })[0].SelectorType | Should -Be 3
     $Info.Files.Where({ $_.Name -eq '5DE3EEA\TeraCopy.7z' })[0].SelectorGroup | Should -Be 7
@@ -285,7 +285,7 @@ Describe 'Advanced Installer parser' {
     $Fixture = New-AdvancedInstallerFooterFixture -Name 'synthetic-footer-at-eof.bin' -FooterLength 74
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.FooterOffset | Should -Be ((Get-Item -Path $Fixture).Length - 74)
     $Info.FileCount | Should -Be 1
     $Info.Files.Name | Should -Contain 'payload.bin'
@@ -522,7 +522,7 @@ Describe 'Advanced Installer parser' {
     $Info = Get-AdvancedInstallerInfo -Path $Fixture
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
 
-    $Info.InstallerType | Should -Be 'AdvancedInstaller'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.Files.Name | Should -Contain '72E5885\Setup.DVLS.Console.2026.1.15.0.7z'
     $MsiInfo.DisplayVersion | Should -Be '2026.1.15.0'
     $MsiInfo.ProductCode | Should -Be '{2EC8D12C-9845-473A-A6D9-DF75172E5885}'

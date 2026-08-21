@@ -233,7 +233,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Fixture = Get-InstallerFixture -Name 'winscp-6.5.6-setup.exe' -Url 'https://sourceforge.net/projects/winscp/files/WinSCP/6.5.6/WinSCP-6.5.6-Setup.exe/download' -UseSourceForgeMetaRefresh
     $Info = Get-InnoInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Inno'
+    $Info.InstallerType | Should -Be 'inno'
     $Info.DisplayName | Should -Be 'WinSCP 6.5.6'
     $Info.DisplayVersion | Should -Be '6.5.6'
     $Info.ProductCode | Should -Be 'winscp3_is1'
@@ -348,7 +348,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Fixture = Get-InstallerFixture -Name 'loot_0.26.0-win64.exe' -Url 'https://github.com/loot/loot/releases/download/0.26.0/loot_0.26.0-win64.exe'
     $Info = Get-InnoInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Inno'
+    $Info.InstallerType | Should -Be 'inno'
     $Info.DisplayName | Should -Be 'LOOT'
     $Info.DisplayVersion | Should -Be '0.26.0'
     $Info.ProductCode | Should -Be '{BF634210-A0D4-443F-A657-0DCE38040374}_is1'
@@ -389,7 +389,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Fixture = Get-InstallerFixture -Name 'BankLinkBooks.exe' -Url 'https://download.myob.com/BankLinkBooks.exe'
     $Info = Get-InnoInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Inno'
+    $Info.InstallerType | Should -Be 'inno'
     $Info.PrivilegesRequired | Should -Be 'admin'
     $Info.DefaultScope | Should -Be 'machine'
     $Info.SupportedScopes | Should -Be @('machine')
@@ -451,7 +451,7 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info = Get-InnoInfo -Path $Fixture
     }
 
-    $Info.InstallerType | Should -Be 'Inno'
+    $Info.InstallerType | Should -Be 'inno'
     $Info.DisplayName | Should -Be 'Argente'
     $Info.AppId | Should -Be 'Argente'
     $Info.ProductCode | Should -BeNullOrEmpty
