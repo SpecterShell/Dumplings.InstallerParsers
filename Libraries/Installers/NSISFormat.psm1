@@ -2420,7 +2420,11 @@ function Test-NSISLogCommandEvidence {
   foreach ($Entry in $Entries) {
     $Opcode = Get-NSISNormalizedOpcode -Opcode $Entry.LayoutOpcode -Type $Type -Unicode $Unicode -LogCmdIsEnabled $true
     if ($Opcode -ne $Script:NSIS_OPCODE_LOG) { continue }
-    $Mode = [int]$Entry.Raw[1]
+    # NSIS serializes command operands as uint32 words, but the VM interprets
+    # them as signed integers. Use the signed view populated by Get-NSISEntries
+    # so negative operands reject this candidate instead of overflowing during
+    # PowerShell's numeric conversion.
+    $Mode = $Entry.Values[1]
     if ($Mode -notin @(0, 1)) { return $false }
     if ($Mode -eq 0 -and ([uint32]$Entry.Raw[2] -ge $MaximumStringOffset)) { return $false }
     for ($Index = 3; $Index -le 6; $Index++) {

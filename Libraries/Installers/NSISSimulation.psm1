@@ -5162,11 +5162,21 @@ function Get-NSISTauriInstallerInfo {
     }
 
     $IsTauri = $Markers.Count -eq 3
+    $CurrentUserProcessMarkers = [System.Collections.Generic.List[string]]::new()
+    if ($IsTauri) {
+      # Tauri compiles these plug-in calls only for INSTALLMODE=currentUser.
+      # They remain decisive when an older/custom launcher omits a recoverable
+      # requestedExecutionLevel manifest from the outer PE.
+      foreach ($Marker in @('FindProcessCurrentUser', 'KillProcessCurrentUser')) {
+        if (Test-NSISStringBlockLiteral -State $State -Value $Marker) { $CurrentUserProcessMarkers.Add($Marker) }
+      }
+    }
     $RequestedExecutionLevel = if ($IsTauri) { $State.Metadata.RequestedExecutionLevel } else { $null }
     $State | Add-Member -NotePropertyName TauriTemplateEvidence -NotePropertyValue ([pscustomobject]@{
-        IsTauri                 = $IsTauri
-        Markers                 = [string[]]$Markers.ToArray()
-        RequestedExecutionLevel = $RequestedExecutionLevel
+        IsTauri                   = $IsTauri
+        Markers                   = [string[]]$Markers.ToArray()
+        CurrentUserProcessMarkers = [string[]]$CurrentUserProcessMarkers.ToArray()
+        RequestedExecutionLevel   = $RequestedExecutionLevel
       })
   }
 
@@ -5176,6 +5186,8 @@ function Get-NSISTauriInstallerInfo {
     $SupportedScopes = @($State.Metadata.SupportedScopes)
     if ($SupportedScopes -contains 'user' -and $SupportedScopes -contains 'machine') {
       $InstallerMode = 'both'
+    } elseif ($Template.CurrentUserProcessMarkers.Count -gt 0 -and $SupportedScopes -notcontains 'machine') {
+      $InstallerMode = 'currentUser'
     } elseif ($State.Metadata.Scope -eq 'user' -and $Template.RequestedExecutionLevel -eq 'asInvoker') {
       $InstallerMode = 'currentUser'
     } elseif ($State.Metadata.Scope -eq 'machine' -and $Template.RequestedExecutionLevel -eq 'requireAdministrator') {
@@ -5185,6 +5197,7 @@ function Get-NSISTauriInstallerInfo {
 
   $Evidence = [System.Collections.Generic.List[string]]::new()
   foreach ($Marker in @($Template.Markers)) { $Evidence.Add("String:$Marker") }
+  foreach ($Marker in @($Template.CurrentUserProcessMarkers)) { $Evidence.Add("CompiledCurrentUserCall:$Marker") }
   if ($Template.RequestedExecutionLevel) { $Evidence.Add("RequestedExecutionLevel:$($Template.RequestedExecutionLevel)") }
   foreach ($SupportedScope in @($State.Metadata.SupportedScopes)) { $Evidence.Add("CompiledScope:$SupportedScope") }
   if ($State.Metadata.Scope) { $Evidence.Add("ObservedArpScope:$($State.Metadata.Scope)") }
@@ -5280,7 +5293,7 @@ function Complete-NSISMetadata {
       $State.Metadata.SupportedScopes = [string[]]@('user')
     } elseif ($TauriInfo.InstallerMode -eq 'perMachine' -and $State.Metadata.SupportedScopes.Count -eq 0) {
       $State.Metadata.SupportedScopes = [string[]]@('machine')
-    } elseif (-not $TauriInfo.InstallerMode) {
+    } elseif (-not $TauriInfo.InstallerMode -and -not $SkipLocalizedAppsAndFeaturesEntries) {
       $State.Diagnostics.Add((New-InstallerDiagnostic -Id 'NSIS.Tauri.InstallModeUnresolved' -Source 'NSIS' -Message 'The standard Tauri NSIS template was detected, but its compiled installer mode could not be resolved from scope and PE execution-level evidence.' -Kind Ambiguous -Areas Metadata, Installability -AffectedFields Scope -Evidence ([ordered]@{
               RequestedExecutionLevel = $TauriInfo.RequestedExecutionLevel
               ObservedScope           = $State.Metadata.Scope
@@ -5288,7 +5301,11 @@ function Complete-NSISMetadata {
             })))
     }
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
+    # Intermediate completion runs precede .onInit and section simulation.
+    # Defer mode diagnostics until the final projection so provisional scope
+    # values cannot leak stale warnings into an otherwise resolved result.
+    if (-not $SkipLocalizedAppsAndFeaturesEntries -and
+      -not [string]::IsNullOrWhiteSpace([string]$State.TargetScope) -and
       $State.Metadata.SupportedScopes.Count -gt 0 -and
       $State.Metadata.SupportedScopes -notcontains $State.TargetScope) {
       $State.Diagnostics.Add((New-InstallerDiagnostic -Id 'NSIS.Tauri.ScopeMismatch' -Source 'NSIS' -Message "The Tauri installer supports '$($State.Metadata.SupportedScopes -join ', ')' scope, not the requested '$($State.TargetScope)' scope." -Kind Mismatch -Areas Metadata, Installability -AffectedFields Scope -Evidence ([ordered]@{

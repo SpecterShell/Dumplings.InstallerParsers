@@ -263,6 +263,33 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     @($MachineMismatchInfo.Diagnostics | Where-Object Id -EQ 'NSIS.Tauri.ScopeMismatch').Count | Should -Be 1
   }
 
+  It 'Should not retain provisional Tauri mode diagnostics after OpenLess resolves its compiled mode' {
+    $Fixture = Get-InstallerFixture -Name 'OpenLess_1.3.18_x64-setup.exe' `
+      -Url 'https://github.com/Open-Less/openless/releases/download/v1.3.18-tauri/OpenLess_1.3.18_x64-setup.exe' `
+      -Sha256 'A163E3C5BF70902ABFBEF60891D5B8BB81C46D5CB58EC8E48F29058298AF4609'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $Info.ProductCode | Should -Be 'OpenLess'
+    $Info.IsTauri | Should -BeTrue
+    $Info.TauriInstallerMode | Should -Be 'perMachine'
+    $Info.Scope | Should -Be 'machine'
+    @($Info.Diagnostics | Where-Object Id -EQ 'NSIS.Tauri.InstallModeUnresolved') | Should -BeNullOrEmpty
+  }
+
+  It 'Should parse Imagine command records containing negative signed operands' {
+    $Fixture = Get-InstallerFixture -Name 'Imagine_2.6.4_x64_Unicode_Full.exe' `
+      -Url 'https://raw.githubusercontent.com/nyam1003/imagine/main/x64/Imagine_2.6.4_x64_Unicode_Full.exe' `
+      -Sha256 '88ACCB3E6CAD9C2110342733AA7CE13DA1D9EF7F064E4129C90F697C1CB44036'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64
+
+    $Info.ProductCode | Should -Be 'Imagine'
+    $Info.DisplayName | Should -Be 'Imagine'
+    $Info.DisplayVersion | Should -Be '2.6.4'
+    $Info.ParserVersionInfo.FatalInvalidCommandCount | Should -Be 0
+  }
+
   It 'Should not treat an empty branch-merge scope as a Tauri scope mismatch' {
     $Fixture = Get-InstallerFixture -Name 'Reader-v1.4.3-windows-x64-setup.exe' `
       -Url 'https://github.com/hadc188/reader/releases/download/v1.4.3/Reader-v1.4.3-windows-x64-setup.exe' `

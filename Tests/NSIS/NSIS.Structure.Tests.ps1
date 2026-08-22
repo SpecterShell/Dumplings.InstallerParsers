@@ -381,6 +381,21 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.WithLog.SemanticPenalty | Should -Be 0
   }
 
+  It 'Should interpret negative log operands without unsigned-to-signed overflow' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]$Script:NSIS_OPCODE_LOG
+        RawOpcode    = [uint32]$Script:NSIS_OPCODE_LOG
+        Raw          = [uint32[]]@($Script:NSIS_OPCODE_LOG, 4294967259, 0, 0, 0, 0, 0)
+        Values       = [int[]]@($Script:NSIS_OPCODE_LOG, -37, 0, 0, 0, 0, 0)
+      }
+      Test-NSISLogCommandEvidence -Entries @($Entry) -Type NSIS3 -Unicode $true -StringsBlock ([byte[]]::new(32))
+    }
+
+    $Result | Should -BeFalse
+  }
+
   It 'Should retain opaque trailing vendor operands without making a recognized command fatal' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {

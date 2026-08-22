@@ -820,4 +820,25 @@ Describe 'NSIS command simulation' -Tag Unit {
     ($Info.TauriSwitches | Where-Object Switch -EQ '/P').Purpose | Should -Be 'Passive installation with progress'
     ($Info.TauriSwitches | Where-Object Switch -EQ '/R').Purpose | Should -Be 'Run the application after silent or passive installation'
   }
+
+  It 'Should resolve the compiled Tauri current-user process branch without PE execution-level evidence' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Info = & $Module {
+      $Strings = @('nsis_tauri_utils.dll', 'MainBinaryName', 'placeholder\', 'FindProcessCurrentUser', 'KillProcessCurrentUser') -join "`0"
+      $State = [pscustomobject]@{
+        VersionInfo  = [pscustomobject]@{ Unicode = $true }
+        StringsBlock = [Text.Encoding]::Unicode.GetBytes("$Strings`0")
+        Metadata     = [pscustomobject]@{
+          Scope                   = 'user'
+          SupportedScopes         = [string[]]@('user')
+          RequestedExecutionLevel = $null
+        }
+      }
+      Get-NSISTauriInstallerInfo -State $State
+    }
+
+    $Info.IsTauri | Should -BeTrue
+    $Info.InstallerMode | Should -Be 'currentUser'
+    $Info.Evidence | Should -Contain 'CompiledCurrentUserCall:FindProcessCurrentUser'
+  }
 }
