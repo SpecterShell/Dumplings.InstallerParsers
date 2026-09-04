@@ -9,7 +9,7 @@ function New-InstallerDecompressionStream {
   #>
   [OutputType([System.IO.Stream])]
   param (
-    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
+    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'GZip', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [byte[]]$Properties,
     [long]$CompressedSize = -1,
@@ -27,6 +27,7 @@ function New-InstallerDecompressionStream {
       return [SharpCompress.Compressors.LZMA.LzmaStream]::new($Properties, $Stream, $CompressedSize, $UncompressedSize, $null, $true)
     }
     'BZip2' { return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($Stream, [SharpCompress.Compressors.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
+    'GZip' { return [System.IO.Compression.GZipStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Zlib' { return [System.IO.Compression.ZLibStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Deflate' { return [System.IO.Compression.DeflateStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Zstd' { return [ZstdSharp.DecompressionStream]::new($Stream, 131072, $true, $LeaveOpen.IsPresent) }
@@ -40,7 +41,7 @@ function Expand-InstallerCompressedStream {
   #>
   [OutputType([long])]
   param (
-    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
+    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'GZip', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [Parameter(Mandatory)][System.IO.Stream]$Destination,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes,
