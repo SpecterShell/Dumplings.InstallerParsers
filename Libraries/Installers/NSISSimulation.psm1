@@ -50,6 +50,9 @@ function Get-NSISStringCodeKind {
     The candidate control code
   .PARAMETER IsV3
     Whether the installer uses NSIS v3 control codes
+  .PARAMETER Unicode
+    Whether characters are UTF-16 code units. ANSI Jim Park builds retain the
+    stock NSIS 2 byte controls despite using Park command numbering.
   #>
   [OutputType([string])]
   param (
@@ -60,10 +63,13 @@ function Get-NSISStringCodeKind {
     [bool]$IsV3,
 
     [Parameter(HelpMessage = 'The detected NSIS command layout type')]
-    [string]$Type = $(if ($IsV3) { 'NSIS3' } else { 'NSIS2' })
+    [string]$Type = $(if ($IsV3) { 'NSIS3' } else { 'NSIS2' }),
+
+    [Parameter(Mandatory, HelpMessage = 'Whether the string table uses UTF-16 code units')]
+    [bool]$Unicode
   )
 
-  $Route = if ($Type -like 'Park*') { 'Park' } elseif ($IsV3) { 'NSIS3' } else { 'NSIS2' }
+  $Route = if ($Type -like 'Park*' -and $Unicode) { 'Park' } elseif ($IsV3) { 'NSIS3' } else { 'NSIS2' }
   return $Script:NSIS_STRING_CODE_MAPS[$Route][[int]$Character]
 }
 
@@ -73,6 +79,9 @@ function ConvertFrom-NSISPackedNumber {
     Decode the packed 15-bit NSIS number embedded in a string control code payload
   .PARAMETER Character
     The raw 16-bit control code payload
+  .PARAMETER Unicode
+    Whether the control payload came from a UTF-16 string table. ANSI Jim Park
+    media use stock NSIS 2 packed numbers.
   #>
   [OutputType([int])]
   param (
@@ -80,10 +89,13 @@ function ConvertFrom-NSISPackedNumber {
     [uint16]$Character,
 
     [Parameter(HelpMessage = 'The detected NSIS command layout type')]
-    [string]$Type = 'NSIS3'
+    [string]$Type = 'NSIS3',
+
+    [Parameter(Mandatory, HelpMessage = 'Whether the string table uses UTF-16 code units')]
+    [bool]$Unicode
   )
 
-  if ($Type -like 'Park*') { return [int]($Character -band 0x7FFF) }
+  if ($Type -like 'Park*' -and $Unicode) { return [int]($Character -band 0x7FFF) }
 
   $MaskedCharacter = $Character -band 0x7F7F
   $Bytes = [System.BitConverter]::GetBytes($MaskedCharacter)
@@ -423,14 +435,14 @@ function Get-NSISSymbolicString {
   $Index = 0
   while ($Index -lt $Characters.Count) {
     $Current = $Characters[$Index]
-    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
+    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode
 
     if (-not $CodeKind -and -not $State.VersionInfo.Unicode) {
       # Decode the complete ANSI literal run at once. Decoding byte-by-byte
       # corrupts DBCS text such as Japanese product names before variables and
       # shell constants are rendered symbolically.
       $LiteralStart = $Index
-      while ($Index -lt $Characters.Count -and -not (Get-NSISStringCodeKind -Character $Characters[$Index] -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type)) { $Index++ }
+      while ($Index -lt $Characters.Count -and -not (Get-NSISStringCodeKind -Character $Characters[$Index] -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode)) { $Index++ }
       $LiteralBytes = [byte[]]::new($Index - $LiteralStart)
       for ($LiteralIndex = 0; $LiteralIndex -lt $LiteralBytes.Length; $LiteralIndex++) { $LiteralBytes[$LiteralIndex] = [byte]$Characters[$LiteralStart + $LiteralIndex] }
       $null = $Builder.Append($AnsiEncoding.GetString($LiteralBytes))
@@ -461,7 +473,7 @@ function Get-NSISSymbolicString {
       $Index++
       $Payload = [uint16]($Low -bor ($Characters[$Index] -shl 8))
     }
-    $Number = ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type
+    $Number = ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode
     switch ($CodeKind) {
       'Var' { $null = $Builder.Append((ConvertTo-NSISSymbolicVariable -Index $Number -VariableRoute (Get-NSISVariableRoute -State $State))) }
       'Shell' { $null = $Builder.Append((Resolve-NSISSymbolicShellValue -State $State -Character $Payload -Depth $Depth)) }
@@ -614,13 +626,13 @@ function Get-NSISString {
   # escaped control characters. Truncated control payloads terminate safely.
   while ($Index -lt $Characters.Count) {
     $Current = $Characters[$Index]
-    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
+    $CodeKind = Get-NSISStringCodeKind -Character $Current -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode
 
     if (-not $CodeKind -and -not $State.VersionInfo.Unicode) {
       # Decode an uninterrupted ANSI literal as one byte sequence so DBCS
       # characters are not widened into unrelated Unicode code points.
       $LiteralStart = $Index
-      while ($Index -lt $Characters.Count -and -not (Get-NSISStringCodeKind -Character $Characters[$Index] -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type)) { $Index++ }
+      while ($Index -lt $Characters.Count -and -not (Get-NSISStringCodeKind -Character $Characters[$Index] -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode)) { $Index++ }
       $LiteralBytes = [byte[]]::new($Index - $LiteralStart)
       for ($LiteralIndex = 0; $LiteralIndex -lt $LiteralBytes.Length; $LiteralIndex++) { $LiteralBytes[$LiteralIndex] = [byte]$Characters[$LiteralStart + $LiteralIndex] }
       $null = $Builder.Append($AnsiEncoding.GetString($LiteralBytes))
@@ -644,10 +656,10 @@ function Get-NSISString {
         }
 
         switch ($CodeKind) {
-          'Var' { $null = $Builder.Append((Get-NSISVariableValue -State $State -Index (ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type))) }
+          'Var' { $null = $Builder.Append((Get-NSISVariableValue -State $State -Index (ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode))) }
           'Shell' { $null = $Builder.Append((Resolve-NSISShellValue -State $State -Character $Payload)) }
           'Lang' {
-            $LanguageIndex = ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type
+            $LanguageIndex = ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode
             if ($State.LanguageTable -and $LanguageIndex -lt $State.LanguageTable.StringOffsets.Count) {
               $StringOffset = $State.LanguageTable.StringOffsets[$LanguageIndex]
               if ($StringOffset -ne 0) { $null = $Builder.Append((Get-NSISString -State $State -RelativeOffset $StringOffset -Depth ($Depth + 1))) }
@@ -703,7 +715,7 @@ function Get-NSISStringVariableIndex {
     }
     if ($Character -eq 0) { break }
 
-    $CodeKind = Get-NSISStringCodeKind -Character $Character -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type
+    $CodeKind = Get-NSISStringCodeKind -Character $Character -IsV3 $State.VersionInfo.IsV3 -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode
     if (-not $CodeKind) { continue }
     if ($State.VersionInfo.Unicode) {
       if ($Offset + 1 -ge $State.StringsBlock.Length) { break }
@@ -716,7 +728,7 @@ function Get-NSISStringVariableIndex {
     }
 
     if ($CodeKind -eq 'Var') {
-      $null = $Indexes.Add((ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type))
+      $null = $Indexes.Add((ConvertFrom-NSISPackedNumber -Character $Payload -Type $State.VersionInfo.Type -Unicode $State.VersionInfo.Unicode))
     }
   }
 
@@ -1620,7 +1632,8 @@ function Set-NSISRegistryValue {
     [Parameter(Mandatory, HelpMessage = 'The registry root')]
     [string]$Root,
 
-    [Parameter(Mandatory, HelpMessage = 'The registry key path')]
+    [AllowEmptyString()]
+    [Parameter(Mandatory, HelpMessage = 'The registry key path; an empty path addresses the selected root key')]
     [string]$Key,
 
     [AllowEmptyString()]
@@ -1840,7 +1853,8 @@ function Get-NSISRegistryValue {
     [Parameter(Mandatory, HelpMessage = 'The registry root')]
     [string]$Root,
 
-    [Parameter(Mandatory, HelpMessage = 'The registry key path')]
+    [AllowEmptyString()]
+    [Parameter(Mandatory, HelpMessage = 'The registry key path; an empty path addresses the selected root key')]
     [string]$Key,
 
     [AllowEmptyString()]
@@ -1876,7 +1890,8 @@ function Remove-NSISRegistryValue {
     [Parameter(Mandatory, HelpMessage = 'The registry root')]
     [string]$Root,
 
-    [Parameter(Mandatory, HelpMessage = 'The registry key path')]
+    [AllowEmptyString()]
+    [Parameter(Mandatory, HelpMessage = 'The registry key path; an empty path addresses the selected root key')]
     [string]$Key,
 
     [AllowEmptyString()]
@@ -1916,6 +1931,7 @@ function Get-NSISRegistryEnumerationValue {
   param (
     [Parameter(Mandatory)][pscustomobject]$State,
     [Parameter(Mandatory)][string]$Root,
+    [AllowEmptyString()]
     [Parameter(Mandatory)][string]$Key,
     [Parameter(Mandatory)][int]$Index,
     [Parameter(Mandatory)][bool]$EnumerateKeys

@@ -2142,13 +2142,13 @@ function Resolve-NSISCatalogProfile {
   }
 
   if ($CommandType -like 'Park*') {
-    $ParkId = switch ($CommandType) {
-      'Park1' { 'park-2461-unicode' }
-      'Park2' { 'park-2462-unicode' }
-      'Park3' { 'park-2463-unicode' }
-      default { throw "Unknown Park Unicode command layout '$CommandType'." }
+    $ParkGeneration = switch ($CommandType) {
+      'Park1' { '2461' }
+      'Park2' { '2462' }
+      'Park3' { '2463' }
+      default { throw "Unknown Jim Park command layout '$CommandType'." }
     }
-    return Get-NSISCatalogProfile -Id $ParkId
+    return Get-NSISCatalogProfile -Id "park-$ParkGeneration-$($CharacterMode.ToLowerInvariant())"
   }
 
   if ($CommandType -ceq 'NSIS3') {
@@ -2278,6 +2278,17 @@ function Get-NSISVersionInfo {
     }
   }
 
+  # Jim Park's ANSI builds use the same string controls as stock NSIS 2, so
+  # control-code counting cannot identify their shifted command table. The
+  # compiler's source-defined WriteUninstaller alternate path provides a strong
+  # discriminator: Park2 and Park3 move that command by one or two slots in
+  # ANSI media, while preserving "$INSTDIR\" + the primary path verbatim.
+  $ParkGenerationEvidence = if (-not $IsNsisBi -and -not $StrongNSIS3) {
+    Get-NSISParkWriteUninstallerGeneration -StringsBlock $StringsBlock -Entries $Entries -Unicode:$Unicode
+  } else {
+    $null
+  }
+
   # Explicit control codes constrain the ABI. A Unicode table without any
   # control codes is genuinely ambiguous, so retain official NSIS 3 and all
   # Park generations for command-layout scoring instead of assuming Park1.
@@ -2285,6 +2296,8 @@ function Get-NSISVersionInfo {
     @('NSIS3')
   } elseif ($StrongNSIS3) {
     @('NSIS3')
+  } elseif ($ParkGenerationEvidence) {
+    @($ParkGenerationEvidence)
   } elseif ($ParkCount -gt 0) {
     @('Park1', 'Park2', 'Park3')
   } elseif ($Unicode -and $NSIS3Count -eq 0) {
@@ -2355,7 +2368,7 @@ function Get-NSISVersionInfo {
   $HasSemanticAmbiguity = $SemanticSignatures.Count -gt 1
   $DetectionConfidence = if ($HasSemanticAmbiguity) {
     'UnsupportedAmbiguous'
-  } elseif ($StrongNSIS3 -or $ParkCount -gt 0 -or $IsNsisBi -or $CatalogProfile.VariableRoute -ne 'current') {
+  } elseif ($StrongNSIS3 -or $ParkCount -gt 0 -or $ParkGenerationEvidence -or $IsNsisBi -or $CatalogProfile.VariableRoute -ne 'current') {
     'Structural'
   } elseif ($BestScoreCount -eq 1) {
     'ValidatedHeuristic'
@@ -2391,7 +2404,86 @@ function Get-NSISVersionInfo {
       NSIS3 = $NSIS3Count
       Park  = $ParkCount
     }
+    ParkGenerationEvidence          = $ParkGenerationEvidence
   }
+}
+
+function Get-NSISParkWriteUninstallerGeneration {
+  <#
+  .SYNOPSIS
+    Identify a shifted Jim Park command table from WriteUninstaller framing.
+  .DESCRIPTION
+    NSIS 2.29 and later serialize an alternate uninstaller path as
+    "$INSTDIR\" followed by the primary path string. Jim Park inserts one or
+    two commands before WriteUninstaller in ANSI media and three or four in
+    Unicode media. Matching the two bounded strings makes this evidence
+    substantially stronger than opcode arity alone and follows 7-Zip's
+    DetectNsisType route.
+  .PARAMETER StringsBlock
+    Raw NSIS string table.
+  .PARAMETER Entries
+    Raw command records before catalog normalization.
+  .PARAMETER Unicode
+    Whether string offsets address UTF-16LE code units instead of bytes.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][byte[]]$StringsBlock,
+    [AllowEmptyCollection()][Parameter(Mandatory)][pscustomobject[]]$Entries,
+    [Parameter(Mandatory)][bool]$Unicode
+  )
+
+  $CharacterCount = if ($Unicode) { [Math]::Floor($StringsBlock.Length / 2) } else { $StringsBlock.Length }
+  $MaximumInsertionCount = if ($Unicode) { 4 } else { 2 }
+  $InsertionMask = 0
+
+  foreach ($Entry in $Entries) {
+    $RawOpcode = [int]$Entry.LayoutOpcode
+    if ($RawOpcode -lt $Script:NSIS_OPCODE_WRITE_UNINSTALLER -or
+      $RawOpcode -gt $Script:NSIS_OPCODE_WRITE_UNINSTALLER + $MaximumInsertionCount) { continue }
+    if ($Entry.Raw[5] -ne 0 -or $Entry.Raw[6] -ne 0 -or $Entry.Raw[1] -le 1 -or $Entry.Raw[4] -le 1) { continue }
+
+    $PrimaryOffset = [int64]$Entry.Raw[1]
+    $AlternateOffset = [int64]$Entry.Raw[4]
+    if ($PrimaryOffset -ge $CharacterCount -or $AlternateOffset -ge $CharacterCount) { continue }
+
+    if ($Unicode) {
+      $AlternateByteOffset = $AlternateOffset * 2
+      if ($AlternateByteOffset + 5 -ge $StringsBlock.Length -or
+        [BitConverter]::ToUInt16($StringsBlock, $AlternateByteOffset) -ne 0xE001 -or
+        ([BitConverter]::ToUInt16($StringsBlock, $AlternateByteOffset + 2) -band 0x7FFF) -ne $Script:NSIS_PREDEFINED_VAR_INSTDIR -or
+        [BitConverter]::ToUInt16($StringsBlock, $AlternateByteOffset + 4) -ne [char]'\') { continue }
+      $AlternateOffset += 3
+    } else {
+      $AlternateByteOffset = [int]$AlternateOffset
+      if ($AlternateByteOffset + 3 -ge $StringsBlock.Length -or
+        $StringsBlock[$AlternateByteOffset] -ne 0xFD -or
+        (($StringsBlock[$AlternateByteOffset + 1] -band 0x7F) -bor (($StringsBlock[$AlternateByteOffset + 2] -band 0x7F) -shl 7)) -ne $Script:NSIS_PREDEFINED_VAR_INSTDIR -or
+        $StringsBlock[$AlternateByteOffset + 3] -ne [byte][char]'\') { continue }
+      $AlternateOffset += 4
+    }
+
+    $StringsEqual = $true
+    while ($PrimaryOffset -lt $CharacterCount -and $AlternateOffset -lt $CharacterCount) {
+      $PrimaryCharacter = if ($Unicode) { [BitConverter]::ToUInt16($StringsBlock, $PrimaryOffset * 2) } else { $StringsBlock[$PrimaryOffset] }
+      $AlternateCharacter = if ($Unicode) { [BitConverter]::ToUInt16($StringsBlock, $AlternateOffset * 2) } else { $StringsBlock[$AlternateOffset] }
+      if ($PrimaryCharacter -ne $AlternateCharacter) { $StringsEqual = $false; break }
+      if ($PrimaryCharacter -eq 0) { break }
+      $PrimaryOffset++
+      $AlternateOffset++
+    }
+    if (-not $StringsEqual -or $PrimaryCharacter -ne 0) { continue }
+    $InsertionMask = $InsertionMask -bor (1 -shl ($RawOpcode - $Script:NSIS_OPCODE_WRITE_UNINSTALLER))
+  }
+
+  if ($Unicode) {
+    if ($InsertionMask -eq (1 -shl 3)) { return 'Park2' }
+    if ($InsertionMask -eq (1 -shl 4)) { return 'Park3' }
+  } else {
+    if ($InsertionMask -eq (1 -shl 1)) { return 'Park2' }
+    if ($InsertionMask -eq (1 -shl 2)) { return 'Park3' }
+  }
+  return $null
 }
 
 function Test-NSISLogCommandEvidence {
@@ -2438,7 +2530,7 @@ function Test-NSISLogCommandEvidence {
 function ConvertFrom-NSISParkOpcode {
   <#
   .SYNOPSIS
-    Normalize one Park Unicode opcode using its catalogued insertion count.
+    Normalize one Jim Park opcode using its catalogued insertion count.
   .PARAMETER Opcode
     Raw command number from the Park command table.
   .PARAMETER FontCommandCount
@@ -2446,12 +2538,15 @@ function ConvertFrom-NSISParkOpcode {
     one for Park2, and two for Park3.
   .PARAMETER LogCmdIsEnabled
     Whether the build inserted EW_LOG before section commands.
+  .PARAMETER Unicode
+    Whether the Park build inserted its two UTF-16 file-operation commands.
   #>
   [OutputType([int])]
   param (
     [Parameter(Mandatory)][uint32]$Opcode,
     [Parameter(Mandatory)][ValidateRange(0, 2)][int]$FontCommandCount,
-    [Parameter(Mandatory)][bool]$LogCmdIsEnabled
+    [Parameter(Mandatory)][bool]$LogCmdIsEnabled,
+    [Parameter(Mandatory)][bool]$Unicode
   )
 
   $Value = [int]$Opcode
@@ -2466,11 +2561,13 @@ function ConvertFrom-NSISParkOpcode {
   }
   if ($Value -lt $Script:NSIS_OPCODE_FILE_SEEK) { return $Value }
 
-  # Park Unicode inserts UTF-16 file operations at FSEEK and FINDPROC after
-  # them. Later commands can additionally be shifted by an optional LOG slot.
-  if ($Value -eq $Script:NSIS_OPCODE_FILE_SEEK) { return $Script:NSIS_OPCODE_FILE_WRITE_UTF16 }
-  if ($Value -eq ($Script:NSIS_OPCODE_FILE_SEEK + 1)) { return $Script:NSIS_OPCODE_FILE_READ_UTF16 }
-  $Value -= 2
+  # Only Park Unicode inserts UTF-16 file operations at FSEEK. Park ANSI still
+  # inserts font queries and FindProc, so its later command IDs use fewer shifts.
+  if ($Unicode) {
+    if ($Value -eq $Script:NSIS_OPCODE_FILE_SEEK) { return $Script:NSIS_OPCODE_FILE_WRITE_UTF16 }
+    if ($Value -eq ($Script:NSIS_OPCODE_FILE_SEEK + 1)) { return $Script:NSIS_OPCODE_FILE_READ_UTF16 }
+    $Value -= 2
+  }
   if ($Value -ge $Script:NSIS_OPCODE_SECTION_SET -and $LogCmdIsEnabled) {
     if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
     return $Value - 1
@@ -2481,15 +2578,16 @@ function ConvertFrom-NSISParkOpcode {
 
 $Script:NSIS_OPCODE_ROUTE_HANDLERS = @{
   official = {
-    param([uint32]$Opcode, [bool]$LogCmdIsEnabled)
+    param([uint32]$Opcode, [bool]$LogCmdIsEnabled, [bool]$Unicode)
+    $null = $Unicode
     $Value = [int]$Opcode
     if (-not $LogCmdIsEnabled -or $Value -lt $Script:NSIS_OPCODE_SECTION_SET) { return $Value }
     if ($Value -eq $Script:NSIS_OPCODE_SECTION_SET) { return $Script:NSIS_OPCODE_LOG }
     return $Value - 1
   }
-  park1    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 0 -LogCmdIsEnabled $LogCmdIsEnabled }
-  park2    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 1 -LogCmdIsEnabled $LogCmdIsEnabled }
-  park3    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 2 -LogCmdIsEnabled $LogCmdIsEnabled }
+  park1    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled, [bool]$Unicode) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 0 -LogCmdIsEnabled $LogCmdIsEnabled -Unicode $Unicode }
+  park2    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled, [bool]$Unicode) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 1 -LogCmdIsEnabled $LogCmdIsEnabled -Unicode $Unicode }
+  park3    = { param([uint32]$Opcode, [bool]$LogCmdIsEnabled, [bool]$Unicode) ConvertFrom-NSISParkOpcode -Opcode $Opcode -FontCommandCount 2 -LogCmdIsEnabled $LogCmdIsEnabled -Unicode $Unicode }
 }
 
 function Get-NSISNormalizedOpcode {
@@ -2528,9 +2626,9 @@ function Get-NSISNormalizedOpcode {
 
   if ($Opcode -in @($Script:NSIS_OPCODE_EXTRACT_STUB_FILE, $Script:NSIS_OPCODE_VERIFY_EXTERNAL_FILE)) { return [int]$Opcode }
 
-  # Unicode is retained for callers of the pre-catalog API. The selected route
-  # now carries the character-mode decision.
-  $null = $Unicode
+  # Catalog callers derive character mode from the immutable profile; legacy
+  # focused tests continue to supply it through the compatibility parameter.
+  if ($CatalogProfile) { $Unicode = $CatalogProfile.CharacterMode -eq 'Unicode' }
   $Route = if ($CatalogProfile) {
     [string]$CatalogProfile.OpcodeRoute
   } else {
@@ -2547,7 +2645,7 @@ function Get-NSISNormalizedOpcode {
   }
   $Handler = $Script:NSIS_OPCODE_ROUTE_HANDLERS[$Route]
   if (-not $Handler) { throw "NSIS opcode route '$Route' is not implemented." }
-  return [int](& $Handler $Opcode $LogCmdIsEnabled)
+  return [int](& $Handler $Opcode $LogCmdIsEnabled $Unicode)
 }
 
 function Measure-NSISCommandLayoutCandidate {
@@ -2625,6 +2723,17 @@ function Measure-NSISCommandLayoutCandidate {
         $FatalInvalidCommandCount++
         continue
       }
+    }
+
+    # EW_LOG is present only when the loader was compiled with NSIS_CONFIG_LOG.
+    # The first operand is source-defined as 0 for LogText and 1 for LogSet.
+    # Rejecting any other value distinguishes a genuine log slot from a
+    # no-log EW_SECTIONSET record at the same serialized command number. This
+    # remains valid for NSISBI's wider entry ABI because stale padding can only
+    # occupy operands that the selected command does not read.
+    if ($Opcode -eq $Script:NSIS_OPCODE_LOG -and $Entry.Raw[1] -notin @(0, 1)) {
+      $FatalInvalidCommandCount++
+      continue
     }
 
     $LastNonZeroParameter = 0
@@ -2861,6 +2970,7 @@ function ConvertTo-NSISFormatInfo {
     ExternalFileCount               = $HeaderData.ExternalFileCount
     ExternalSegmentSize             = $HeaderData.ExternalSegmentSize
     DetectionConfidence             = $VersionInfo.DetectionConfidence
+    ParkGenerationEvidence          = $VersionInfo.ParkGenerationEvidence
     HasSemanticAmbiguity            = [bool]$VersionInfo.HasSemanticAmbiguity
     CandidateLayouts                = $VersionInfo.CandidateLayouts
     FatalInvalidCommandCount        = $VersionInfo.FatalInvalidCommandCount

@@ -52,6 +52,27 @@
       Supported = $true
     }
     @{
+      Id = 'park-2461-ansi'; EditionId = 'park'; Generation = 'Park1'; VersionRange = '<=2.46.1'
+      CharacterMode = 'Ansi'; CommandType = 'Park1'; FirstHeaderRoute = 'standard32'; HeaderRoute = 'standard'
+      EntryRoute = 'standard28'; StringRoute = 'nsis2-ansi'; OpcodeRoute = 'park1'; VariableRoute = 'current'
+      PayloadRoute = 'standard'; CompressionRoutes = @('Stored', 'Deflate', 'Zlib', 'BZip2', 'Lzma'); ChecksumRoute = 'Crc32Optional'
+      Supported = $true
+    }
+    @{
+      Id = 'park-2462-ansi'; EditionId = 'park'; Generation = 'Park2'; VersionRange = '2.46.2'
+      CharacterMode = 'Ansi'; CommandType = 'Park2'; FirstHeaderRoute = 'standard32'; HeaderRoute = 'standard'
+      EntryRoute = 'standard28'; StringRoute = 'nsis2-ansi'; OpcodeRoute = 'park2'; VariableRoute = 'current'
+      PayloadRoute = 'standard'; CompressionRoutes = @('Stored', 'Deflate', 'Zlib', 'BZip2', 'Lzma'); ChecksumRoute = 'Crc32Optional'
+      Supported = $true
+    }
+    @{
+      Id = 'park-2463-ansi'; EditionId = 'park'; Generation = 'Park3'; VersionRange = '>=2.46.3'
+      CharacterMode = 'Ansi'; CommandType = 'Park3'; FirstHeaderRoute = 'standard32'; HeaderRoute = 'standard'
+      EntryRoute = 'standard28'; StringRoute = 'nsis2-ansi'; OpcodeRoute = 'park3'; VariableRoute = 'current'
+      PayloadRoute = 'standard'; CompressionRoutes = @('Stored', 'Deflate', 'Zlib', 'BZip2', 'Lzma'); ChecksumRoute = 'Crc32Optional'
+      Supported = $true
+    }
+    @{
       Id = 'park-2461-unicode'; EditionId = 'park'; Generation = 'Park1'; VersionRange = '<=2.46.1'
       CharacterMode = 'Unicode'; CommandType = 'Park1'; FirstHeaderRoute = 'standard32'; HeaderRoute = 'standard'
       EntryRoute = 'standard28'; StringRoute = 'park-unicode'; OpcodeRoute = 'park1'; VariableRoute = 'current'

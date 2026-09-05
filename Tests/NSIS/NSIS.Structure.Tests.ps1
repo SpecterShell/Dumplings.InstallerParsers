@@ -188,6 +188,8 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
         ParkFileWrite    = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_FILE_SEEK -Type 'Park1' -Unicode $true -LogCmdIsEnabled $false
         Park2FontVersion = Get-NSISNormalizedOpcode -Opcode $Script:NSIS_OPCODE_REGISTER_DLL -Type 'Park2' -Unicode $true -LogCmdIsEnabled $false
         Park3FontName    = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_REGISTER_DLL + 1) -Type 'Park3' -Unicode $true -LogCmdIsEnabled $false
+        Park3AnsiReg     = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_WRITE_REG + 2) -Type 'Park3' -Unicode $false -LogCmdIsEnabled $false
+        Park3AnsiUninst  = Get-NSISNormalizedOpcode -Opcode ($Script:NSIS_OPCODE_WRITE_UNINSTALLER + 2) -Type 'Park3' -Unicode $false -LogCmdIsEnabled $false
         RegEnum          = Get-NSISNormalizedOpcode -Opcode 53 -Type 'NSIS3' -Unicode $true -LogCmdIsEnabled $false
         NsisBiWriteReg   = ConvertFrom-NSISBiOpcode -Opcode 53
       }
@@ -198,8 +200,36 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.ParkFileWrite | Should -Be 68
     $Result.Park2FontVersion | Should -Be 72
     $Result.Park3FontName | Should -Be 73
+    $Result.Park3AnsiReg | Should -Be 51
+    $Result.Park3AnsiUninst | Should -Be 62
     $Result.RegEnum | Should -Be 53
     $Result.NsisBiWriteReg | Should -Be 51
+  }
+
+  It 'Should identify Park3 ANSI from source-defined WriteUninstaller framing' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      # Park ANSI retains NSIS 2 variable controls. The alternate path contains
+      # $INSTDIR\ followed by the complete primary path string.
+      $Primary = [byte[]]@(0xFD, 0x95, 0x80, 0x5C, 0x75, 0x6E, 0x69, 0x6E, 0x73, 0x74, 0x2E, 0x65, 0x78, 0x65, 0)
+      $Alternate = [byte[]]@(0xFD, 0x95, 0x80, 0x5C) + $Primary
+      $Strings = [byte[]]@([byte][char]'x', 0) + $Primary + $Alternate
+      $PrimaryOffset = 2
+      $AlternateOffset = 2 + $Primary.Length
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]($Script:NSIS_OPCODE_WRITE_UNINSTALLER + 2)
+        RawOpcode    = [uint32]($Script:NSIS_OPCODE_WRITE_UNINSTALLER + 2)
+        Raw          = [uint32[]]@(($Script:NSIS_OPCODE_WRITE_UNINSTALLER + 2), $PrimaryOffset, 0, 0, $AlternateOffset, 0, 0)
+        Values       = [int[]]@(($Script:NSIS_OPCODE_WRITE_UNINSTALLER + 2), $PrimaryOffset, 0, 0, $AlternateOffset, 0, 0)
+      }
+      Get-NSISVersionInfo -StringsBlock $Strings -Entries @($Entry)
+    }
+
+    $Result.Type | Should -Be 'Park3'
+    $Result.CharacterMode | Should -Be 'Ansi'
+    $Result.CatalogProfileId | Should -Be 'park-2463-ansi'
+    $Result.ParkGenerationEvidence | Should -Be 'Park3'
+    $Result.DetectionConfidence | Should -Be 'Structural'
   }
 
   It 'Should reject tied command layouts only when their used opcode meanings differ' {
@@ -252,7 +282,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     }
 
     $Result.IsValid | Should -BeTrue
-    $Result.ProfileCount | Should -Be 10
+    $Result.ProfileCount | Should -Be 13
     $Result.EditionIds | Should -Be @('nsisbi', 'official', 'park')
     $Result.OpcodeRoutes | Should -Be @('official', 'park1', 'park2', 'park3')
     $Result.VariableRoutes | Should -Be @('current', 'legacy-200', 'legacy-225')
@@ -298,6 +328,21 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.VariableRoute | Should -Be 'current'
     $Result.StubArchitecture | Should -Be 'x86'
     $Result.IsSupported | Should -BeTrue
+  }
+
+  It 'Should recover visible ARP metadata from a real Park3 ANSI installer' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\NSIS\EastMoney.EastMoney\12.1.0\dfcft8.exe' -Uri 'https://swdlcdn.eastmoney.com/swc8_free_new/dfcft8.exe' -Sha256 'AF4261F01A13F9C326749F0C0BA4088DBE9C0399EB65062B6EED205E3988F808'
+    $Format = Get-NSISFormatInfo -Path $Fixture
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine -FileSystemComplete
+
+    $Format.CatalogProfileId | Should -Be 'park-2463-ansi'
+    $Format.ParkGenerationEvidence | Should -Be 'Park3'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.ProductCode | Should -Be 'Eastmoney'
+    $Info.DisplayVersion | Should -Be '12.1.0'
+    $Info.Scope | Should -Be 'machine'
+    $Info.UninstallString | Should -Be 'C:\eastmoney\dfcf\uninst.exe'
+    @($Info.RegistryWrites | Where-Object IsUninstallKey).Count | Should -BeGreaterThan 0
   }
 
   It 'Should verify the stock archive CRC and reject corruption inside its source range' {
@@ -360,6 +405,33 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
 
     $Result.WithoutLog.FatalInvalidCommandCount | Should -Be 1
     $Result.WithLog.FatalInvalidCommandCount | Should -Be 0
+  }
+
+  It 'Should reject an invalid EW_LOG mode while retaining a valid no-log SectionSet record' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      # NSISBI stores eight operands. This source-shaped SectionGet record uses
+      # a string section index, output variable, and section field selector.
+      # A log-enabled table would reinterpret the first operand as EW_LOG's
+      # mode, for which only 0 (LogText) and 1 (LogSet) are valid.
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]$Script:NSIS_OPCODE_SECTION_SET
+        RawOpcode    = [uint32]($Script:NSIS_OPCODE_SECTION_SET + 2)
+        Raw          = [uint32[]]@(($Script:NSIS_OPCODE_SECTION_SET + 2), 153, 38, 5, 0, 0, 0, 0, 0)
+        Values       = [int[]]@(($Script:NSIS_OPCODE_SECTION_SET + 2), 153, 38, 5, 0, 0, 0, 0, 0)
+      }
+      [pscustomobject]@{
+        WithoutLog = Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $false -IsNsisBi $true
+        WithLog    = Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $true -IsNsisBi $true
+        Selected   = Get-NSISVersionInfo -StringsBlock ([byte[]](0, 0, 0, 0, 3, 0, 128, 128, 0, 0)) -Entries @($Entry) -IsNsisBi $true
+      }
+    }
+
+    $Result.WithoutLog.FatalInvalidCommandCount | Should -Be 0
+    $Result.WithLog.FatalInvalidCommandCount | Should -Be 1
+    $Result.Selected.LogCmdIsEnabled | Should -BeFalse
+    $Result.Selected.HasSemanticAmbiguity | Should -BeFalse
+    $Result.Selected.DetectionConfidence | Should -Be 'Structural'
   }
 
   It 'Should use paired LockWindow operands to resolve the log-enabled command layout' {
