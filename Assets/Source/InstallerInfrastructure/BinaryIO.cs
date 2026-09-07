@@ -66,6 +66,35 @@ namespace Dumplings.InstallerInfrastructure
         }
     }
 
+    // Some third-party decoder APIs do not expose leave-open ownership. Wrap a caller-owned stream
+    // so disposing the decoder releases its own state without closing the underlying source.
+    public sealed class NonDisposingStream : Stream
+    {
+        private readonly Stream source;
+
+        public NonDisposingStream(Stream source)
+        {
+            this.source = source ?? throw new ArgumentNullException(nameof(source));
+        }
+
+        public override bool CanRead => source.CanRead;
+        public override bool CanSeek => source.CanSeek;
+        public override bool CanWrite => source.CanWrite;
+        public override long Length => source.Length;
+        public override long Position { get => source.Position; set => source.Position = value; }
+        public override void Flush() => source.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => source.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => source.Seek(offset, origin);
+        public override void SetLength(long value) => source.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => source.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            // Ownership remains with the caller by design.
+            base.Dispose(disposing);
+        }
+    }
+
     public sealed class SeekableStreamContext : IDisposable
     {
         private readonly bool ownsStream;

@@ -26,7 +26,13 @@ function New-InstallerDecompressionStream {
       if (-not $Properties) { throw 'LZMA2 properties are required.' }
       return [SharpCompress.Compressors.LZMA.LzmaStream]::new($Properties, $Stream, $CompressedSize, $UncompressedSize, $null, $true)
     }
-    'BZip2' { return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($Stream, [SharpCompress.Compressors.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
+    'BZip2' {
+      # SharpCompress's Boolean constructor argument controls concatenated members, not ownership.
+      # Installer ranges contain one member and may be followed by unrelated records.
+      Import-InstallerInfrastructure
+      $DecoderInput = $LeaveOpen ? [Dumplings.InstallerInfrastructure.NonDisposingStream]::new($Stream) : $Stream
+      return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($DecoderInput, [SharpCompress.Compressors.CompressionMode]::Decompress, $false)
+    }
     'GZip' { return [System.IO.Compression.GZipStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Zlib' { return [System.IO.Compression.ZLibStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Deflate' { return [System.IO.Compression.DeflateStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
