@@ -173,6 +173,18 @@ namespace Dumplings.InstallerInfrastructure
         }
     }
 
+    public sealed class Crc32Result
+    {
+        public uint Checksum { get; }
+        public long Length { get; }
+
+        public Crc32Result(uint checksum, long length)
+        {
+            Checksum = checksum;
+            Length = length;
+        }
+    }
+
     public static class BinaryIO
     {
         private static readonly uint[] CrcTable = CreateCrcTable();
@@ -314,8 +326,14 @@ namespace Dumplings.InstallerInfrastructure
 
         public static uint Crc32(Stream stream, bool restorePosition, long maximumBytes, byte[] suffix)
         {
+            return Crc32WithLength(stream, restorePosition, maximumBytes, suffix).Checksum;
+        }
+
+        public static Crc32Result Crc32WithLength(Stream stream, bool restorePosition, long maximumBytes, byte[] suffix)
+        {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (!stream.CanRead) throw new ArgumentException("The stream must be readable.", nameof(stream));
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
             long original = stream.CanSeek ? stream.Position : 0;
             uint crc = uint.MaxValue;
             long total = 0;
@@ -333,7 +351,7 @@ namespace Dumplings.InstallerInfrastructure
                 {
                     for (int i = 0; i < suffix.Length; i++) crc = CrcTable[(crc ^ suffix[i]) & 0xFF] ^ (crc >> 8);
                 }
-                return crc ^ uint.MaxValue;
+                return new Crc32Result(crc ^ uint.MaxValue, total + (suffix?.Length ?? 0));
             }
             finally
             {

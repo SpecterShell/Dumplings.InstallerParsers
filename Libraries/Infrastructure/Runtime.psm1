@@ -111,13 +111,17 @@ function Import-InstallerManagedSource {
     process current directory can differ from PowerShell's provider location.
   .PARAMETER TypeName
     A fully qualified type published by the source set and used as the load sentinel.
+  .PARAMETER CompilerOptions
+    Optional C# compiler switches required by the complete source set, such as /unsafe for a
+    reviewed pointer-based implementation. Callers should omit this for ordinary managed code.
   .OUTPUTS
     The assembly containing TypeName.
   #>
   [OutputType([System.Reflection.Assembly])]
   param (
     [Parameter(Mandatory)][string[]]$Path,
-    [Parameter(Mandatory)][string]$TypeName
+    [Parameter(Mandatory)][string]$TypeName,
+    [string[]]$CompilerOptions
   )
 
   $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
@@ -135,7 +139,9 @@ function Import-InstallerManagedSource {
     # A competing runspace may have compiled this source set while this caller waited.
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
-    Add-Type -Path @($SourceFiles) -ErrorAction Stop
+    $AddTypeParameters = @{ LiteralPath = @($SourceFiles); ErrorAction = 'Stop' }
+    if ($CompilerOptions) { $AddTypeParameters.CompilerOptions = $CompilerOptions }
+    Add-Type @AddTypeParameters
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if (-not $LoadedType.Type) { throw "Managed source compilation did not publish the expected type '$TypeName'." }
     return $LoadedType.Type.Assembly

@@ -67,6 +67,7 @@
   'MicaSetup-v1.3.0.exe'                                       = 'Installers\MicaSetup\MicaSetup.MicaSetup\1.3.0\MicaSetup-v1.3.0.exe'
   'MicaSetup-v2.0.0.exe'                                       = 'Installers\MicaSetup\MicaSetup.MicaSetup\2.0.0\MicaSetup-v2.0.0.exe'
   'MicaSetup-v2.5.4.exe'                                       = 'Installers\MicaSetup\MicaSetup\2.5.4\MicaSetup-v2.5.4.exe'
+  'MicaSetup-v2.5.6.exe'                                       = 'Installers\MicaSetup\MicaSetup\2.5.6\MicaSetup-v2.5.6.exe'
 
   # DeployMaster and InstallMate
   'Setup Brinno Video Player.exe'                              = 'Installers\DeployMaster\Brinno.BrinnoVideoPlayer\1.139.00\Setup Brinno Video Player.exe'
