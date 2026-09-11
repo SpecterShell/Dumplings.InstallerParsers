@@ -215,6 +215,7 @@
   'Tower-13.1.576.exe'                                         = 'Installers\Squirrel\SaaSGroup.Tower\13.1.576\Tower-13.1.576.exe'
 
   # Tauri and portable assets
+  'Readest_0.9.100_x64-portable.exe'                           = 'Installers\Portable\chrox.Readest\0.9.100\Readest_0.9.100_x64-portable.exe'
   'Clash.Verge_1.7.7_arm64_portable.zip'                       = 'Installers\Portable\ClashVergeRev.ClashVergeRev\1.7.7\Clash.Verge_1.7.7_arm64_portable.zip'
   'Clash.Verge_1.7.7_x64_portable.zip'                         = 'Installers\Portable\ClashVergeRev.ClashVergeRev\1.7.7\Clash.Verge_1.7.7_x64_portable.zip'
   'Clash.Verge_1.7.7_x86_portable.zip'                         = 'Installers\Portable\ClashVergeRev.ClashVergeRev\1.7.7\Clash.Verge_1.7.7_x86_portable.zip'

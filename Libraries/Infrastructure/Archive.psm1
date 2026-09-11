@@ -203,6 +203,11 @@ function Open-InstallerArchiveEntry {
   [OutputType([System.IO.Stream])]
   param ([Parameter(Mandatory)]$Entry)
   $NativeEntry = if ($Entry.PSObject.Properties.Name -contains 'NativeEntry') { $Entry.NativeEntry } else { $Entry }
+  # SharpCompress does not expose a stream for some valid zero-length 7z
+  # entries. Present an ordinary empty stream so callers can still materialize
+  # the catalog entry and preserve the archive's file set.
+  $Length = if ($Entry.PSObject.Properties.Name -contains 'Length') { [long]$Entry.Length } elseif ($Entry.PSObject.Properties.Name -contains 'Size') { [long]$Entry.Size } else { -1L }
+  if ($Length -eq 0) { return [IO.MemoryStream]::new([byte[]]::new(0), $false) }
   return $NativeEntry.OpenEntryStream()
 }
 

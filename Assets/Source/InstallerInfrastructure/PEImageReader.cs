@@ -15,6 +15,7 @@ namespace Dumplings.InstallerInfrastructure
         public uint VirtualSize { get; set; }
         public uint RawOffset { get; set; }
         public uint RawSize { get; set; }
+        public uint Characteristics { get; set; }
     }
 
     public sealed class PeDirectoryData
@@ -133,7 +134,8 @@ namespace Dumplings.InstallerInfrastructure
                 {
                     layout.Sections.Add(new PeSectionData {
                         Name = section.Name, VirtualAddress = unchecked((uint)section.VirtualAddress), VirtualSize = unchecked((uint)section.VirtualSize),
-                        RawOffset = unchecked((uint)section.PointerToRawData), RawSize = unchecked((uint)section.SizeOfRawData)
+                        RawOffset = unchecked((uint)section.PointerToRawData), RawSize = unchecked((uint)section.SizeOfRawData),
+                        Characteristics = unchecked((uint)section.SectionCharacteristics)
                     });
                 }
                 DirectoryEntry[] directories = {
