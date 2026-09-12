@@ -1235,7 +1235,7 @@ function Get-InnoHeaderBlockInfo {
     [pscustomobject]$Layout
   )
 
-  $InstallerPath = (Get-Item -Path $Path -Force).FullName
+  $InstallerPath = (Get-Item -LiteralPath $Path -Force).FullName
   $FileStream = [System.IO.File]::OpenRead($InstallerPath)
   $Reader = [System.IO.BinaryReader]::new($FileStream)
 

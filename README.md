@@ -61,8 +61,8 @@ Do not write informational output to standard output in parser modules because i
 | `QtInstallerFramework.GetFormatInfo` | Identify the Qt IFW generation, framework version, media role, capabilities, and selected parser routes. | `Path` |
 | `QtInstallerFramework.GetInfo` | Parse Qt Installer Framework trailer, metadata, packages, operations, scope, and identity. | `Path` |
 | `QtInstallerFramework.Expand` | Expand selected Qt IFW resources and archives. | `Path`, optional `DestinationPath`, `Name`, `CollisionAction`, `MaximumExpandedBytes` |
-| `SetupFactory.GetInfo` | Parse Setup Factory 7-9 session variables, uninstall configuration, registry evidence, and payload catalog. | `Path` |
-| `SetupFactory.Expand` | Expand selected Setup Factory payloads. | `Path`, optional `DestinationPath`, `Name`, `CollisionAction`, `MaximumExpandedBytes` |
+| `SetupFactory.GetInfo` | Parse Setup Factory 4-10 outer and installed-file catalogs, Setup Factory 5/6 product and built-in uninstall blocks, Setup Factory 7-10 session variables, literal registry evidence, and bundled prerequisites. | `Path` |
+| `SetupFactory.Expand` | Expand selected installed files, or outer bootstrap records with `RawEntries`. | `Path`, optional `DestinationPath`, `Name`, `RawEntries`, `CollisionAction`, `MaximumExpandedBytes` |
 
 The `ValidateSet` in `Cli.ps1` is authoritative. Add a CLI action whenever a new public parser operation must cross the PackageModule boundary.
 
@@ -151,7 +151,7 @@ Licensing is file-specific:
 
 | Files | License |
 | --- | --- |
-| `Cli.ps1`, `Libraries/Installers/{NSIS,NSISFormat,NSISSimulation,Inno,QtInstallerFramework,SetupFactory}.psm1`, `Libraries/Installers/{NSIS,Inno,QtInstallerFramework}FormatCatalog.psd1` | [GPL-3.0-or-later](LICENSE) |
+| `Cli.ps1`, `Libraries/Installers/{NSIS,NSISFormat,NSISSimulation,Inno,QtInstallerFramework,SetupFactory}.psm1`, `Libraries/Installers/{NSIS,Inno,QtInstallerFramework,SetupFactory}FormatCatalog.psd1` | [GPL-3.0-or-later](LICENSE) |
 | `Libraries/Installers/AdvancedInstaller.psm1` | [GPL-2.0](LICENSE.GPL2) |
 | `Libraries/Infrastructure/{Runtime,Binary,FileSystem,Archive,PE,InstallerEvidence}.psm1` and shared infrastructure sources | MIT, as marked in each file |
 

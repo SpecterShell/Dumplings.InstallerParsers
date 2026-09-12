@@ -2,6 +2,15 @@
 . (Join-Path $PSScriptRoot '..\Support\InnoTestSetup.ps1')
 
 Describe 'Inno structures and version handling' -Tag Unit {
+  It 'opens installer paths containing wildcard metacharacters literally' {
+    InModuleScope Inno {
+      $Fixture = Join-Path $TestDrive 'setup[x64].exe'
+      [IO.File]::WriteAllBytes($Fixture, [byte[]]::new(0))
+
+      { Get-InnoHeaderBlockInfo -Path $Fixture -Offset0 0 -Layout ([pscustomobject]@{ HasEncryptionHeader = $false }) } | Should -Throw '*signature is truncated*'
+    }
+  }
+
   It 'Resolves every catalog row to a complete route descriptor' {
     InModuleScope Inno {
       $Script:InnoFormatCatalog.Formats.Count | Should -Be 104

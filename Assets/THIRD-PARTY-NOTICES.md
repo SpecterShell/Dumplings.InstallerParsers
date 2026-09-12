@@ -16,13 +16,21 @@ License: LGPL-3.0-or-later.
 
 Setup Factory 9 format behavior was studied as an additional independent reference. SFUnpacker is not included or required at runtime.
 
+## defactory
+
+Source: <https://codeberg.org/CYBERDEV/defactory>
+
+License: GPL-3.0-or-later.
+
+Setup Factory 4 through 7 catalog framing, fixed-width names, and generation-specific `irsetup.dat` structures were studied for the GPL Setup Factory parser. No defactory executable is included or required at runtime.
+
 ## blast / zlib
 
 Source: <https://github.com/madler/zlib/tree/master/contrib/blast>
 
 License: zlib.
 
-The Setup Factory 7 PKWARE implode decoder in
+The Setup Factory 4 through 7 PKWARE implode decoder in
 `Assets/Source/SetupFactory/PkwareBlast.cs` is an altered, bounded C#
 implementation derived from the public `blast` algorithm. It validates headers,
 Huffman codes, back-references, end markers, and expanded-output limits. No

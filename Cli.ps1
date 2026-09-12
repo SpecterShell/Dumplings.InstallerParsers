@@ -74,7 +74,10 @@ param (
   [switch]$IncludePascalScriptAnalysis,
 
   [Parameter(HelpMessage = 'Maximum characters retained from textual bytecode disassembly')]
-  [int]$MaximumDisassemblyCharacters
+  [int]$MaximumDisassemblyCharacters,
+
+  [Parameter(HelpMessage = 'Extract outer format records instead of installed payload files')]
+  [switch]$RawEntries
 )
 
 Set-StrictMode -Version 3.0
@@ -209,6 +212,7 @@ try {
       }
       if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $ExpandArguments.DestinationPath = $DestinationPath }
       if ($MaximumExpandedBytes -gt 0) { $ExpandArguments.MaximumExpandedBytes = $MaximumExpandedBytes }
+      if ($RawEntries) { $ExpandArguments.RawEntries = $true }
       @(Expand-SetupFactoryInstaller @ExpandArguments).ForEach({ $_.FullName })
     }
     'QtInstallerFramework.Expand' {
