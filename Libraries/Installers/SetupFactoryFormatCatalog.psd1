@@ -1,10 +1,21 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
-# Format sources: sfextract and defactory. Release identity is deliberately
-# separate from the physical archive profile because projects can replace the
-# outer launcher's version resource.
+# Format sources: historical Indigo Rose media, Lhasa, sfextract, and defactory. Release identity is deliberately separate from the physical archive profile because projects can replace the outer launcher's version resource.
 @{
-  CatalogVersion = 1
+  CatalogVersion = 2
   Profiles       = @{
+    MultiFile31 = @{
+      Id               = 'setup-factory-3.1-multifile'
+      FormatGeneration = 'MultiFile31'
+      ReleaseRange     = '3.1'
+      RuntimeMajors    = @(3)
+      RuntimeProducts  = @()
+      RuntimeFiles     = @('^IRSETUP\.EXE$')
+      HeaderRoute      = 'crusher-arq-companion-media'
+      MetadataRoute    = 'irdat-v3.1'
+      PayloadRoute     = 'crusher-lh5-extended'
+      IsSupported      = $true
+      SupportsMetadata = $true
+    }
     Classic4    = @{
       Id               = 'setup-factory-4'
       FormatGeneration = 'Classic4'

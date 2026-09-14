@@ -276,6 +276,7 @@
   'Communicator-7.6.0.exe'                                     = 'Installers\SetupFactory\BicomSystems.Communicator\7.6.0\Communicator-7.6.0.exe'
   'gloCOM-7.6.0.4.exe'                                         = 'Installers\SetupFactory\BicomSystems.gloCOM\7.6.0.4\gloCOM-7.6.0.4.exe'
   'SafeguardPDFViewer_v3.exe'                                  = 'Installers\SetupFactory\Locklizard.SafeguardPDFViewer\3.0.2.231\SafeguardPDFViewer_v3.exe'
+  'SetupFactory-3.1-builder.zip'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\HistoricalBuilders\3.1\suf310.zip'
   'SetupFactory-4-inst95.exe'                                  = 'Installers\SetupFactory\Historical\4.0.0.0\inst95.exe'
   'SetupFactory-5-ttally11.exe'                                = 'Installers\SetupFactory\Historical\5.0.0\ttally11.exe'
   'SetupFactory-6-suf60ev.exe'                                 = 'Installers\SetupFactory\Historical\6.0.1.2\suf60ev.exe'

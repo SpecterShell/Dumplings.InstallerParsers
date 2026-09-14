@@ -1,5 +1,13 @@
 # Third-Party Notices
 
+## Lhasa
+
+Source: <https://github.com/fragglet/lhasa>
+
+License: ISC.
+
+`Assets/Source/SetupFactory/CrusherLh5Decoder.cs` is an independently adapted, bounded C# implementation based on Lhasa's LH5 decoder. Setup Factory 3.1 uses one LH5-compatible profile for Crusher ARQ method 2 records and an extended profile for its standalone companion payload streams. The implementation restores caller-owned stream positions and enforces packed-input, expanded-output, history-window, and malformed-Huffman limits.
+
 ## sfextract
 
 Source: <https://github.com/CybercentreCanada/sfextract>

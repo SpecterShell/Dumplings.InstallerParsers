@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Format sources: https://github.com/CybercentreCanada/sfextract, https://github.com/Puyodead1/SFUnpacker, https://codeberg.org/CYBERDEV/defactory, and https://github.com/madler/zlib
-# Setup Factory 4-10 static parser. Format details are derived from sfextract
-# (MIT), SFUnpacker (LGPL-3.0-or-later), and defactory (GPL-3.0-or-later); see
-# Assets/THIRD-PARTY-NOTICES.md.
+# Format sources: historical Indigo Rose media, https://github.com/fragglet/lhasa, https://github.com/CybercentreCanada/sfextract, https://github.com/Puyodead1/SFUnpacker, https://codeberg.org/CYBERDEV/defactory, and https://github.com/madler/zlib
+# Setup Factory 3.1-10 static parser. Setup Factory 3.1 structures were independently derived from historical media and its Crusher archive behavior was implemented from Lhasa's ISC-licensed LH5 decoder. Later format details are derived from sfextract (MIT), SFUnpacker (LGPL-3.0-or-later), and defactory (GPL-3.0-or-later); see Assets/THIRD-PARTY-NOTICES.md.
 #
 # Binary structure consumed by this parser (overlay-relative, LE integers):
 #
-#   PE overlay
+#   Setup Factory 3.1 multi-file media
+#   +-- SETUP.EXE: 16-bit MZ/NE launcher
+#   +-- IRDATA.IRD: Crusher ARQ records
+#   |   `-- [magic:4][version:u16][name length:u16][name][descriptor:33][payload]
+#   |       +-- IRDATA.DAT: product and installed-file catalogs
+#   |       +-- IRSETUP.EXE: setup runtime
+#   |       `-- IRUNIN31.EXE: uninstaller runtime
+#   `-- *.??_: independently compressed installed-file streams
+#
+#   Setup Factory 4-10 PE overlay
 #   +-- v4: E0..E6, count:u8, 16-byte names
 #   +-- v5/v6: E0..E7, count:u32, 16/260-byte names
 #   +-- v7: E0..E7, runtime-size:u32, 260-byte names
@@ -14,6 +21,14 @@
 #       -> repeated [name][packed size][CRC32][compressed outer bytes]
 #       -> optional CDependencyFile payloads
 #       -> CFileInfo/CSetupFileData application payload streams
+#
+#   irsetup.dat (MFC serialization in versions 4-6)
+#   +-- product and generated-uninstaller objects
+#   +-- [count:u16][FFFF][schema:u16][class name][records...]
+#   |   +-- v4: CRegistryData, CINIData
+#   |   +-- v5: CRegistryData, CExecuteData, CFileOpData, CINIData, CVarRegistry
+#   |   `-- v6: generic CAction lists
+#   `-- nested CConditionData lists; class tags can reference an earlier archive-global declaration
 #
 # Only the first 2,000 irsetup.exe bytes are XORed with 07. File records use the
 # supported bounded compression framing. irsetup.dat supplies structured
@@ -31,9 +46,24 @@ $Script:SetupFactory7Signature = [byte[]](0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0x
 $Script:SetupFactory8PlusSignature = [byte[]](0xE0, 0xE0, 0xE1, 0xE1, 0xE2, 0xE2, 0xE3, 0xE3, 0xE4, 0xE4, 0xE5, 0xE5, 0xE6, 0xE6, 0xE7, 0xE7)
 $Script:SetupFactoryFormatCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'SetupFactoryFormatCatalog.psd1')
 $Script:SetupFactoryMaximumEntries = 100000
+$Script:SetupFactory31MaximumLauncherBytes = 16777216
 $Script:SetupFactoryMaximumFileBytes = 1073741824
 $Script:SetupFactoryMaximumExpandedBytes = 17179869184
 $Script:SetupFactoryMaximumScriptStringBytes = 65535
+$Script:SetupFactoryActionNames6 = @{
+  0 = 'Latest Version'; 1 = 'Download (FTP)'; 2 = 'HTTP Download'; 3 = 'Execute'; 4 = 'Open Document'; 5 = 'Unzip Files'; 6 = 'Close Program'
+  7 = 'Copy Files'; 8 = 'Delete Files'; 9 = 'Rename File'; 10 = 'Create Directory'; 11 = 'Remove Directory'; 12 = 'Read from Registry'
+  13 = 'Read from INI File'; 14 = 'Assign Value'; 17 = 'Modify Registry'; 18 = 'Modify INI File'; 19 = 'Submit to Web'; 20 = 'Show Message Box'
+  21 = 'Read File Association'; 22 = 'Abort Setup'; 24 = 'Send Email'; 26 = 'Upload File FTP'; 28 = 'Show Yes/No Dialog'; 29 = 'Read File Information'
+  30 = 'Find String'; 31 = 'Mid String'; 32 = 'Left String'; 33 = 'Right String'; 34 = 'Length of String'; 35 = 'Move Files'; 36 = 'Read Text File'
+  37 = 'Write to Text File'; 38 = 'Generate Random Value'; 39 = 'Zip Files'; 42 = 'Count Text Lines'; 43 = 'Delete Text Line'; 44 = 'Find Text Line'
+  45 = 'Get Text Line'; 46 = 'Insert Text Line'; 50 = 'Create Shortcut'; 51 = 'Remove Shortcut'; 52 = 'Install File'; 53 = 'Register File'
+  54 = 'Register Font'; 55 = 'Check Internet Connection'; 56 = 'Set File Attributes'; 57 = 'Stop Service'; 58 = 'Pause Service'; 59 = 'Continue Service'
+  60 = 'Delete Service'; 61 = 'Query Service'; 62 = 'Start Service'; 63 = 'Create Service'; 70 = 'Count Delimited Strings'; 71 = 'Get Delimited String'
+  72 = 'Parse Path'; 73 = 'Search for File'; 74 = 'Move File on Reboot'; 75 = 'Delete File on Reboot'; 76 = 'Run File on Reboot'
+  77 = 'Call DLL Function'; 78 = 'Format Number'; 79 = 'Write to Log File'; 80 = 'Get Disk Space'; 100 = 'IF'; 101 = 'END IF'; 102 = 'WHILE'
+  103 = 'END WHILE'; 104 = 'GOTO Label'; 105 = 'Label'; 200 = 'Comment'; 201 = 'Blank line'
+}
 
 function ConvertFrom-SetupFactoryText {
   <#
@@ -284,16 +314,99 @@ function Read-SetupFactoryDataInteger {
   return $Value
 }
 
+function Read-SetupFactoryDataBoolean {
+  <#
+  .SYNOPSIS
+    Read one serialized Setup Factory Boolean and reject non-Boolean values.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable zero-based byte offset. The function advances it by one byte.
+  .PARAMETER FieldName
+    Source-backed field name included in malformed-record errors.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][ref]$Offset,
+    [Parameter(Mandatory)][string]$FieldName
+  )
+
+  $Value = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1
+  if ($Value -gt 1) { throw "The Setup Factory $FieldName field has unsupported serialized Boolean value $Value" }
+  return [bool]$Value
+}
+
+function Read-SetupFactoryDataStringList {
+  <#
+  .SYNOPSIS
+    Read one bounded MFC CStringList from Setup Factory project data.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable zero-based byte offset.
+  .PARAMETER MaximumCount
+    Maximum accepted number of strings before allocation or iteration.
+  .PARAMETER FieldName
+    Source-backed list name included in malformed-record errors.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][ref]$Offset,
+    [Parameter(Mandatory)][ValidateRange(0, 65535)][int]$MaximumCount,
+    [Parameter(Mandatory)][string]$FieldName
+  )
+
+  $Count = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2
+  if ($Count -gt $MaximumCount) { throw "The Setup Factory $FieldName count exceeds the configured limit" }
+  $Values = [Collections.Generic.List[string]]::new([int]$Count)
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $Values.Add((Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Small))
+  }
+  return $Values.ToArray()
+}
+
+function Read-SetupFactoryDataWordArray {
+  <#
+  .SYNOPSIS
+    Read one bounded MFC CWordArray from Setup Factory project data.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable zero-based byte offset.
+  .PARAMETER MaximumCount
+    Maximum accepted number of unsigned 16-bit entries.
+  .PARAMETER FieldName
+    Source-backed array name included in malformed-record errors.
+  #>
+  [OutputType([uint16[]])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][ref]$Offset,
+    [Parameter(Mandatory)][ValidateRange(0, 65535)][int]$MaximumCount,
+    [Parameter(Mandatory)][string]$FieldName
+  )
+
+  $Count = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2
+  if ($Count -gt $MaximumCount) { throw "The Setup Factory $FieldName count exceeds the configured limit" }
+  $Values = [uint16[]]::new([int]$Count)
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $Values[$Index] = [uint16](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
+  }
+  return $Values
+}
+
 function Move-SetupFactoryDataOffset {
   <#
   .SYNOPSIS
-    Advance an irsetup.dat cursor through one bounded opaque field.
+    Advance an irsetup.dat cursor through one bounded serialized span.
   .PARAMETER Bytes
     Complete decompressed irsetup.dat bytes.
   .PARAMETER Offset
     Mutable zero-based byte offset.
   .PARAMETER Count
-    Number of bytes to skip.
+    Number of bytes to skip. Callers must document whether the span is proven padding, known but unused data, or behavior-relevant data whose semantics remain unresolved.
   #>
   param (
     [Parameter(Mandatory)][byte[]]$Bytes,
@@ -376,6 +489,204 @@ function Read-SetupFactoryBooleanByte {
   $Value = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1
   if ($Value -notin 0, 1) { throw "The Setup Factory $FieldName Boolean has the invalid byte value $Value" }
   return [bool]$Value
+}
+
+function Read-SetupFactoryProjectDataCandidate {
+  <#
+  .SYNOPSIS
+    Decode the silent-installation fields from one candidate modern CProjectData record.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Zero-based candidate offset. The record begins with the CProjectData schema and is validated through the first CHeadingFont schema field.
+  .OUTPUTS
+    A structured project-data prefix containing the silent-mode flags and their byte offsets. Malformed candidates throw and must not be used as installer evidence.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset
+  )
+
+  $Cursor = $Offset
+  if ((Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 4) -ne 1) { throw 'The Setup Factory CProjectData schema is unsupported' }
+  $CreateLog = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CProjectData.CreateLog'
+  $LogFilename = Read-SetupFactoryDataString -Bytes $Bytes -Offset ([ref]$Cursor) -Width Variable
+  if (-not (Test-SetupFactoryLegacyMetadataText -Value $LogFilename)) { throw 'The Setup Factory CProjectData log filename is not valid text' }
+
+  $WriteMode = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 1
+  $ActionDetailLevel = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 1
+  if ($WriteMode -gt 3 -or $ActionDetailLevel -gt 3) { throw 'The Setup Factory CProjectData logging enum is outside the supported range' }
+
+  $SilentFlagOffset = $Cursor
+  $SupportsSilentInstallation = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CProjectData.EnableSilentMode'
+  $StartsInSilentMode = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CProjectData.StartInSilentMode'
+  $VerifyArchive = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CProjectData.VerifyArchive'
+  $UserProfile = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CProjectData.UserProfile'
+
+  # CProjectData embeds CMainWindowSettings immediately after its own flags. Validate the
+  # complete fixed prefix and the following CHeadingFont schema so arbitrary byte sequences
+  # cannot be mistaken for the silent-installation setting.
+  if ((Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 4) -ne 1) { throw 'The Setup Factory CMainWindowSettings schema is unsupported' }
+  $ShowBackground = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CMainWindowSettings.ShowBackground'
+  $WindowStyle = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 4
+  $WindowAppearance = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 4
+  if ($WindowStyle -gt 16 -or $WindowAppearance -gt 16) { throw 'The Setup Factory CMainWindowSettings enum is outside the supported range' }
+  # These three serialized COLORREF values control the solid background and gradient colors.
+  # They are UI-only and cannot alter the silent-installation capability being established here.
+  Move-SetupFactoryDataOffset -Bytes $Bytes -Offset ([ref]$Cursor) -Count 12
+  $ImageFile = Read-SetupFactoryDataString -Bytes $Bytes -Offset ([ref]$Cursor) -Width Variable
+  $UseCustomIcon = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CMainWindowSettings.UseCustomIcon'
+  $CustomIcon = Read-SetupFactoryDataString -Bytes $Bytes -Offset ([ref]$Cursor) -Width Variable
+  $HideTaskbarIcon = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CMainWindowSettings.HideTaskbarIcon'
+  $AlwaysOnTop = Read-SetupFactoryBooleanByte -Bytes $Bytes -Offset ([ref]$Cursor) -FieldName 'CMainWindowSettings.AlwaysOnTop'
+  $Headline = Read-SetupFactoryDataString -Bytes $Bytes -Offset ([ref]$Cursor) -Width Variable
+  foreach ($TextValue in $ImageFile, $CustomIcon, $Headline) {
+    if (-not (Test-SetupFactoryLegacyMetadataText -Value $TextValue)) { throw 'The Setup Factory CMainWindowSettings record contains invalid text' }
+  }
+  if ((Read-SetupFactoryDataInteger -Bytes $Bytes -Offset ([ref]$Cursor) -Size 4) -ne 1) { throw 'The Setup Factory CHeadingFont schema is unsupported' }
+
+  [pscustomobject][ordered]@{
+    Offset                     = $Offset
+    EndOffset                  = $Cursor
+    SilentFlagOffset           = $SilentFlagOffset
+    SupportsSilentInstallation = $SupportsSilentInstallation
+    StartsInSilentMode         = $StartsInSilentMode
+    CreateLog                  = $CreateLog
+    LogFilename                = $LogFilename
+    WriteMode                  = $WriteMode
+    ActionDetailLevel          = $ActionDetailLevel
+    VerifyArchive              = $VerifyArchive
+    UserProfile                = $UserProfile
+    ShowBackground             = $ShowBackground
+    WindowStyle                = $WindowStyle
+    WindowAppearance           = $WindowAppearance
+    ImageFile                  = $ImageFile
+    UseCustomIcon              = $UseCustomIcon
+    CustomIcon                 = $CustomIcon
+    HideTaskbarIcon            = $HideTaskbarIcon
+    AlwaysOnTop                = $AlwaysOnTop
+    Headline                   = $Headline
+  }
+}
+
+function Get-SetupFactorySilentInstallationInfo {
+  <#
+  .SYNOPSIS
+    Resolve whether an exact Setup Factory artifact enables its documented /S mode.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER MetadataRoute
+    Generation-specific metadata route selected by the outer parser.
+  .OUTPUTS
+    A tri-state result. Setup Factory 3.1, 4, and 5 predate silent mode, Setup Factory 6 implements /S unconditionally, and later releases use the compiled CProjectData flags.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][string]$MetadataRoute
+  )
+
+  if ($MetadataRoute -in 'irdat-v3.1', 'irdat-v4', 'irdat-v5') {
+    return [pscustomobject][ordered]@{
+      IsResolved                 = $true
+      SupportsSilentInstallation = $false
+      StartsInSilentMode         = $false
+      CandidateCount             = 0
+      Evidence                   = [pscustomobject][ordered]@{
+        MetadataRoute = $MetadataRoute
+        Reason        = 'GenerationPredatesSilentMode'
+        Source        = 'Setup Factory 6.0 builder help: What''s New in 6.0 identifies /S silent installations as a new feature'
+      }
+    }
+  }
+
+  if ($MetadataRoute -eq 'irdat-v6') {
+    return [pscustomobject][ordered]@{
+      IsResolved                 = $true
+      SupportsSilentInstallation = $true
+      # Version 6 always accepts /S, but its separate project default for starting silently is
+      # not needed to establish the switch and has not been assigned an unproven byte offset.
+      StartsInSilentMode         = $null
+      CandidateCount             = 0
+      Evidence                   = [pscustomobject][ordered]@{
+        MetadataRoute = $MetadataRoute
+        Reason        = 'GenerationImplementsSilentMode'
+        Switch        = '/S'
+        Source        = 'Setup Factory 6.0 builder help: Silent Mode (/S)'
+      }
+    }
+  }
+
+  if ($MetadataRoute -notin 'irdat-v7', 'irdat-v8-plus') {
+    return [pscustomobject][ordered]@{
+      IsResolved                 = $false
+      SupportsSilentInstallation = $null
+      StartsInSilentMode         = $null
+      CandidateCount             = 0
+      Evidence                   = [pscustomobject][ordered]@{ MetadataRoute = $MetadataRoute; Reason = 'UnsupportedMetadataRoute' }
+    }
+  }
+
+  $Offsets = [Collections.Generic.HashSet[long]]::new()
+  # The schema dword and CreateLog Boolean provide a cheap index. Full record validation below
+  # supplies the actual evidence and rejects coincidental matches in scripts or payload data.
+  foreach ($Pattern in [byte[][]]@([byte[]](1, 0, 0, 0, 0), [byte[]](1, 0, 0, 0, 1))) {
+    foreach ($CandidateOffset in @(Find-BinaryPattern -Bytes $Bytes -Pattern $Pattern -Maximum 65536)) { $null = $Offsets.Add($CandidateOffset) }
+  }
+
+  $Candidates = [Collections.Generic.List[object]]::new()
+  foreach ($CandidateOffset in @($Offsets | Sort-Object)) {
+    try {
+      $Candidates.Add((Read-SetupFactoryProjectDataCandidate -Bytes $Bytes -Offset $CandidateOffset))
+    } catch {
+      # Candidate scanning intentionally rejects malformed schema prefixes. A parser diagnostic is
+      # emitted only when the complete scan cannot identify one authoritative project record.
+    }
+  }
+
+  if ($Candidates.Count -eq 1) {
+    $Candidate = $Candidates[0]
+    return [pscustomobject][ordered]@{
+      IsResolved                 = $true
+      SupportsSilentInstallation = $Candidate.SupportsSilentInstallation
+      StartsInSilentMode         = $Candidate.StartsInSilentMode
+      CandidateCount             = 1
+      Evidence                   = $Candidate
+    }
+  }
+
+  if ($Candidates.Count -gt 1) {
+    $SupportValues = @($Candidates | ForEach-Object SupportsSilentInstallation | Sort-Object -Unique)
+    $StartupValues = @($Candidates | ForEach-Object StartsInSilentMode | Sort-Object -Unique)
+    # Duplicate serialized records occur in some repackaged media. Their physical owner is
+    # ambiguous, but unanimous flag values still prove the same manifest behavior. Conflicting
+    # records remain unresolved instead of selecting an arbitrary first or last candidate.
+    if ($SupportValues.Count -eq 1 -and $StartupValues.Count -eq 1) {
+      return [pscustomobject][ordered]@{
+        IsResolved                 = $true
+        SupportsSilentInstallation = [bool]$SupportValues[0]
+        StartsInSilentMode         = [bool]$StartupValues[0]
+        CandidateCount             = $Candidates.Count
+        Evidence                   = [pscustomobject][ordered]@{
+          MetadataRoute    = $MetadataRoute
+          Reason           = 'ProjectDataConsensus'
+          CandidateOffsets = [long[]]@($Candidates | ForEach-Object Offset)
+          Candidates       = $Candidates.ToArray()
+        }
+      }
+    }
+  }
+
+  $CandidateOffsets = [Collections.Generic.List[long]]::new()
+  foreach ($Candidate in $Candidates) { $CandidateOffsets.Add([long]$Candidate.Offset) }
+  [pscustomobject][ordered]@{
+    IsResolved                 = $false
+    SupportsSilentInstallation = $null
+    StartsInSilentMode         = $null
+    CandidateCount             = $Candidates.Count
+    Evidence                   = [pscustomobject][ordered]@{ MetadataRoute = $MetadataRoute; Reason = $Candidates.Count -eq 0 ? 'ProjectDataNotFound' : 'ProjectDataConflict'; CandidateOffsets = $CandidateOffsets.ToArray() }
+  }
 }
 
 function Read-SetupFactoryClassic4Metadata {
@@ -893,40 +1204,60 @@ function Read-SetupFactoryConditionRecord5 {
     Complete decompressed irsetup.dat bytes.
   .PARAMETER Offset
     Mutable byte offset positioned at the first CConditionData field, after its MFC class tag.
+  .PARAMETER Width
+    CString length framing used by the owning Setup Factory table. Registry records use Variable; installed-file records use Small.
+  .PARAMETER Type
+    Optional MFC object declaration or reference tag associated with this condition.
+  .PARAMETER ClassName
+    Optional MFC runtime class name declared by the containing list.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][byte[]]$Bytes,
-    [Parameter(Mandatory)][ref]$Offset
+    [Parameter(Mandatory)][ref]$Offset,
+    [ValidateSet('Small', 'Variable')][string]$Width = 'Variable',
+    [uint16]$Type = 0,
+    [AllowNull()][string]$ClassName
   )
 
   $StartOffset = [long]$Offset.Value
   # The runtime evaluator consumes ValueA, ValueB, and Operator. The remaining members are
   # serialized by CConditionData but are not read by the comparison path, so retain their offsets
   # without assigning unsupported semantics.
-  $ValueA = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
-  $ValueB = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
-  $Operator = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
-  $ObservedInteger10 = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4
-  $ObservedInteger14 = Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4
-  $ObservedText18 = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
-  $ObservedText1C = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
-  if ($Operator -notin 0..5) { throw "The Setup Factory 5 advanced-condition operator $Operator is invalid" }
+  $ValueA = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width $Width
+  $ValueB = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width $Width
+  $Operator = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $ObservedInteger10 = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $ObservedInteger14 = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $ObservedText18 = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width $Width
+  $ObservedText1C = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width $Width
   foreach ($Text in $ValueA, $ValueB, $ObservedText18, $ObservedText1C) {
     if (-not (Test-SetupFactoryLegacyMetadataText -Value $Text)) { throw 'The Setup Factory 5 condition contains invalid text' }
   }
+  $OperatorName = ConvertFrom-SetupFactoryLegacyConditionOperator -Value $Operator
+  $EndOffset = [long]$Offset.Value
 
   [pscustomobject][ordered]@{
+    Type              = $Type
+    ClassName         = $ClassName
     Offset            = $StartOffset
-    EndOffset         = [long]$Offset.Value
+    EndOffset         = $EndOffset
+    RecordLength      = $EndOffset - $StartOffset
     ValueA            = $ValueA
     ValueB            = $ValueB
+    LeftOperand       = $ValueA
+    RightOperand      = $ValueB
     Operator          = $Operator
-    OperatorName      = @('Equals', 'GreaterThan', 'LessThan', 'GreaterThanOrEqual', 'LessThanOrEqual', 'NotEqual')[$Operator]
+    OperatorName      = $OperatorName
+    IsSupported       = $null -ne $OperatorName
+    Comparison        = 'CaseInsensitiveLexical'
     ObservedInteger10 = $ObservedInteger10
     ObservedInteger14 = $ObservedInteger14
     ObservedText18    = $ObservedText18
     ObservedText1C    = $ObservedText1C
+    ReservedValues    = [uint32[]]@($ObservedInteger10, $ObservedInteger14)
+    ReservedStrings   = [string[]]@($ObservedText18, $ObservedText1C)
+    RawRecord         = [Convert]::ToHexString([byte[]]$Bytes[[int]$StartOffset..([int]$EndOffset - 1)])
   }
 }
 
@@ -951,25 +1282,36 @@ function Read-SetupFactoryConditionList5 {
   if ($Count -eq 0) { return @() }
   if ($Count -gt $Script:SetupFactoryMaximumEntries) { throw 'The Setup Factory 5 condition count exceeds the configured limit' }
 
-  # MFC declares the runtime class once for the first object and uses a stable high-bit object
-  # reference for subsequent objects in the same list.
+  # MFC declares a runtime class only on its first use in the complete archive. A later list can
+  # therefore begin with a high-bit class reference even for its first object. The owning Setup
+  # Factory serializers require CConditionData here, so accept either framing while still
+  # requiring every later object in the list to use one stable reference.
   $Tag = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
-  if ($Tag -ne 0xFFFF) { throw 'The Setup Factory 5 condition-list class declaration is missing' }
-  $Schema = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
-  if ($Schema -ne 1) { throw "The Setup Factory 5 CConditionData schema $Schema is unsupported" }
-  $ClassName = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Big
-  if ($ClassName -cne 'CConditionData') { throw "The Setup Factory 5 condition list declares unexpected class '$ClassName'" }
+  $ClassName = 'CConditionData'
+  $ClassReference = $null
+  $FirstRecordType = [uint16]$Tag
+  if ($Tag -eq 0xFFFF) {
+    $Schema = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
+    if ($Schema -ne 1) { throw "The Setup Factory 5 CConditionData schema $Schema is unsupported" }
+    $ClassName = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Big
+    if ($ClassName -cne 'CConditionData') { throw "The Setup Factory 5 condition list declares unexpected class '$ClassName'" }
+  } elseif (($Tag -band 0x8000) -ne 0) {
+    $ClassReference = $Tag
+  } else {
+    throw 'The Setup Factory 5 condition-list class declaration or reference is invalid'
+  }
 
   $Conditions = [Collections.Generic.List[object]]::new($Count)
-  $ClassReference = $null
   for ($Index = 0; $Index -lt $Count; $Index++) {
+    $RecordType = $FirstRecordType
     if ($Index -gt 0) {
       $Reference = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
       if (($Reference -band 0x8000) -eq 0) { throw 'The Setup Factory 5 CConditionData object reference is invalid' }
       if ($null -eq $ClassReference) { $ClassReference = $Reference }
       elseif ($Reference -ne $ClassReference) { throw 'The Setup Factory 5 CConditionData object reference changed inside the list' }
+      $RecordType = [uint16]$Reference
     }
-    $Conditions.Add((Read-SetupFactoryConditionRecord5 -Bytes $Bytes -Offset $Offset))
+    $Conditions.Add((Read-SetupFactoryConditionRecord5 -Bytes $Bytes -Offset $Offset -Type $RecordType -ClassName $ClassName))
   }
   return $Conditions.ToArray()
 }
@@ -1135,6 +1477,614 @@ function Get-SetupFactoryRegistryCatalog5 {
   return [pscustomobject][ordered]@{ IsPresent = $false; IsComplete = $true; Error = $null; DeclaredCount = 0; Entries = @(); RegistryWrites = @(); UnresolvedCount = 0 }
 }
 
+function Get-SetupFactoryLegacyConditionState5 {
+  <#
+  .SYNOPSIS
+    Reduce Setup Factory 5 command selectors to a conservative three-valued state.
+  .PARAMETER OperatingSystemMask
+    Serialized 32-bit operating-system selector. All bits set means every supported system; zero rejects every system.
+  .PARAMETER PackageSelector
+    Serialized package selector. Zero means that the command is not tied to an optional package.
+  .PARAMETER LanguageSelector
+    Serialized language name. Empty and None apply to every runtime language.
+  .PARAMETER Conditions
+    Decoded CConditionData comparisons. Their operands can depend on runtime variables, so a non-empty list remains Unknown.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][uint32]$OperatingSystemMask,
+    [Parameter(Mandatory)][uint32]$PackageSelector,
+    [AllowEmptyString()][string]$LanguageSelector,
+    [AllowEmptyCollection()][object[]]$Conditions = @()
+  )
+
+  if ($OperatingSystemMask -eq 0) { return 'False' }
+  if ($OperatingSystemMask -ne [uint32]::MaxValue -or $PackageSelector -ne 0 -or $LanguageSelector -notin '', 'None' -or $Conditions.Count) { return 'Unknown' }
+  return 'True'
+}
+
+function Get-SetupFactoryLegacyActionPhase5 {
+  <#
+  .SYNOPSIS
+    Resolve a Setup Factory 5 command timing code or generated-uninstaller placement.
+  .PARAMETER TableOffset
+    Offset of the owning MFC table relative to decompressed irsetup.dat.
+  .PARAMETER UninstallOffset
+    Offset where the generated-uninstaller configuration begins.
+  .PARAMETER TimingCode
+    Source-backed Execute/File Operation timing enum used by installation commands.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][long]$TableOffset,
+    [Parameter(Mandatory)][long]$UninstallOffset,
+    [Parameter(Mandatory)][uint32]$TimingCode
+  )
+
+  if ($TableOffset -ge $UninstallOffset) { return 'Uninstall' }
+  switch ($TimingCode) {
+    0 { return 'Startup' }
+    1 { return 'BeforeInstalling' }
+    2 { return 'AfterInstalling' }
+    3 { return 'Shutdown' }
+    default { return 'Unknown' }
+  }
+}
+
+function Get-SetupFactoryLegacyObjectTable {
+  <#
+  .SYNOPSIS
+    Decode one declared MFC object table from legacy irsetup.dat data.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER ClassName
+    Exact MFC runtime class name expected in the table declaration.
+  .PARAMETER RecordReader
+    Private record-reader function that accepts Bytes and a mutable Offset reference.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][ValidateSet('CExecuteData', 'CFileOpData', 'CINIData', 'CVarRegistry')][string]$ClassName,
+    [Parameter(Mandatory)][ValidateSet('Read-SetupFactoryExecuteRecord5', 'Read-SetupFactoryFileOperationRecord5', 'Read-SetupFactoryIniRecord4', 'Read-SetupFactoryIniRecord5', 'Read-SetupFactoryRegistryVariableRecord5')][string]$RecordReader
+  )
+
+  $Marker = [Text.Encoding]::ASCII.GetBytes($ClassName)
+  foreach ($MarkerOffset in @(Find-BinaryPattern -Bytes $Bytes -Pattern $Marker -Maximum 16)) {
+    # MFC CObList framing is [count:u16][new-class:FFFF][schema:u16][name-length:u16][name].
+    # Matching the full declaration avoids treating diagnostic strings in project data as tables.
+    if ($MarkerOffset -lt 8 -or [BitConverter]::ToUInt16($Bytes, $MarkerOffset - 6) -ne 0xFFFF -or [BitConverter]::ToUInt16($Bytes, $MarkerOffset - 4) -ne 1 -or [BitConverter]::ToUInt16($Bytes, $MarkerOffset - 2) -ne $Marker.Length) { continue }
+    $Count = [int][BitConverter]::ToUInt16($Bytes, $MarkerOffset - 8)
+    if ($Count -le 0 -or $Count -gt $Script:SetupFactoryMaximumEntries) { continue }
+
+    $Entries = [Collections.Generic.List[object]]::new($Count)
+    $Cursor = [ref]([long]($MarkerOffset + $Marker.Length))
+    $ClassReference = $null
+    $ErrorMessage = $null
+    for ($Index = 0; $Index -lt $Count; $Index++) {
+      try {
+        $ObjectReference = [uint16]0xFFFF
+        if ($Index -gt 0) {
+          $ObjectReference = [uint16](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Cursor -Size 2)
+          if (($ObjectReference -band 0x8000) -eq 0) { throw "The $ClassName object reference is invalid" }
+          if ($null -eq $ClassReference) { $ClassReference = $ObjectReference }
+          elseif ($ObjectReference -ne $ClassReference) { throw "The $ClassName object reference changed inside the table" }
+        }
+        $Record = & $RecordReader -Bytes $Bytes -Offset $Cursor
+        $Record | Add-Member -NotePropertyName ObjectReference -NotePropertyValue $ObjectReference
+        $Entries.Add($Record)
+      } catch {
+        $ErrorMessage = $_.Exception.Message
+        break
+      }
+    }
+
+    return [pscustomobject][ordered]@{
+      IsPresent       = $true
+      IsComplete      = $Entries.Count -eq $Count -and -not $ErrorMessage
+      Error           = $ErrorMessage
+      ClassName       = $ClassName
+      MarkerOffset    = [long]$MarkerOffset
+      EndOffset       = [long]$Cursor.Value
+      DeclaredCount   = $Count
+      ClassReference  = $ClassReference
+      Entries         = $Entries.ToArray()
+      UnresolvedCount = ($Count - $Entries.Count)
+    }
+  }
+
+  return [pscustomobject][ordered]@{ IsPresent = $false; IsComplete = $true; Error = $null; ClassName = $ClassName; MarkerOffset = $null; EndOffset = $null; DeclaredCount = 0; ClassReference = $null; Entries = @(); UnresolvedCount = 0 }
+}
+
+function Read-SetupFactoryExecuteRecord5 {
+  <#
+  .SYNOPSIS
+    Decode one Setup Factory 5 CExecuteData command.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable offset positioned after the owning MFC class tag or object reference.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
+
+  $StartOffset = [long]$Offset.Value
+  $Action = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $Target = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Arguments = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $WorkingDirectory = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $WaitCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $RunModeCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $PromptForDiskCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $DiskTitle = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $TimingCode = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $ObservedFlag16 = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $OperatingSystemMask = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $PackageSelector = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $LanguageSelector = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ConditionCount = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
+  $Conditions = @(Read-SetupFactoryConditionList5 -Bytes $Bytes -Offset $Offset -Count $ConditionCount)
+  $ObservedIntegers = [uint32[]](1..4 | ForEach-Object { Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4 })
+  $ObservedStrings = [string[]](1..4 | ForEach-Object { Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable })
+  foreach ($Text in @($Target, $Arguments, $WorkingDirectory, $DiskTitle, $LanguageSelector) + $ObservedStrings) {
+    if (-not (Test-SetupFactoryLegacyMetadataText -Value $Text)) { throw 'The Setup Factory 5 execute command contains invalid text' }
+  }
+
+  [pscustomobject][ordered]@{
+    Offset               = $StartOffset
+    EndOffset            = [long]$Offset.Value
+    Action               = $Action
+    ActionName           = @('ExecuteProgram', 'OpenDocument', 'OpenUrl', 'PrintDocument', 'ExploreFolder', 'PlayMultimedia')[$Action]
+    Category             = 'Execution'
+    Target               = $Target
+    Arguments            = $Arguments
+    WorkingDirectory     = $WorkingDirectory
+    WaitForProgram       = $WaitCode -in 0, 1 ? [bool]$WaitCode : $null
+    WaitCode             = $WaitCode
+    RunModeCode          = $RunModeCode
+    RunMode              = @('Normal', 'Maximized', 'Minimized')[$RunModeCode]
+    PromptForDisk        = $PromptForDiskCode -in 0, 1 ? [bool]$PromptForDiskCode : $null
+    PromptForDiskCode    = $PromptForDiskCode
+    DiskTitle            = $DiskTitle
+    TimingCode           = $TimingCode
+    ObservedFlag16       = $ObservedFlag16
+    OperatingSystemMask  = $OperatingSystemMask
+    PackageSelector      = $PackageSelector
+    LanguageSelector     = $LanguageSelector
+    ConditionCount       = $ConditionCount
+    Conditions           = $Conditions
+    ConditionState       = Get-SetupFactoryLegacyConditionState5 -OperatingSystemMask $OperatingSystemMask -PackageSelector $PackageSelector -LanguageSelector $LanguageSelector -Conditions $Conditions
+    ObservedPolicyValues = $ObservedIntegers
+    ObservedPolicyText   = $ObservedStrings
+  }
+}
+
+function Read-SetupFactoryFileOperationRecord5 {
+  <#
+  .SYNOPSIS
+    Decode one Setup Factory 5 CFileOpData command.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable offset positioned after the owning MFC class tag or object reference.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
+
+  $StartOffset = [long]$Offset.Value
+  $Action = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $Source = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Destination = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ConfirmCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $SuppressErrorsCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $PromptForDiskCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $DiskTitle = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $TimingCode = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $OperatingSystemMask = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $PackageSelector = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $LanguageSelector = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ConditionCount = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
+  $Conditions = @(Read-SetupFactoryConditionList5 -Bytes $Bytes -Offset $Offset -Count $ConditionCount)
+  $ObservedIntegers = [uint32[]](1..4 | ForEach-Object { Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4 })
+  $ObservedStrings = [string[]](1..4 | ForEach-Object { Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable })
+  foreach ($Text in @($Source, $Destination, $DiskTitle, $LanguageSelector) + $ObservedStrings) {
+    if (-not (Test-SetupFactoryLegacyMetadataText -Value $Text)) { throw 'The Setup Factory 5 file operation contains invalid text' }
+  }
+
+  [pscustomobject][ordered]@{
+    Offset               = $StartOffset
+    EndOffset            = [long]$Offset.Value
+    Action               = $Action
+    ActionName           = @('Copy', 'Delete', 'Move', 'Rename', 'MakeDirectory', 'RemoveDirectory')[$Action]
+    Category             = 'FileSystem'
+    Source               = $Source
+    Destination          = $Destination
+    ConfirmWithUser      = $ConfirmCode -in 0, 1 ? [bool]$ConfirmCode : $null
+    ConfirmCode          = $ConfirmCode
+    SuppressErrors       = $SuppressErrorsCode -in 0, 1 ? [bool]$SuppressErrorsCode : $null
+    SuppressErrorsCode   = $SuppressErrorsCode
+    PromptForDisk        = $PromptForDiskCode -in 0, 1 ? [bool]$PromptForDiskCode : $null
+    PromptForDiskCode    = $PromptForDiskCode
+    DiskTitle            = $DiskTitle
+    TimingCode           = $TimingCode
+    OperatingSystemMask  = $OperatingSystemMask
+    PackageSelector      = $PackageSelector
+    LanguageSelector     = $LanguageSelector
+    ConditionCount       = $ConditionCount
+    Conditions           = $Conditions
+    ConditionState       = Get-SetupFactoryLegacyConditionState5 -OperatingSystemMask $OperatingSystemMask -PackageSelector $PackageSelector -LanguageSelector $LanguageSelector -Conditions $Conditions
+    ObservedPolicyValues = $ObservedIntegers
+    ObservedPolicyText   = $ObservedStrings
+  }
+}
+
+function Read-SetupFactoryIniRecord4 {
+  <#
+  .SYNOPSIS
+    Decode one Setup Factory 4 CINIData command.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable offset positioned after the owning MFC class tag or object reference.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
+
+  $StartOffset = [long]$Offset.Value
+  $Action = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $FileName = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Section = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Key = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Value = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $OperatingSystemMask = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $LanguageSelector = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  foreach ($Text in $FileName, $Section, $Key, $Value, $LanguageSelector) {
+    if (-not (Test-SetupFactoryLegacyMetadataText -Value $Text)) { throw 'The Setup Factory 4 INI command contains invalid text' }
+  }
+  $ConditionState = if ($OperatingSystemMask -eq 0) { 'False' } elseif ($OperatingSystemMask -eq 0x1F -and $LanguageSelector -in '', 'None') { 'True' } else { 'Unknown' }
+
+  [pscustomobject][ordered]@{
+    Offset                = $StartOffset
+    EndOffset             = [long]$Offset.Value
+    Action                = $Action
+    ActionName            = $Action -eq 1 ? 'SetValue' : $null
+    Category              = 'Ini'
+    FileName              = $FileName
+    Section               = $Section
+    Key                   = $Key
+    Value                 = $Value
+    OperatingSystemMask   = $OperatingSystemMask
+    OperatingSystemPolicy = Get-SetupFactoryLegacyOperatingSystemPolicy -Generation Classic4 -Mask $OperatingSystemMask
+    LanguageSelector      = $LanguageSelector
+    ConditionState        = $ConditionState
+  }
+}
+
+function Read-SetupFactoryIniRecord5 {
+  <#
+  .SYNOPSIS
+    Decode one Setup Factory 5 CINIData command.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable offset positioned after the owning MFC class tag or object reference.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
+
+  $StartOffset = [long]$Offset.Value
+  $Action = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $FileName = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Section = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Key = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Value = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ExistingValueAction = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $Separator = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $Flags = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $OperatingSystemMask = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $PackageSelector = [uint32](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4)
+  $LanguageSelector = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ConditionCount = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
+  $Conditions = @(Read-SetupFactoryConditionList5 -Bytes $Bytes -Offset $Offset -Count $ConditionCount)
+  $ObservedIntegers = [uint32[]](1..4 | ForEach-Object { Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4 })
+  $ObservedStrings = [string[]](1..4 | ForEach-Object { Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable })
+  foreach ($Text in @($FileName, $Section, $Key, $Value, $Separator, $LanguageSelector) + $ObservedStrings) {
+    if (-not (Test-SetupFactoryLegacyMetadataText -Value $Text)) { throw 'The Setup Factory 5 INI command contains invalid text' }
+  }
+
+  [pscustomobject][ordered]@{
+    Offset                  = $StartOffset
+    EndOffset               = [long]$Offset.Value
+    Action                  = $Action
+    ActionName              = @('SetValue', 'DeleteKey', 'DeleteSection')[$Action]
+    Category                = 'Ini'
+    FileName                = $FileName
+    Section                 = $Section
+    Key                     = $Key
+    Value                   = $Value
+    ExistingValueAction     = $ExistingValueAction
+    ExistingValueActionName = @('Overwrite', 'DoNotOverwrite', 'Prepend', 'PrependIfMissing', 'Append', 'AppendIfMissing', 'Increment', 'Decrement')[$ExistingValueAction]
+    Separator               = $Separator
+    Flags                   = $Flags
+    OperatingSystemMask     = $OperatingSystemMask
+    PackageSelector         = $PackageSelector
+    LanguageSelector        = $LanguageSelector
+    ConditionCount          = $ConditionCount
+    Conditions              = $Conditions
+    ConditionState          = Get-SetupFactoryLegacyConditionState5 -OperatingSystemMask $OperatingSystemMask -PackageSelector $PackageSelector -LanguageSelector $LanguageSelector -Conditions $Conditions
+    ObservedPolicyValues    = $ObservedIntegers
+    ObservedPolicyText      = $ObservedStrings
+  }
+}
+
+function Read-SetupFactoryRegistryVariableRecord5 {
+  <#
+  .SYNOPSIS
+    Decode one Setup Factory 5 CVarRegistry variable source.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER Offset
+    Mutable offset positioned after the owning MFC class tag or object reference.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
+
+  $StartOffset = [long]$Offset.Value
+  $VariableName = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $RootCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $Key = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ValueName = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $UseKeyExistenceCode = [int](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 1)
+  $DefaultValue = Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable
+  $ObservedIntegers = [uint32[]](1..4 | ForEach-Object { Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 4 })
+  $ObservedStrings = [string[]](1..4 | ForEach-Object { Read-SetupFactoryDataString -Bytes $Bytes -Offset $Offset -Width Variable })
+  foreach ($Text in @($VariableName, $Key, $ValueName, $DefaultValue) + $ObservedStrings) {
+    if (-not (Test-SetupFactoryLegacyMetadataText -Value $Text)) { throw 'The Setup Factory 5 registry variable contains invalid text' }
+  }
+
+  [pscustomobject][ordered]@{
+    Offset               = $StartOffset
+    EndOffset            = [long]$Offset.Value
+    Category             = 'VariableRead'
+    VariableName         = $VariableName
+    RootCode             = $RootCode
+    Root                 = ConvertTo-SetupFactoryRegistryRoot -Value $RootCode -Generation Legacy5
+    Key                  = $Key
+    ValueName            = $ValueName
+    UseKeyExistence      = $UseKeyExistenceCode -in 0, 1 ? [bool]$UseKeyExistenceCode : $null
+    UseKeyExistenceCode  = $UseKeyExistenceCode
+    DefaultValue         = $DefaultValue
+    ObservedPolicyValues = $ObservedIntegers
+    ObservedPolicyText   = $ObservedStrings
+  }
+}
+
+function Get-SetupFactoryActionCatalog4 {
+  <#
+  .SYNOPSIS
+    Compose Setup Factory 4 registry and INI command evidence.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER UninstallOffset
+    Start of the generated-uninstaller configuration.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][long]$UninstallOffset)
+
+  $Registry = Get-SetupFactoryRegistryCatalog4 -Bytes $Bytes
+  $Ini = Get-SetupFactoryLegacyObjectTable -Bytes $Bytes -ClassName CINIData -RecordReader Read-SetupFactoryIniRecord4
+  foreach ($Entry in $Ini.Entries) { $Entry | Add-Member -NotePropertyName Phase -NotePropertyValue ($Ini.MarkerOffset -ge $UninstallOffset ? 'Uninstall' : 'Install') }
+  $UnknownActions = @($Ini.Entries | Where-Object { -not $_.ActionName })
+  $Errors = @($Registry.Error, $Ini.Error) | Where-Object { $_ }
+
+  [pscustomobject][ordered]@{
+    IsPresent                  = $Registry.IsPresent -or $Ini.IsPresent
+    IsComplete                 = $Registry.IsComplete -and $Ini.IsComplete
+    Error                      = $Errors -join '; '
+    DeclaredCount              = $Registry.DeclaredCount + $Ini.DeclaredCount
+    Entries                    = [object[]]@($Registry.Entries) + [object[]]@($Ini.Entries)
+    RegistryWrites             = $Registry.RegistryWrites
+    RegistryCatalog            = $Registry
+    IniCatalog                 = $Ini
+    VariableAssignments        = @()
+    ExecutionActions           = @()
+    FileSystemActions          = @()
+    IniActions                 = $Ini.Entries
+    VariableReads              = @()
+    UserInteractionActions     = @()
+    InstallabilityActions      = @()
+    ShortcutActions            = @()
+    ServiceActions             = @()
+    RebootActions              = @()
+    ExternalCodeActions        = @()
+    UnknownActions             = $UnknownActions
+    UnresolvedCount            = $Registry.UnresolvedCount
+    UnresolvedActionCount      = $Ini.UnresolvedCount + $UnknownActions.Count
+    UnresolvedControlFlowCount = 0
+  }
+}
+
+function Get-SetupFactoryActionCatalog5 {
+  <#
+  .SYNOPSIS
+    Compose Setup Factory 5 registry, execute, file-operation, INI, and registry-variable evidence.
+  .PARAMETER Bytes
+    Complete decompressed irsetup.dat bytes.
+  .PARAMETER UninstallOffset
+    Start of the generated-uninstaller configuration.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][long]$UninstallOffset)
+
+  $Registry = Get-SetupFactoryRegistryCatalog5 -Bytes $Bytes -UninstallOffset $UninstallOffset
+  $Execute = Get-SetupFactoryLegacyObjectTable -Bytes $Bytes -ClassName CExecuteData -RecordReader Read-SetupFactoryExecuteRecord5
+  $FileOperation = Get-SetupFactoryLegacyObjectTable -Bytes $Bytes -ClassName CFileOpData -RecordReader Read-SetupFactoryFileOperationRecord5
+  $Ini = Get-SetupFactoryLegacyObjectTable -Bytes $Bytes -ClassName CINIData -RecordReader Read-SetupFactoryIniRecord5
+  $RegistryVariable = Get-SetupFactoryLegacyObjectTable -Bytes $Bytes -ClassName CVarRegistry -RecordReader Read-SetupFactoryRegistryVariableRecord5
+
+  foreach ($Entry in $Execute.Entries) { $Entry | Add-Member -NotePropertyName Phase -NotePropertyValue (Get-SetupFactoryLegacyActionPhase5 -TableOffset $Execute.MarkerOffset -UninstallOffset $UninstallOffset -TimingCode $Entry.TimingCode) }
+  foreach ($Entry in $FileOperation.Entries) { $Entry | Add-Member -NotePropertyName Phase -NotePropertyValue (Get-SetupFactoryLegacyActionPhase5 -TableOffset $FileOperation.MarkerOffset -UninstallOffset $UninstallOffset -TimingCode $Entry.TimingCode) }
+  foreach ($Entry in $Ini.Entries) { $Entry | Add-Member -NotePropertyName Phase -NotePropertyValue ($Ini.MarkerOffset -ge $UninstallOffset ? 'Uninstall' : 'Install') }
+  foreach ($Entry in $RegistryVariable.Entries) { $Entry | Add-Member -NotePropertyName Phase -NotePropertyValue 'VariableResolution' }
+
+  $Tables = @($Registry, $Execute, $FileOperation, $Ini, $RegistryVariable)
+  $AllEntries = [object[]]@($Registry.Entries) + [object[]]@($Execute.Entries) + [object[]]@($FileOperation.Entries) + [object[]]@($Ini.Entries) + [object[]]@($RegistryVariable.Entries)
+  $UnknownActions = @($Execute.Entries + $FileOperation.Entries + $Ini.Entries | Where-Object { $_.PSObject.Properties['ActionName'] -and -not $_.ActionName })
+  $UserInteractionActions = @($Execute.Entries + $FileOperation.Entries | Where-Object { $_.PromptForDisk -eq $true -or ($_.PSObject.Properties['ConfirmWithUser'] -and $_.ConfirmWithUser -eq $true) })
+  $Errors = @($Tables.Error | Where-Object { $_ })
+
+  [pscustomobject][ordered]@{
+    IsPresent                  = @($Tables | Where-Object IsPresent).Count -gt 0
+    IsComplete                 = @($Tables | Where-Object { -not $_.IsComplete }).Count -eq 0
+    Error                      = $Errors -join '; '
+    DeclaredCount              = ($Tables.DeclaredCount | Measure-Object -Sum).Sum
+    Entries                    = $AllEntries
+    RegistryWrites             = $Registry.RegistryWrites
+    RegistryCatalog            = $Registry
+    ExecuteCatalog             = $Execute
+    FileOperationCatalog       = $FileOperation
+    IniCatalog                 = $Ini
+    RegistryVariableCatalog    = $RegistryVariable
+    VariableAssignments        = @()
+    ExecutionActions           = $Execute.Entries
+    FileSystemActions          = $FileOperation.Entries
+    IniActions                 = $Ini.Entries
+    VariableReads              = $RegistryVariable.Entries
+    UserInteractionActions     = $UserInteractionActions
+    InstallabilityActions      = $UserInteractionActions
+    ShortcutActions            = @()
+    ServiceActions             = @()
+    RebootActions              = @()
+    ExternalCodeActions        = @()
+    UnknownActions             = $UnknownActions
+    UnresolvedCount            = $Registry.UnresolvedCount
+    UnresolvedActionCount      = ($Tables.UnresolvedCount | Measure-Object -Sum).Sum + $UnknownActions.Count
+    UnresolvedControlFlowCount = 0
+  }
+}
+
+function Get-SetupFactoryActionDescriptor6 {
+  <#
+  .SYNOPSIS
+    Identify one Setup Factory 6 action ID using the builder runtime's action vocabulary.
+  .PARAMETER ActionId
+    Numeric CAction identifier stored in member I04.
+  .OUTPUTS
+    Action name, broad behavior category, and projection status. Unknown IDs remain explicit instead of receiving guessed semantics.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][ValidateRange(0, 1024)][int]$ActionId)
+
+  $Name = $Script:SetupFactoryActionNames6[$ActionId]
+  $Category = switch ($ActionId) {
+    { $_ -in 0, 1, 2, 19, 24, 26, 55 } { 'Network'; break }
+    { $_ -in 3, 4 } { 'Execution'; break }
+    { $_ -in 5, 7, 8, 9, 10, 11, 18, 23, 35, 36, 37, 39, 42, 43, 44, 45, 46, 50, 51, 52, 53, 54, 56 } { 'FileSystem'; break }
+    { $_ -in 6 } { 'Process'; break }
+    { $_ -in 12, 17, 21 } { 'Registry'; break }
+    { $_ -in 13, 14, 29, 30, 31, 32, 33, 34, 38, 70, 71, 72, 73, 78, 80 } { 'Data'; break }
+    { $_ -in 20, 28 } { 'UserInteraction'; break }
+    { $_ -in 22, 100, 101, 102, 103, 104, 105 } { 'ControlFlow'; break }
+    { $_ -in 57, 58, 59, 60, 61, 62, 63 } { 'Service'; break }
+    { $_ -in 74, 75, 76 } { 'Reboot'; break }
+    { $_ -in 77 } { 'ExternalCode'; break }
+    { $_ -in 79, 200, 201 } { 'Informational'; break }
+    default { 'Unknown' }
+  }
+  $ProjectionStatus = if ($ActionId -in 3, 4, 12, 14, 17, 28, 50, 74, 75, 76, 77, 100, 102, 104, 105, 200) { 'Decoded' }
+  elseif ($Name) { 'Catalogued' }
+  else { 'Unknown' }
+
+  [pscustomobject][ordered]@{
+    Name             = $Name
+    Category         = $Category
+    ProjectionStatus = $ProjectionStatus
+  }
+}
+
+function Get-SetupFactoryActionDetails6 {
+  <#
+  .SYNOPSIS
+    Project source-backed CAction members into named operands for selected Setup Factory 6 actions.
+  .PARAMETER ActionId
+    Numeric action identifier.
+  .PARAMETER Fields
+    Complete generic CAction member map decoded by Read-SetupFactoryActionRecord6.
+  .OUTPUTS
+    A named operand object for actions whose member meanings are established by the 6.0 builder runtime, or null when only action identity is known.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][ValidateRange(0, 1024)][int]$ActionId,
+    [Parameter(Mandatory)][pscustomobject]$Fields
+  )
+
+  $Values = switch ($ActionId) {
+    3 { [ordered]@{ FilePath = [string]$Fields.S0C; Arguments = [string]$Fields.S2C; WorkingDirectory = [string]$Fields.S30; RunMode = [int]$Fields.I38; WaitForReturn = [bool]$Fields.I34 }; break }
+    4 { [ordered]@{ FilePath = [string]$Fields.S0C; Verb = [string]$Fields.S3C; WorkingDirectory = [string]$Fields.S30; RunMode = [int]$Fields.I38 }; break }
+    12 { [ordered]@{ VariableName = [string]$Fields.S60; DefaultValue = [string]$Fields.S64; Root = ConvertTo-SetupFactoryRegistryRoot -Value ([int]$Fields.I78) -Generation Legacy6; SubKey = [string]$Fields.S74; ValueName = [string]$Fields.S68; TrueIfExists = [bool]$Fields.I6C; ExpandEnvironmentStrings = [bool]$Fields.I98 }; break }
+    14 { [ordered]@{ VariableName = [string]$Fields.S60; Value = [string]$Fields.S58; EvaluateAsExpression = [bool]$Fields.I6C }; break }
+    17 {
+      $OperationId = [int]$Fields.I38
+      [ordered]@{ Operation = $OperationId -in 0..3 ? @('CreateKey', 'DeleteKey', 'SetValue', 'DeleteValue')[$OperationId] : $null; OperationId = $OperationId; Root = ConvertTo-SetupFactoryRegistryRoot -Value ([int]$Fields.I78) -Generation Legacy6; SubKey = [string]$Fields.S74; ValueName = [string]$Fields.S58; Value = [string]$Fields.S68; Type = ConvertTo-SetupFactoryRegistryValueType -Value ([int]$Fields.I90) -Generation Legacy6 }
+      break
+    }
+    28 { [ordered]@{ Title = [string]$Fields.S64; Message = [string]$Fields.S68; ResultVariable = [string]$Fields.S60; YesValue = [string]$Fields.SA0; NoValue = [string]$Fields.SA4 }; break }
+    50 { [ordered]@{ Folder = [string]$Fields.S58; Description = [string]$Fields.S68; TargetPath = [string]$Fields.S0C; Arguments = [string]$Fields.S2C; WorkingDirectory = [string]$Fields.S30; IconIndex = [int]$Fields.I98; ExternalIconPath = [string]$Fields.SA0; RunMode = [int]$Fields.I38 }; break }
+    74 { [ordered]@{ SourcePath = [string]$Fields.S58; DestinationPath = [string]$Fields.S5C }; break }
+    75 { [ordered]@{ FilePath = [string]$Fields.S58 }; break }
+    76 { [ordered]@{ FilePath = [string]$Fields.S58; Arguments = [string]$Fields.S2C }; break }
+    77 { [ordered]@{ DllPath = [string]$Fields.S0C; FunctionName = [string]$Fields.S08; Arguments = [string]$Fields.S2C; ReturnType = [int]$Fields.I38 }; break }
+    100 { [ordered]@{ Expression = [string]$Fields.S54 }; break }
+    102 { [ordered]@{ Expression = [string]$Fields.S54 }; break }
+    104 { [ordered]@{ TargetLabel = [string]$Fields.S5C }; break }
+    105 { [ordered]@{ Label = [string]$Fields.S5C }; break }
+    200 { [ordered]@{ Text = [string]$Fields.S68 }; break }
+    default { $null }
+  }
+  if ($null -ne $Values) { [pscustomobject]$Values }
+}
+
+function Resolve-SetupFactoryActionCondition6 {
+  <#
+  .SYNOPSIS
+    Resolve the Boolean subset of a Setup Factory 6 action expression.
+  .PARAMETER Expression
+    CAction condition text using Setup Factory variables and textual or symbolic Boolean operators.
+  .PARAMETER IdentifierState
+    Known three-valued states accumulated from earlier literal Boolean assignments in the same uncertainties-free action path.
+  .OUTPUTS
+    The shared Boolean-evaluator result augmented with the original and normalized expressions.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Expression,
+    [Parameter(Mandatory)][Collections.IDictionary]$IdentifierState
+  )
+
+  # The Setup Factory editor serializes AND/OR/NOT and wraps built-in variables in percent signs.
+  # Normalize only that Boolean surface syntax; comparisons, arithmetic, functions, and quoted
+  # values intentionally remain unsupported and resolve to Unknown.
+  $NormalizedExpression = $Expression -replace '(?i)\bAND\b', '&&' -replace '(?i)\bOR\b', '||' -replace '(?i)\bNOT\b', '!'
+  $NormalizedStates = [ordered]@{}
+  foreach ($Match in [regex]::Matches($NormalizedExpression, '%(?<Name>[A-Za-z_][A-Za-z0-9_]*)%')) {
+    $OriginalName = $Match.Value
+    $NormalizedName = "SF_$($Match.Groups['Name'].Value)"
+    $NormalizedExpression = $NormalizedExpression.Replace($OriginalName, $NormalizedName)
+    foreach ($Key in $IdentifierState.Keys) {
+      if ([string]$Key -ieq $OriginalName) { $NormalizedStates[$NormalizedName] = $IdentifierState[$Key]; break }
+    }
+  }
+  foreach ($Key in $IdentifierState.Keys) {
+    if ([string]$Key -notmatch '^%.*%$') { $NormalizedStates[[string]$Key] = $IdentifierState[$Key] }
+  }
+
+  $Result = Resolve-InstallerBooleanExpression -Expression $NormalizedExpression -IdentifierState $NormalizedStates
+  $Result | Add-Member -NotePropertyName Expression -NotePropertyValue $Expression
+  $Result | Add-Member -NotePropertyName NormalizedExpression -NotePropertyValue $NormalizedExpression
+  return $Result
+}
+
 function Read-SetupFactoryActionRecord6 {
   <#
   .SYNOPSIS
@@ -1169,12 +2119,18 @@ function Read-SetupFactoryActionRecord6 {
   }
   $ActionId = [int]$Fields.I04
   if ($ActionId -lt 0 -or $ActionId -gt 1024) { throw "The Setup Factory 6 action ID $ActionId is outside the supported structural range" }
+  $Descriptor = Get-SetupFactoryActionDescriptor6 -ActionId $ActionId
+  $FieldObject = [pscustomobject]$Fields
   [pscustomobject][ordered]@{
-    Offset    = $StartOffset
-    EndOffset = [long]$Offset.Value
-    Schema    = $SchemaVersion
-    ActionId  = $ActionId
-    Fields    = [pscustomobject]$Fields
+    Offset           = $StartOffset
+    EndOffset        = [long]$Offset.Value
+    Schema           = $SchemaVersion
+    ActionId         = $ActionId
+    ActionName       = $Descriptor.Name
+    Category         = $Descriptor.Category
+    ProjectionStatus = $Descriptor.ProjectionStatus
+    Details          = Get-SetupFactoryActionDetails6 -ActionId $ActionId -Fields $FieldObject
+    Fields           = $FieldObject
   }
 }
 
@@ -1196,9 +2152,18 @@ function Get-SetupFactoryActionCatalog6 {
   $Marker = [Text.Encoding]::ASCII.GetBytes('CAction')
   $MarkerOffsets = @(Find-BinaryPattern -Bytes $Bytes -Pattern $Marker -Maximum 8)
   $ClassMarker = $MarkerOffsets | Where-Object { $_ -ge 8 -and [BitConverter]::ToUInt16($Bytes, $_ - 6) -eq 0xFFFF -and [BitConverter]::ToUInt16($Bytes, $_ - 4) -eq 1 -and [BitConverter]::ToUInt16($Bytes, $_ - 2) -eq $Marker.Length } | Select-Object -First 1
-  if ($null -eq $ClassMarker) { return [pscustomobject][ordered]@{ IsPresent = $false; IsComplete = $true; Error = $null; Groups = @(); Entries = @(); RegistryWrites = @(); UnresolvedCount = 0 } }
+  if ($null -eq $ClassMarker) {
+    return [pscustomobject][ordered]@{
+      IsPresent = $false; IsComplete = $true; Error = $null; Groups = @(); Entries = @(); RegistryWrites = @(); VariableAssignments = @(); ExecutionActions = @()
+      UserInteractionActions = @(); InstallabilityActions = @(); ShortcutActions = @(); ServiceActions = @(); RebootActions = @(); ExternalCodeActions = @()
+      UnknownActions = @(); UnresolvedCount = 0; UnresolvedControlFlowCount = 0
+    }
+  }
 
   $Groups = [Collections.Generic.List[object]]::new()
+  # Copy the caller-provided boundary into the list-reader closure explicitly. Besides making the
+  # ownership clear, this keeps static analysis from treating the captured parameter as unused.
+  $UninstallBoundary = $UninstallOffset
   $ReadGroup = {
     param ([long]$ObjectPrefixOffset, [int]$Count, [bool]$HasClassDeclaration, [int]$Ordinal)
     if ($Count -le 0 -or $Count -gt $Script:SetupFactoryMaximumEntries) { throw "The Setup Factory 6 action-list count $Count is invalid" }
@@ -1214,7 +2179,7 @@ function Get-SetupFactoryActionCatalog6 {
       }
       $Records.Add((Read-SetupFactoryActionRecord6 -Bytes $Bytes -Offset $Cursor))
     }
-    $Phase = if ($ObjectPrefixOffset -ge $UninstallOffset) { 'Uninstall' } else {
+    $Phase = if ($ObjectPrefixOffset -ge $UninstallBoundary) { 'Uninstall' } else {
       @('Startup', 'BeforeInstalling', 'AfterInstalling', 'Shutdown')[[Math]::Min($Ordinal, 3)]
     }
     foreach ($Record in $Records) { $Record | Add-Member -NotePropertyName Phase -NotePropertyValue $Phase }
@@ -1258,22 +2223,77 @@ function Get-SetupFactoryActionCatalog6 {
   $AllEntries = [Collections.Generic.List[object]]::new()
   foreach ($Group in $Groups) { $AllEntries.AddRange([object[]]$Group.Entries) }
   $RegistryWrites = [Collections.Generic.List[object]]::new()
+  $VariableAssignments = [Collections.Generic.List[object]]::new()
+  $ExecutionActions = [Collections.Generic.List[object]]::new()
+  $UserInteractionActions = [Collections.Generic.List[object]]::new()
+  $InstallabilityActions = [Collections.Generic.List[object]]::new()
+  $ShortcutActions = [Collections.Generic.List[object]]::new()
+  $ServiceActions = [Collections.Generic.List[object]]::new()
+  $RebootActions = [Collections.Generic.List[object]]::new()
+  $ExternalCodeActions = [Collections.Generic.List[object]]::new()
+  $UnknownActions = [Collections.Generic.List[object]]::new()
   $UnresolvedCount = 0
-  foreach ($Group in $Groups | Where-Object Phase -NE Uninstall) {
-    $ConditionStack = [Collections.Generic.List[string]]::new()
+  $UnresolvedControlFlowCount = 0
+  foreach ($Group in $Groups) {
+    # CAction lists contain their own block controls. Track IF and WHILE nesting so every effect
+    # carries the condition state under which the runtime reaches it. Runtime variable expressions
+    # remain Unknown; the parser never executes project actions against the host.
+    $ConditionStack = [Collections.Generic.List[object]]::new()
+    $IdentifierState = [ordered]@{}
     foreach ($Action in $Group.Entries) {
-      if ($Action.ActionId -eq 100) {
-        $ResolvedCondition = Resolve-InstallerBooleanExpression -Expression ([string]$Action.Fields.S54) -IdentifierState @{}
-        $ParentState = $ConditionStack.Count ? $ConditionStack[$ConditionStack.Count - 1] : 'True'
-        $ConditionStack.Add((Merge-InstallerConditionState -State @($ParentState, $ResolvedCondition.State) -Operator All))
+      $ParentState = $ConditionStack.Count ? [string]$ConditionStack[$ConditionStack.Count - 1].State : 'True'
+      if ($Action.ActionId -in 100, 102) {
+        $ResolvedCondition = Resolve-SetupFactoryActionCondition6 -Expression ([string]$Action.Fields.S54) -IdentifierState $IdentifierState
+        $ConditionState = Merge-InstallerConditionState -State @($ParentState, $ResolvedCondition.State) -Operator All
+        $Action | Add-Member -NotePropertyName ConditionState -NotePropertyValue $ConditionState
+        $Action | Add-Member -NotePropertyName ConditionEvidence -NotePropertyValue $ResolvedCondition
+        $ConditionStack.Add([pscustomobject]@{ ActionId = $Action.ActionId; State = $ConditionState })
+        if ($Action.ActionId -eq 102 -and $ConditionState -eq 'Unknown') { $UnresolvedControlFlowCount++ }
         continue
       }
-      if ($Action.ActionId -eq 101) {
-        if ($ConditionStack.Count) { $ConditionStack.RemoveAt($ConditionStack.Count - 1) } else { $UnresolvedCount++ }
+      if ($Action.ActionId -in 101, 103) {
+        $Action | Add-Member -NotePropertyName ConditionState -NotePropertyValue $ParentState
+        $ExpectedOpen = $Action.ActionId -eq 101 ? 100 : 102
+        if (-not $ConditionStack.Count -or $ConditionStack[$ConditionStack.Count - 1].ActionId -ne $ExpectedOpen) {
+          $UnresolvedCount++
+          $UnresolvedControlFlowCount++
+        } else {
+          $ConditionStack.RemoveAt($ConditionStack.Count - 1)
+        }
         continue
       }
-      if ($Action.ActionId -ne 17) { continue }
-      $ConditionState = $ConditionStack.Count ? $ConditionStack[$ConditionStack.Count - 1] : 'True'
+
+      $ConditionState = $ParentState
+      $Action | Add-Member -NotePropertyName ConditionState -NotePropertyValue $ConditionState
+      if (-not $Action.ActionName) {
+        $UnknownActions.Add($Action)
+        if ($Action.Phase -ne 'Uninstall' -and $ConditionState -ne 'False') { $UnresolvedControlFlowCount++ }
+        continue
+      }
+
+      # GOTO changes which subsequent records run. Preserve the exact label target, but do not
+      # pretend a single-pass walk can model branches that depend on unresolved runtime state.
+      if ($Action.ActionId -eq 104 -and $ConditionState -ne 'False') { $UnresolvedControlFlowCount++ }
+      if ($Action.ActionId -eq 14) {
+        $VariableAssignments.Add($Action)
+        $VariableName = [string]$Action.Details.VariableName
+        $LiteralValue = [string]$Action.Details.Value
+        if (-not $Action.Details.EvaluateAsExpression -and $VariableName -match '^%[A-Za-z_][A-Za-z0-9_]*%$' -and $LiteralValue -in 'TRUE', 'FALSE') {
+          if ($ConditionState -eq 'True') { $IdentifierState[$VariableName] = $LiteralValue -eq 'TRUE' ? 'True' : 'False' }
+          elseif ($ConditionState -eq 'Unknown') { $IdentifierState[$VariableName] = 'Unknown' }
+        }
+      }
+      if ($Action.ActionId -in 3, 4) { $ExecutionActions.Add($Action) }
+      if ($Action.ActionId -in 20, 28) { $UserInteractionActions.Add($Action) }
+      if ($Action.ActionId -in 6, 22, 55) { $InstallabilityActions.Add($Action) }
+      if ($Action.ActionId -in 50, 51) { $ShortcutActions.Add($Action) }
+      if ($Action.ActionId -in 57, 58, 59, 60, 61, 62, 63) { $ServiceActions.Add($Action) }
+      if ($Action.ActionId -in 74, 75, 76) { $RebootActions.Add($Action) }
+      if ($Action.ActionId -eq 77) { $ExternalCodeActions.Add($Action) }
+
+      # Registry writes are projected only for installation phases, reachable Set Value actions,
+      # and source-backed root/type enums. Other operations remain in the action catalog.
+      if ($Group.Phase -eq 'Uninstall' -or $Action.ActionId -ne 17) { continue }
       if ($ConditionState -eq 'Unknown') { $UnresolvedCount++; continue }
       if ($ConditionState -eq 'False' -or [int]$Action.Fields.I38 -ne 2) { continue }
       $Root = ConvertTo-SetupFactoryRegistryRoot -Value ([int]$Action.Fields.I78) -Generation Legacy6
@@ -1290,17 +2310,30 @@ function Get-SetupFactoryActionCatalog6 {
           ConditionState = $ConditionState
         })
     }
-    if ($ConditionStack.Count) { $UnresolvedCount += $ConditionStack.Count }
+    if ($ConditionStack.Count) {
+      $UnresolvedCount += $ConditionStack.Count
+      $UnresolvedControlFlowCount += $ConditionStack.Count
+    }
   }
 
   return [pscustomobject][ordered]@{
-    IsPresent       = $true
-    IsComplete      = -not $ErrorMessage
-    Error           = $ErrorMessage
-    Groups          = $Groups.ToArray()
-    Entries         = $AllEntries.ToArray()
-    RegistryWrites  = $RegistryWrites.ToArray()
-    UnresolvedCount = $UnresolvedCount
+    IsPresent                  = $true
+    IsComplete                 = -not $ErrorMessage
+    Error                      = $ErrorMessage
+    Groups                     = $Groups.ToArray()
+    Entries                    = $AllEntries.ToArray()
+    RegistryWrites             = $RegistryWrites.ToArray()
+    VariableAssignments        = $VariableAssignments.ToArray()
+    ExecutionActions           = $ExecutionActions.ToArray()
+    UserInteractionActions     = $UserInteractionActions.ToArray()
+    InstallabilityActions      = $InstallabilityActions.ToArray()
+    ShortcutActions            = $ShortcutActions.ToArray()
+    ServiceActions             = $ServiceActions.ToArray()
+    RebootActions              = $RebootActions.ToArray()
+    ExternalCodeActions        = $ExternalCodeActions.ToArray()
+    UnknownActions             = $UnknownActions.ToArray()
+    UnresolvedCount            = $UnresolvedCount
+    UnresolvedControlFlowCount = $UnresolvedControlFlowCount
   }
 }
 
@@ -1411,6 +2444,163 @@ function Get-SetupFactoryLiteralRegistryWrite {
   }
 }
 
+function ConvertTo-SetupFactoryFilePolicy {
+  <#
+  .SYNOPSIS
+    Compose the source-backed installation policy attached to one payload record.
+  .PARAMETER Values
+    Generation-specific policy fields. Missing keys remain null rather than being treated as disabled.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][hashtable]$Values)
+
+  $OverwritePolicy = if ($Values.ContainsKey('OverwriteMode')) {
+    switch ([byte]$Values['OverwriteMode']) {
+      0 { 'SameOrOlder' }
+      1 { 'Older' }
+      2 { 'Always' }
+      3 { 'Never' }
+      4 { 'AskUser' }
+      default { $null }
+    }
+  } else { $null }
+  $ShortcutLocations = $Values.ContainsKey('ShortcutLocations') -and $null -ne $Values['ShortcutLocations'] ? [string[]]@($Values['ShortcutLocations']) : [string[]]@()
+  $OperatingSystemConditions = $Values.ContainsKey('OperatingSystemConditions') -and $null -ne $Values['OperatingSystemConditions'] ? [uint16[]]@($Values['OperatingSystemConditions']) : [uint16[]]@()
+  $BuildConfigurations = $Values.ContainsKey('BuildConfigurations') -and $null -ne $Values['BuildConfigurations'] ? [string[]]@($Values['BuildConfigurations']) : [string[]]@()
+  $LegacySelectionValues = $Values.ContainsKey('LegacySelectionValues') -and $null -ne $Values['LegacySelectionValues'] ? [string[]]@($Values['LegacySelectionValues']) : [string[]]@()
+  $LegacyAdvancedConditions = $Values.ContainsKey('LegacyAdvancedConditions') -and $null -ne $Values['LegacyAdvancedConditions'] ? [object[]]@($Values['LegacyAdvancedConditions']) : [object[]]@()
+
+  [pscustomobject][ordered]@{
+    Recurse                       = $Values.ContainsKey('Recurse') ? [bool]$Values['Recurse'] : $null
+    MatchMode                     = $Values.ContainsKey('MatchMode') ? [byte]$Values['MatchMode'] : $null
+    UseTrueVersion                = $Values.ContainsKey('UseTrueVersion') ? [bool]$Values['UseTrueVersion'] : $null
+    ProductVersionMS              = $Values.ContainsKey('ProductVersionMS') ? [uint32]$Values['ProductVersionMS'] : $null
+    ProductVersionLS              = $Values.ContainsKey('ProductVersionLS') ? [uint32]$Values['ProductVersionLS'] : $null
+    FileVersionMS                 = $Values.ContainsKey('FileVersionMS') ? [uint32]$Values['FileVersionMS'] : $null
+    FileVersionLS                 = $Values.ContainsKey('FileVersionLS') ? [uint32]$Values['FileVersionLS'] : $null
+    FileDateMS                    = $Values.ContainsKey('FileDateMS') ? [uint32]$Values['FileDateMS'] : $null
+    FileDateLS                    = $Values.ContainsKey('FileDateLS') ? [uint32]$Values['FileDateLS'] : $null
+    OverwriteMode                 = $Values.ContainsKey('OverwriteMode') ? [byte]$Values['OverwriteMode'] : $null
+    OverwritePolicy               = $OverwritePolicy
+    CreateBackup                  = $Values.ContainsKey('CreateBackup') ? [bool]$Values['CreateBackup'] : $null
+    ProtectFile                   = $Values.ContainsKey('ProtectFile') ? [bool]$Values['ProtectFile'] : $null
+    ShortcutLocations             = $ShortcutLocations
+    StartScreenPinning            = $Values.ContainsKey('StartScreenPinning') ? [bool]$Values['StartScreenPinning'] : $null
+    UseExternalIcon               = $Values.ContainsKey('UseExternalIcon') ? [bool]$Values['UseExternalIcon'] : $null
+    IconIndex                     = $Values.ContainsKey('IconIndex') ? [uint32]$Values['IconIndex'] : $null
+    ShortcutWindowMode            = $Values.ContainsKey('ShortcutWindowMode') ? [byte]$Values['ShortcutWindowMode'] : $null
+    ShortcutHotKey                = $Values.ContainsKey('ShortcutHotKey') ? [uint16]$Values['ShortcutHotKey'] : $null
+    AppUserModelID                = $Values.ContainsKey('AppUserModelID') ? [string]$Values['AppUserModelID'] : $null
+    RegisterTrueTypeFont          = $Values.ContainsKey('RegisterTrueTypeFont') ? [bool]$Values['RegisterTrueTypeFont'] : $null
+    RegisterWithDllRegisterServer = $Values.ContainsKey('RegisterWithDllRegisterServer') ? [bool]$Values['RegisterWithDllRegisterServer'] : $null
+    RegisterTypeLibrary           = $Values.ContainsKey('RegisterTypeLibrary') ? [bool]$Values['RegisterTypeLibrary'] : $null
+    SuppressInUseNotice           = $Values.ContainsKey('SuppressInUseNotice') ? [bool]$Values['SuppressInUseNotice'] : $null
+    UseOriginalAttributes         = $Values.ContainsKey('UseOriginalAttributes') ? [bool]$Values['UseOriginalAttributes'] : $null
+    ForcedAttributes              = $Values.ContainsKey('ForcedAttributes') ? [uint32]$Values['ForcedAttributes'] : $null
+    DisableCrcCheck               = $Values.ContainsKey('DisableCrcCheck') ? [bool]$Values['DisableCrcCheck'] : $null
+    InstallOrder                  = $Values.ContainsKey('InstallOrder') ? [uint32]$Values['InstallOrder'] : $null
+    NeverRemove                   = $Values.ContainsKey('NeverRemove') ? [bool]$Values['NeverRemove'] : $null
+    SharedSystemFile              = $Values.ContainsKey('SharedSystemFile') ? [bool]$Values['SharedSystemFile'] : $null
+    OperatingSystemConditions     = $OperatingSystemConditions
+    RuntimeCondition              = $Values.ContainsKey('RuntimeCondition') ? [string]$Values['RuntimeCondition'] : $null
+    BuildConfigurations           = $BuildConfigurations
+    PackageSelector               = $Values.ContainsKey('PackageSelector') ? [string]$Values['PackageSelector'] : $null
+    StoreOnly                     = $Values.ContainsKey('StoreOnly') ? [bool]$Values['StoreOnly'] : $null
+    LegacyPolicySchema            = $Values.ContainsKey('LegacyPolicySchema') ? [uint16]$Values['LegacyPolicySchema'] : $null
+    LegacyVersionWords            = $Values.ContainsKey('LegacyVersionWords') -and $null -ne $Values['LegacyVersionWords'] ? [uint32[]]@($Values['LegacyVersionWords']) : [uint32[]]@()
+    LegacyOperatingSystemMask     = $Values.ContainsKey('LegacyOperatingSystemMask') ? [uint32]$Values['LegacyOperatingSystemMask'] : $null
+    LegacyOperatingSystemPolicy   = $Values.ContainsKey('LegacyOperatingSystemPolicy') ? $Values['LegacyOperatingSystemPolicy'] : $null
+    LegacyLanguageCondition       = $Values.ContainsKey('LegacyLanguageCondition') ? [uint32]$Values['LegacyLanguageCondition'] : $null
+    LegacySelectionValues         = $LegacySelectionValues
+    LegacyAdvancedConditions      = $LegacyAdvancedConditions
+  }
+}
+
+function Get-SetupFactoryLegacyOperatingSystemPolicy {
+  <#
+  .SYNOPSIS
+    Decode the operating-system mask used by Setup Factory 4 or 5 file conditions.
+  .PARAMETER Generation
+    Runtime generation whose mask table and evaluator define the bit meanings.
+  .PARAMETER Mask
+    Raw unsigned mask serialized in the CFileInfo record.
+  .OUTPUTS
+    A policy object preserving the raw and evaluated masks, selected targets, ignored bits, and whether the runtime accepts every OS generation it understands.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][ValidateSet('Classic4', 'Legacy5')][string]$Generation,
+    [Parameter(Mandatory)][uint32]$Mask
+  )
+
+  $Definitions = if ($Generation -ceq 'Classic4') {
+    @(
+      [pscustomobject]@{ Bit = [uint32]0x01; Name = 'Windows 3.1 or Win32s' }
+      [pscustomobject]@{ Bit = [uint32]0x02; Name = 'Windows 95' }
+      [pscustomobject]@{ Bit = [uint32]0x04; Name = 'Windows NT 3' }
+      [pscustomobject]@{ Bit = [uint32]0x08; Name = 'Windows NT 4' }
+      [pscustomobject]@{ Bit = [uint32]0x10; Name = 'Any OS' }
+    )
+  } else {
+    @(
+      [pscustomobject]@{ Bit = [uint32]0x01; Name = 'Windows 95' }
+      [pscustomobject]@{ Bit = [uint32]0x02; Name = 'Windows 98' }
+      [pscustomobject]@{ Bit = [uint32]0x04; Name = 'Windows NT 3.51' }
+      [pscustomobject]@{ Bit = [uint32]0x08; Name = 'Windows NT 4' }
+      [pscustomobject]@{ Bit = [uint32]0x10; Name = 'Windows 2000' }
+      [pscustomobject]@{ Bit = [uint32]0x20; Name = 'Windows ME' }
+      [pscustomobject]@{ Bit = [uint32]0x40; Name = 'Windows XP' }
+    )
+  }
+  $KnownMask = [uint32]($Generation -ceq 'Classic4' ? 0x1F : 0x7F)
+  $EvaluatedMask = [uint32]($Mask -band $KnownMask)
+  $Targets = [Collections.Generic.List[string]]::new()
+  foreach ($Definition in $Definitions) {
+    if (($EvaluatedMask -band $Definition.Bit) -ne 0) { $Targets.Add($Definition.Name) }
+  }
+  # SF4 has an explicit AnyOS branch. SF5 enumerates every OS understood by that runtime;
+  # selecting all seven branches is therefore its equivalent unrestricted policy.
+  $AcceptsEveryKnownOperatingSystem = if ($Generation -ceq 'Classic4') {
+    ($EvaluatedMask -band 0x10) -ne 0
+  } else {
+    $EvaluatedMask -eq $KnownMask
+  }
+
+  [pscustomobject][ordered]@{
+    Generation                       = $Generation
+    RawMask                          = $Mask
+    EvaluatedMask                    = $EvaluatedMask
+    KnownMask                        = $KnownMask
+    IgnoredMask                      = [uint32]($Mask -band ([uint32]::MaxValue -bxor $KnownMask))
+    Targets                          = $Targets.ToArray()
+    AcceptsEveryKnownOperatingSystem = $AcceptsEveryKnownOperatingSystem
+    IsRestricted                     = -not $AcceptsEveryKnownOperatingSystem
+  }
+}
+
+function ConvertFrom-SetupFactoryLegacyConditionOperator {
+  <#
+  .SYNOPSIS
+    Map a Setup Factory 5 CConditionData operator value to its runtime comparison.
+  .PARAMETER Value
+    Unsigned operator value serialized at object offset 0x0C.
+  .OUTPUTS
+    The source-backed operator name, or null when the runtime treats the value as a failed condition.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][uint32]$Value)
+
+  switch ($Value) {
+    0 { return 'Equals' }
+    1 { return 'GreaterThan' }
+    2 { return 'LessThan' }
+    3 { return 'GreaterThanOrEqual' }
+    4 { return 'LessThanOrEqual' }
+    5 { return 'NotEqual' }
+    default { return $null }
+  }
+}
+
 function ConvertTo-SetupFactoryInstalledFileRecord {
   <#
   .SYNOPSIS
@@ -1439,7 +2629,7 @@ function ConvertTo-SetupFactoryInstalledFileRecord {
     Components               = [string]$Values['Components']
     Condition                = [string]$Values['Condition']
     InstallType              = [string]$Values['InstallType']
-    Packages                 = [string[]]@($Values['Packages'])
+    Packages                 = $Values.ContainsKey('Packages') -and $null -ne $Values['Packages'] ? [string[]]@($Values['Packages']) : [string[]]@()
     Notes                    = [string]$Values['Notes']
     ShortcutLocation         = [string]$Values['ShortcutLocation']
     ShortcutComment          = [string]$Values['ShortcutComment']
@@ -1455,6 +2645,7 @@ function ConvertTo-SetupFactoryInstalledFileRecord {
     Attributes               = $Values['Attributes']
     CreationTime             = $Values['CreationTime']
     LastWriteTime            = $Values['LastWriteTime']
+    Policy                   = $Values['Policy']
     RecordOffset             = [long]$Values['RecordOffset']
   }
 }
@@ -1485,29 +2676,71 @@ function Read-SetupFactoryFileRecord4 {
   $Second = Read-SetupFactoryDataInteger $Bytes $Offset 1
   $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
   if ($Year -lt 1900 -or $Month -notin 1..12 -or $Day -notin 1..31 -or $Hour -gt 23 -or $Minute -gt 59 -or $Second -gt 59) { throw 'The Setup Factory 4 file timestamp is invalid' }
-  Move-SetupFactoryDataOffset $Bytes $Offset 16
+  # CFileInfo serializes four words next to the timestamp and overwrite settings. They feed the
+  # legacy file-comparison path, but their individual product/file-version roles are not proven.
+  # Preserve them under an explicitly legacy name rather than inventing modern field semantics.
+  $LegacyVersionWords = [uint32[]]::new(4)
+  foreach ($Index in 0..3) { $LegacyVersionWords[$Index] = [uint32](Read-SetupFactoryDataInteger $Bytes $Offset 4) }
   $ExpandedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $OriginalAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 1
   $Destination = Read-SetupFactoryDataString $Bytes $Offset Variable
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
-  $Title = Read-SetupFactoryDataString $Bytes $Offset Variable
-  for ($Index = 0; $Index -lt 3; $Index++) { $null = Read-SetupFactoryDataString $Bytes $Offset Variable }
-  Move-SetupFactoryDataOffset $Bytes $Offset 12
+  $OverwriteMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreateShortcut = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateShortcut'
+  $ShortcutDescription = Read-SetupFactoryDataString $Bytes $Offset Variable
+  $ShortcutLocation = Read-SetupFactoryDataString $Bytes $Offset Variable
+  $ShortcutArguments = Read-SetupFactoryDataString $Bytes $Offset Variable
+  $ShortcutWorkingDirectory = Read-SetupFactoryDataString $Bytes $Offset Variable
+  $IconIndex = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ShortcutHotKey = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ShortcutWindowMode = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Components = Read-SetupFactoryDataString $Bytes $Offset Variable
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Variable
+  $RegisterTrueTypeFont = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTrueTypeFont'
+  $FontRegistryName = Read-SetupFactoryDataString $Bytes $Offset Variable
+  $RegisterWithDllRegisterServer = $null
   $IsCompressed = $true
-  if ($SubType -eq 1) {
-    $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
+  $LegacyOperatingSystemMask = $null
+  $UseTrueVersion = $null
+  $FileVersionMS = $null
+  $FileVersionLS = $null
+  if ($SubType -eq 0) {
+    # The original schema ends after the font metadata and always uses compressed storage.
+  } elseif ($SubType -eq 1) {
+    # The first revised schema adds ActiveX registration and an inverse compression selector.
+    $RegisterWithDllRegisterServer = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterWithDllRegisterServer'
+    $IsCompressed = -not (Read-SetupFactoryDataBoolean $Bytes $Offset 'StoreUncompressed')
   } elseif ($SubType -eq 2) {
-    if ([long]$Offset.Value + 12 -gt $Bytes.LongLength) { throw 'The Setup Factory 4 compression flags are truncated' }
-    $IsCompressed = $Bytes[[int]$Offset.Value + 1] -eq 0
-    Move-SetupFactoryDataOffset $Bytes $Offset 12
+    $RegisterWithDllRegisterServer = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterWithDllRegisterServer'
+    $IsCompressed = -not (Read-SetupFactoryDataBoolean $Bytes $Offset 'StoreUncompressed')
+    # Schema 2 adds an OS eligibility mask and the optional true-file-version comparison. Runtime
+    # code reads VS_FIXEDFILEINFO only when UseTrueVersion is set, then compares dwFileVersionMS/LS
+    # with these two words. Package selection remains the preceding Components string.
+    $LegacyOperatingSystemMask = Read-SetupFactoryDataInteger $Bytes $Offset 1
+    $UseTrueVersion = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseTrueVersion'
+    $FileVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+    $FileVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  } else {
+    throw "Unsupported Setup Factory 4 CFileInfo schema '$SubType'"
   }
   $FileName = [IO.Path]::GetFileName($SourcePath.Replace('/', '\'))
+  $ShortcutLocations = $CreateShortcut ? [string[]]@('Custom') : [string[]]@()
+  $PolicyValues = @{
+    OverwriteMode = [byte]$OverwriteMode; ShortcutLocations = $ShortcutLocations; IconIndex = [uint32]$IconIndex; ShortcutWindowMode = [byte]$ShortcutWindowMode; ShortcutHotKey = [uint16]$ShortcutHotKey
+    RegisterTrueTypeFont = $RegisterTrueTypeFont; UseOriginalAttributes = $true; ForcedAttributes = [uint32]$OriginalAttributes
+    LegacyPolicySchema = $SubType; LegacyVersionWords = $LegacyVersionWords; PackageSelector = $Components
+  }
+  if ($null -ne $RegisterWithDllRegisterServer) { $PolicyValues['RegisterWithDllRegisterServer'] = $RegisterWithDllRegisterServer }
+  if ($null -ne $LegacyOperatingSystemMask) {
+    $PolicyValues['LegacyOperatingSystemMask'] = [byte]$LegacyOperatingSystemMask
+    $PolicyValues['LegacyOperatingSystemPolicy'] = Get-SetupFactoryLegacyOperatingSystemPolicy -Generation Classic4 -Mask ([byte]$LegacyOperatingSystemMask)
+    $PolicyValues['UseTrueVersion'] = $UseTrueVersion
+    $PolicyValues['FileVersionMS'] = [uint32]$FileVersionMS
+    $PolicyValues['FileVersionLS'] = [uint32]$FileVersionLS
+  }
+  $Policy = ConvertTo-SetupFactoryFilePolicy -Values $PolicyValues
   ConvertTo-SetupFactoryInstalledFileRecord -Values @{
-    FileName = $FileName; SourcePath = $SourcePath; DestinationPath = $Destination; StorageClass = 'Archive'; Title = $Title; Components = $Components
-    PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; RecordOffset = $Start
+    FileName = $FileName; SourcePath = $SourcePath; DestinationPath = $Destination; StorageClass = 'Archive'; Components = $Components
+    ShortcutLocation = $ShortcutLocation; ShortcutDescription = $ShortcutDescription; ShortcutArguments = $ShortcutArguments; ShortcutWorkingDirectory = $ShortcutWorkingDirectory; FontRegistryName = $FontRegistryName; Policy = $Policy
+    PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; Attributes = [uint32]$OriginalAttributes; RecordOffset = $Start
     LastWriteTime = try { [datetime]::new([int]$Year, [int]$Month, [int]$Day, [int]$Hour, [int]$Minute, [int]$Second) } catch { $null }
   }
 }
@@ -1531,48 +2764,94 @@ function Read-SetupFactoryFileRecord5 {
   $null = Read-SetupFactoryDataString $Bytes $Offset Small
   $StorageClass = Read-SetupFactoryDataString $Bytes $Offset Small
   $ExpandedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 9
+  $OriginalAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreationTime = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $null = Read-SetupFactoryDataInteger $Bytes $Offset 4 # Access time is not manifest evidence.
   $Timestamp = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 25
+  $UseTrueVersion = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseTrueVersion'
+  $ProductVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ProductVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Destination = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 5
-  $Title = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 5
+  $OverwriteMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreateBackup = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateBackup'
+  $ProtectFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'ProtectFile'
+  $CreateAppFolderShortcut = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateAppFolderShortcut'
+  $CreateDesktopShortcut = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateDesktopShortcut'
+  $ShortcutDescription = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutArguments = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutWorkingDirectory = Read-SetupFactoryDataString $Bytes $Offset Small
+  $UseExternalIcon = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseExternalIcon'
+  $IconPath = Read-SetupFactoryDataString $Bytes $Offset Small
+  $IconIndex = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ShortcutWindowMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
   $Components = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 3
-  $IsCompressed = (Read-SetupFactoryDataInteger $Bytes $Offset 1) -ne 0
-  Move-SetupFactoryDataOffset $Bytes $Offset 7
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
+  $RegisterTrueTypeFont = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTrueTypeFont'
+  $FontRegistryName = Read-SetupFactoryDataString $Bytes $Offset Small
+  $RegisterWithDllRegisterServer = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterWithDllRegisterServer'
+  $RegisterTypeLibrary = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTypeLibrary'
+  $SuppressInUseNotice = Read-SetupFactoryDataBoolean $Bytes $Offset 'SuppressInUseNotice'
+  $IsCompressed = Read-SetupFactoryDataBoolean $Bytes $Offset 'Compress'
+  $UseOriginalAttributes = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseOriginalAttributes'
+  $ForcedAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $NeverRemove = Read-SetupFactoryDataBoolean $Bytes $Offset 'NeverRemove'
+  $SharedSystemFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'SharedSystemFile'
+  # The version-5 File Properties Conditions tab serializes the accepted Windows versions and
+  # selected global language before its list of advanced Boolean conditions.
+  $LegacyOperatingSystemMask = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $LegacyLanguageCondition = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $OptionCount = Read-SetupFactoryDataInteger $Bytes $Offset 2
   if ($OptionCount -gt 64) { throw 'The Setup Factory 5 file option count exceeds the configured limit' }
+  $LegacyAdvancedConditions = [Collections.Generic.List[object]]::new()
   if ($OptionCount) {
     $OptionType = Read-SetupFactoryDataInteger $Bytes $Offset 2
+    $OptionClassName = $null
     if ($OptionType -eq 0xFFFF) {
       $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
-      $null = Read-SetupFactoryDataString $Bytes $Offset Big
+      $OptionClassName = Read-SetupFactoryDataString $Bytes $Offset Big
     } elseif (($OptionType -band 0xFF00) -notin 0x8000, 0x8100) { throw 'The Setup Factory 5 file option table is malformed' }
+    $ClassReference = $null
     for ($Index = 0; $Index -lt $OptionCount; $Index++) {
-      $null = Read-SetupFactoryDataString $Bytes $Offset Small
-      $null = Read-SetupFactoryDataString $Bytes $Offset Small
-      Move-SetupFactoryDataOffset $Bytes $Offset 14
-      if ($Index -lt $OptionCount - 1) { Move-SetupFactoryDataOffset $Bytes $Offset 2 }
+      $RecordType = [uint16]$OptionType
+      if ($Index -gt 0) {
+        # Later CConditionData objects use one stable high-bit MFC class reference instead of
+        # repeating the first object's class declaration.
+        $RecordType = [uint16](Read-SetupFactoryDataInteger -Bytes $Bytes -Offset $Offset -Size 2)
+        if (($RecordType -band 0x8000) -eq 0) { throw 'The Setup Factory 5 file option object reference is invalid' }
+        if ($null -eq $ClassReference) { $ClassReference = $RecordType }
+        elseif ($RecordType -ne $ClassReference) { throw 'The Setup Factory 5 file option object reference changed inside the list' }
+      }
+      $LegacyAdvancedConditions.Add((Read-SetupFactoryConditionRecord5 -Bytes $Bytes -Offset $Offset -Width Small -Type $RecordType -ClassName $OptionClassName))
     }
   }
   $PackedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Crc32 = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 37
+  $StoreOnly = Read-SetupFactoryDataBoolean $Bytes $Offset 'StoreOnly'
+  $LegacyTrailerValues = [uint32[]]::new(8)
+  for ($Index = 0; $Index -lt $LegacyTrailerValues.Count; $Index++) { $LegacyTrailerValues[$Index] = [uint32](Read-SetupFactoryDataInteger $Bytes $Offset 4) }
+  $DisableCrcCheck = [bool]([byte]$LegacyTrailerValues[4])
+  # The final four strings are builder-side file metadata that the Setup Factory 6 importer does
+  # not project into CSetupFileData. Read them structurally so non-empty values cannot desynchronize the table.
+  for ($Index = 0; $Index -lt 4; $Index++) { $null = Read-SetupFactoryDataString $Bytes $Offset Small }
+  $ShortcutLocations = @()
+  if ($CreateAppFolderShortcut) { $ShortcutLocations += 'ApplicationShortcutFolder' }
+  if ($CreateDesktopShortcut) { $ShortcutLocations += 'Desktop' }
+  $LegacyOperatingSystemPolicy = Get-SetupFactoryLegacyOperatingSystemPolicy -Generation Legacy5 -Mask ([uint32]$LegacyOperatingSystemMask)
+  $Policy = ConvertTo-SetupFactoryFilePolicy -Values @{
+    UseTrueVersion = $UseTrueVersion; ProductVersionMS = [uint32]$ProductVersionMS; ProductVersionLS = [uint32]$ProductVersionLS; FileVersionMS = [uint32]$FileVersionMS; FileVersionLS = [uint32]$FileVersionLS; FileDateMS = [uint32]$FileDateMS; FileDateLS = [uint32]$FileDateLS
+    OverwriteMode = [byte]$OverwriteMode; CreateBackup = $CreateBackup; ProtectFile = $ProtectFile; ShortcutLocations = [string[]]$ShortcutLocations; UseExternalIcon = $UseExternalIcon; IconIndex = [uint32]$IconIndex; ShortcutWindowMode = [byte]$ShortcutWindowMode
+    RegisterTrueTypeFont = $RegisterTrueTypeFont; RegisterWithDllRegisterServer = $RegisterWithDllRegisterServer; RegisterTypeLibrary = $RegisterTypeLibrary; SuppressInUseNotice = $SuppressInUseNotice; UseOriginalAttributes = $UseOriginalAttributes; ForcedAttributes = [uint32]$ForcedAttributes
+    DisableCrcCheck = $DisableCrcCheck; NeverRemove = $NeverRemove; SharedSystemFile = $SharedSystemFile; StoreOnly = $StoreOnly; PackageSelector = $Components; LegacyOperatingSystemMask = [uint32]$LegacyOperatingSystemMask; LegacyOperatingSystemPolicy = $LegacyOperatingSystemPolicy; LegacyLanguageCondition = [uint32]$LegacyLanguageCondition; LegacyAdvancedConditions = $LegacyAdvancedConditions.ToArray()
+  }
   ConvertTo-SetupFactoryInstalledFileRecord -Values @{
-    FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; DestinationPath = $Destination; StorageClass = $StorageClass; Title = $Title; Components = $Components
+    FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; DestinationPath = $Destination; StorageClass = $StorageClass; Components = $Components
+    ShortcutDescription = $ShortcutDescription; ShortcutArguments = $ShortcutArguments; ShortcutWorkingDirectory = $ShortcutWorkingDirectory; IconPath = $IconPath; FontRegistryName = $FontRegistryName; Policy = $Policy
     PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; RecordOffset = $Start
+    Attributes = $UseOriginalAttributes ? [uint32]$OriginalAttributes : [uint32]$ForcedAttributes
+    CreationTime = if ($CreationTime) { [DateTimeOffset]::FromUnixTimeSeconds($CreationTime).LocalDateTime } else { $null }
     LastWriteTime = if ($Timestamp) { [DateTimeOffset]::FromUnixTimeSeconds($Timestamp).LocalDateTime } else { $null }
   }
 }
@@ -1597,35 +2876,69 @@ function Read-SetupFactoryFileRecord6 {
   $null = Read-SetupFactoryDataString $Bytes $Offset Small
   $StorageClass = Read-SetupFactoryDataString $Bytes $Offset Small
   $ExpandedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 9
+  $OriginalAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreationTime = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $null = Read-SetupFactoryDataInteger $Bytes $Offset 4 # Access time is not manifest evidence.
   $Timestamp = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 25
+  $UseTrueVersion = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseTrueVersion'
+  $ProductVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ProductVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Destination = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 5
-  $Title = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 5
+  $OverwriteMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreateBackup = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateBackup'
+  $ProtectFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'ProtectFile'
+  $CreateAppFolderShortcut = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateAppFolderShortcut'
+  $CreateDesktopShortcut = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateDesktopShortcut'
+  $ShortcutDescription = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutArguments = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutWorkingDirectory = Read-SetupFactoryDataString $Bytes $Offset Small
+  $UseExternalIcon = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseExternalIcon'
+  $IconPath = Read-SetupFactoryDataString $Bytes $Offset Small
+  $IconIndex = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ShortcutWindowMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
   $Components = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 3
-  $IsCompressed = (Read-SetupFactoryDataInteger $Bytes $Offset 1) -ne 0
-  Move-SetupFactoryDataOffset $Bytes $Offset 7
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $OptionCount = Read-SetupFactoryDataInteger $Bytes $Offset 2
-  if ($OptionCount -gt 64) { throw 'The Setup Factory 6 file option count exceeds the configured limit' }
-  for ($Index = 0; $Index -lt $OptionCount; $Index++) { $null = Read-SetupFactoryDataString $Bytes $Offset Small }
+  $RegisterTrueTypeFont = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTrueTypeFont'
+  $FontRegistryName = Read-SetupFactoryDataString $Bytes $Offset Small
+  $RegisterWithDllRegisterServer = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterWithDllRegisterServer'
+  $RegisterTypeLibrary = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTypeLibrary'
+  $SuppressInUseNotice = Read-SetupFactoryDataBoolean $Bytes $Offset 'SuppressInUseNotice'
+  $IsCompressed = Read-SetupFactoryDataBoolean $Bytes $Offset 'Compress'
+  $UseOriginalAttributes = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseOriginalAttributes'
+  $ForcedAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $NeverRemove = Read-SetupFactoryDataBoolean $Bytes $Offset 'NeverRemove'
+  $SharedSystemFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'SharedSystemFile'
+  $LegacyCondition = Read-SetupFactoryDataString $Bytes $Offset Small
+  $LegacyInstallType = Read-SetupFactoryDataString $Bytes $Offset Small
+  $LegacySelectionValues = Read-SetupFactoryDataStringList $Bytes $Offset 64 'file option'
   $PackedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Crc32 = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 37
+  $StoreOnly = Read-SetupFactoryDataBoolean $Bytes $Offset 'StoreOnly'
+  $LegacyTrailerValues = [uint32[]]::new(8)
+  for ($Index = 0; $Index -lt $LegacyTrailerValues.Count; $Index++) { $LegacyTrailerValues[$Index] = [uint32](Read-SetupFactoryDataInteger $Bytes $Offset 4) }
+  $DisableCrcCheck = [bool]([byte]$LegacyTrailerValues[4])
+  # These builder-side strings are not projected by the version-6 importer, but parsing them
+  # explicitly keeps the media table aligned when they are not empty.
+  for ($Index = 0; $Index -lt 4; $Index++) { $null = Read-SetupFactoryDataString $Bytes $Offset Small }
+  $ShortcutLocations = @()
+  if ($CreateAppFolderShortcut) { $ShortcutLocations += 'ApplicationShortcutFolder' }
+  if ($CreateDesktopShortcut) { $ShortcutLocations += 'Desktop' }
+  $Policy = ConvertTo-SetupFactoryFilePolicy -Values @{
+    UseTrueVersion = $UseTrueVersion; ProductVersionMS = [uint32]$ProductVersionMS; ProductVersionLS = [uint32]$ProductVersionLS; FileVersionMS = [uint32]$FileVersionMS; FileVersionLS = [uint32]$FileVersionLS; FileDateMS = [uint32]$FileDateMS; FileDateLS = [uint32]$FileDateLS
+    OverwriteMode = [byte]$OverwriteMode; CreateBackup = $CreateBackup; ProtectFile = $ProtectFile; ShortcutLocations = [string[]]$ShortcutLocations; UseExternalIcon = $UseExternalIcon; IconIndex = [uint32]$IconIndex; ShortcutWindowMode = [byte]$ShortcutWindowMode
+    RegisterTrueTypeFont = $RegisterTrueTypeFont; RegisterWithDllRegisterServer = $RegisterWithDllRegisterServer; RegisterTypeLibrary = $RegisterTypeLibrary; SuppressInUseNotice = $SuppressInUseNotice; UseOriginalAttributes = $UseOriginalAttributes; ForcedAttributes = [uint32]$ForcedAttributes
+    DisableCrcCheck = $DisableCrcCheck; NeverRemove = $NeverRemove; SharedSystemFile = $SharedSystemFile; RuntimeCondition = $LegacyCondition; PackageSelector = $LegacyInstallType; StoreOnly = $StoreOnly; LegacySelectionValues = [string[]]$LegacySelectionValues
+  }
   $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
   ConvertTo-SetupFactoryInstalledFileRecord -Values @{
-    FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; DestinationPath = $Destination; StorageClass = $StorageClass; Title = $Title; Components = $Components
+    FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; DestinationPath = $Destination; StorageClass = $StorageClass; Components = $Components; Condition = $LegacyCondition; InstallType = $LegacyInstallType
+    ShortcutDescription = $ShortcutDescription; ShortcutArguments = $ShortcutArguments; ShortcutWorkingDirectory = $ShortcutWorkingDirectory; IconPath = $IconPath; FontRegistryName = $FontRegistryName; Policy = $Policy
     PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; RecordOffset = $Start
+    Attributes = $UseOriginalAttributes ? [uint32]$OriginalAttributes : [uint32]$ForcedAttributes
+    CreationTime = if ($CreationTime) { [DateTimeOffset]::FromUnixTimeSeconds($CreationTime).LocalDateTime } else { $null }
     LastWriteTime = if ($Timestamp) { [DateTimeOffset]::FromUnixTimeSeconds($Timestamp).LocalDateTime } else { $null }
   }
 }
@@ -1643,50 +2956,81 @@ function Read-SetupFactoryFileRecord7 {
   param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
 
   $Start = [long]$Offset.Value
-  # Setup Factory 7 serializes this opaque prefix with every record. Version 8
-  # moved the corresponding five bytes to the table header instead.
-  Move-SetupFactoryDataOffset $Bytes $Offset 5
+  $RecordSchema = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  if ($RecordSchema -ne 1) { throw "Unsupported Setup Factory 7 CSetupFileData schema '$RecordSchema'" }
+  # This byte is CArchive object-reference framing serialized before CSetupFileData fields. It is
+  # validated as a Boolean but does not describe installation policy for the payload.
+  $null = Read-SetupFactoryDataBoolean $Bytes $Offset 'FieldReference'
   $SourceFile = Read-SetupFactoryDataString $Bytes $Offset Small
   $FileName = Read-SetupFactoryDataString $Bytes $Offset Small
   $SourceDirectory = Read-SetupFactoryDataString $Bytes $Offset Small
   $null = Read-SetupFactoryDataString $Bytes $Offset Small
   $StorageClass = Read-SetupFactoryDataString $Bytes $Offset Small
   $Description = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
+  $Recurse = Read-SetupFactoryDataBoolean $Bytes $Offset 'Recurse'
+  $MatchMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
   $ExpandedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 9
+  $OriginalAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreationTime = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $null = Read-SetupFactoryDataInteger $Bytes $Offset 4 # Access time is not manifest evidence.
   $Timestamp = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 25
+  $UseTrueVersion = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseTrueVersion'
+  $ProductVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ProductVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Destination = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 8
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $Title = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 8
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 3
-  $IsCompressed = (Read-SetupFactoryDataInteger $Bytes $Offset 1) -ne 0
-  Move-SetupFactoryDataOffset $Bytes $Offset 12
-  $Flags = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  Move-SetupFactoryDataOffset $Bytes $Offset 13
-  if ($Flags -band 1) { $null = Read-SetupFactoryDataInteger $Bytes $Offset 2 }
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 2
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $Components = Read-SetupFactoryDataString $Bytes $Offset Small
-  for ($Index = 0; $Index -lt 3; $Index++) { $null = Read-SetupFactoryDataString $Bytes $Offset Small }
+  $OverwriteMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreateBackup = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateBackup'
+  $ProtectFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'ProtectFile'
+  $ShortcutFlags = [bool[]]::new(7)
+  foreach ($Index in 0..6) { $ShortcutFlags[$Index] = Read-SetupFactoryDataBoolean $Bytes $Offset "ShortcutLocation[$Index]" }
+  $ShortcutLocation = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutComment = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutDescription = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutArguments = Read-SetupFactoryDataString $Bytes $Offset Small
+  $ShortcutWorkingDirectory = Read-SetupFactoryDataString $Bytes $Offset Small
+  $UseExternalIcon = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseExternalIcon'
+  $IconPath = Read-SetupFactoryDataString $Bytes $Offset Small
+  $IconIndex = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ShortcutWindowMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $ShortcutHotKey = Read-SetupFactoryDataInteger $Bytes $Offset 2
+  $RegisterTrueTypeFont = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTrueTypeFont'
+  $FontRegistryName = Read-SetupFactoryDataString $Bytes $Offset Small
+  $RegisterWithDllRegisterServer = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterWithDllRegisterServer'
+  $RegisterTypeLibrary = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTypeLibrary'
+  $SuppressInUseNotice = Read-SetupFactoryDataBoolean $Bytes $Offset 'SuppressInUseNotice'
+  $IsCompressed = Read-SetupFactoryDataBoolean $Bytes $Offset 'Compress'
+  $UseOriginalAttributes = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseOriginalAttributes'
+  $ForcedAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $DisableCrcCheck = Read-SetupFactoryDataBoolean $Bytes $Offset 'DisableCrcCheck'
+  $InstallOrder = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $NeverRemove = Read-SetupFactoryDataBoolean $Bytes $Offset 'NeverRemove'
+  $SharedSystemFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'SharedSystemFile'
+  $OperatingSystemConditions = Read-SetupFactoryDataWordArray $Bytes $Offset 64 'operating-system condition'
+  $Condition = Read-SetupFactoryDataString $Bytes $Offset Small
+  $BuildConfigurations = Read-SetupFactoryDataStringList $Bytes $Offset 128 'build-configuration'
+  $InstallType = Read-SetupFactoryDataString $Bytes $Offset Small
+  $Packages = Read-SetupFactoryDataStringList $Bytes $Offset 4096 'file package'
+  $Notes = Read-SetupFactoryDataString $Bytes $Offset Small
   $PackedSize = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Crc32 = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  $null = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $StoreOnly = Read-SetupFactoryDataBoolean $Bytes $Offset 'StoreOnly'
+  $ShortcutLocationNames = 'StartMenuRoot', 'StartMenuPrograms', 'ApplicationShortcutFolder', 'Startup', 'Desktop', 'QuickLaunch', 'Custom'
+  $ShortcutLocations = for ($Index = 0; $Index -lt $ShortcutFlags.Count; $Index++) { if ($ShortcutFlags[$Index]) { $ShortcutLocationNames[$Index] } }
+  $Policy = ConvertTo-SetupFactoryFilePolicy -Values @{
+    Recurse = $Recurse; MatchMode = [byte]$MatchMode; UseTrueVersion = $UseTrueVersion; ProductVersionMS = [uint32]$ProductVersionMS; ProductVersionLS = [uint32]$ProductVersionLS; FileVersionMS = [uint32]$FileVersionMS; FileVersionLS = [uint32]$FileVersionLS; FileDateMS = [uint32]$FileDateMS; FileDateLS = [uint32]$FileDateLS
+    OverwriteMode = [byte]$OverwriteMode; CreateBackup = $CreateBackup; ProtectFile = $ProtectFile; ShortcutLocations = [string[]]$ShortcutLocations; UseExternalIcon = $UseExternalIcon; IconIndex = [uint32]$IconIndex; ShortcutWindowMode = [byte]$ShortcutWindowMode; ShortcutHotKey = [uint16]$ShortcutHotKey
+    RegisterTrueTypeFont = $RegisterTrueTypeFont; RegisterWithDllRegisterServer = $RegisterWithDllRegisterServer; RegisterTypeLibrary = $RegisterTypeLibrary; SuppressInUseNotice = $SuppressInUseNotice; UseOriginalAttributes = $UseOriginalAttributes; ForcedAttributes = [uint32]$ForcedAttributes
+    DisableCrcCheck = $DisableCrcCheck; InstallOrder = [uint32]$InstallOrder; NeverRemove = $NeverRemove; SharedSystemFile = $SharedSystemFile; OperatingSystemConditions = [uint16[]]$OperatingSystemConditions; RuntimeCondition = $Condition; BuildConfigurations = [string[]]$BuildConfigurations; PackageSelector = $InstallType; StoreOnly = $StoreOnly
+  }
   ConvertTo-SetupFactoryInstalledFileRecord -Values @{
-    FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; Description = $Description; DestinationPath = $Destination; StorageClass = $StorageClass; Title = $Title; Components = $Components
-    PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; RecordOffset = $Start
+    FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; Description = $Description; DestinationPath = $Destination; StorageClass = $StorageClass; Condition = $Condition; InstallType = $InstallType; Packages = [string[]]$Packages; Notes = $Notes
+    ShortcutLocation = $ShortcutLocation; ShortcutComment = $ShortcutComment; ShortcutDescription = $ShortcutDescription; ShortcutArguments = $ShortcutArguments; ShortcutWorkingDirectory = $ShortcutWorkingDirectory; IconPath = $IconPath; FontRegistryName = $FontRegistryName; Policy = $Policy
+    PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; RecordOffset = $Start; Attributes = $UseOriginalAttributes ? [uint32]$OriginalAttributes : [uint32]$ForcedAttributes
+    CreationTime = if ($CreationTime) { [DateTimeOffset]::FromUnixTimeSeconds($CreationTime).LocalDateTime } else { $null }
     LastWriteTime = if ($Timestamp) { [DateTimeOffset]::FromUnixTimeSeconds($Timestamp).LocalDateTime } else { $null }
   }
 }
@@ -1699,17 +3043,17 @@ function Read-SetupFactoryFileRecord8Plus {
     Complete decompressed irsetup.dat bytes.
   .PARAMETER Offset
     Mutable record offset.
-  .PARAMETER DestinationPadding
-    Observed fixed field width immediately after DestinationPath. Candidate values are validated against the complete table.
-  .PARAMETER CompressionPrefixLength
-    Reserved bytes immediately before the compression flags. Setup Factory 10 adds one byte to the earlier layout.
+  .PARAMETER DestinationPolicyLength
+    Number of serialized destination and shortcut-location policy bytes. Setup Factory 9.1.1 and later add StartScreenPinning as the eleventh byte.
+  .PARAMETER HasAppUserModelID
+    Indicates that the record serializes AppUserModelID between the shortcut hot key and TrueType-font policy.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][byte[]]$Bytes,
     [Parameter(Mandatory)][ref]$Offset,
-    [Parameter(Mandatory)][ValidateSet(10, 11)][int]$DestinationPadding,
-    [Parameter(Mandatory)][ValidateSet(0, 1)][int]$CompressionPrefixLength
+    [Parameter(Mandatory)][ValidateSet(10, 11)][int]$DestinationPolicyLength,
+    [Parameter(Mandatory)][bool]$HasAppUserModelID
   )
 
   $Start = [long]$Offset.Value
@@ -1719,52 +3063,82 @@ function Read-SetupFactoryFileRecord8Plus {
   $null = Read-SetupFactoryDataString $Bytes $Offset Small
   $StorageClass = Read-SetupFactoryDataString $Bytes $Offset Small
   $Description = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 2
+  $Recurse = Read-SetupFactoryDataBoolean $Bytes $Offset 'Recurse'
+  $MatchMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
   $ExpandedSize = Read-SetupFactoryDataInteger $Bytes $Offset 8
   $OriginalAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  Move-SetupFactoryDataOffset $Bytes $Offset 4
+  $CreationTimeMarker = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  if ($CreationTimeMarker -ne 2147483658L) { throw 'The Setup Factory creation-time marker is invalid' }
   $CreationTime = Read-SetupFactoryDataInteger $Bytes $Offset 8
-  Move-SetupFactoryDataOffset $Bytes $Offset 16
+  $AccessTimeMarker = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  if ($AccessTimeMarker -ne 2147483658L) { throw 'The Setup Factory access-time marker is invalid' }
+  $null = Read-SetupFactoryDataInteger $Bytes $Offset 8 # Access time is not manifest evidence.
+  $LastWriteTimeMarker = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  if ($LastWriteTimeMarker -ne 2147483658L) { throw 'The Setup Factory modification-time marker is invalid' }
   $LastWriteTime = Read-SetupFactoryDataInteger $Bytes $Offset 8
-  Move-SetupFactoryDataOffset $Bytes $Offset 25
+  $UseTrueVersion = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseTrueVersion'
+  $ProductVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ProductVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileVersionLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateMS = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $FileDateLS = Read-SetupFactoryDataInteger $Bytes $Offset 4
   $Destination = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset $DestinationPadding
+  $OverwriteMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $CreateBackup = Read-SetupFactoryDataBoolean $Bytes $Offset 'CreateBackup'
+  $ProtectFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'ProtectFile'
+  $ShortcutFlags = [bool[]]::new(7)
+  foreach ($Index in 0..6) { $ShortcutFlags[$Index] = Read-SetupFactoryDataBoolean $Bytes $Offset "ShortcutLocation[$Index]" }
+  $StartScreenPinning = if ($DestinationPolicyLength -eq 11) { Read-SetupFactoryDataBoolean $Bytes $Offset 'StartScreenPinning' } else { $null }
   $ShortcutLocation = Read-SetupFactoryDataString $Bytes $Offset Small
   $ShortcutComment = Read-SetupFactoryDataString $Bytes $Offset Small
   $ShortcutDescription = Read-SetupFactoryDataString $Bytes $Offset Small
   $ShortcutArguments = Read-SetupFactoryDataString $Bytes $Offset Small
   $ShortcutWorkingDirectory = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 1
+  $UseExternalIcon = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseExternalIcon'
   $IconPath = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 8
+  $IconIndex = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $ShortcutWindowMode = Read-SetupFactoryDataInteger $Bytes $Offset 1
+  $ShortcutHotKey = Read-SetupFactoryDataInteger $Bytes $Offset 2
+  $AppUserModelID = if ($HasAppUserModelID) { Read-SetupFactoryDataString $Bytes $Offset Small } else { $null }
+  $RegisterTrueTypeFont = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTrueTypeFont'
   $FontRegistryName = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 3
-  Move-SetupFactoryDataOffset $Bytes $Offset $CompressionPrefixLength
-  $IsCompressed = (Read-SetupFactoryDataInteger $Bytes $Offset 1) -ne 0
-  $UseOriginalAttributes = (Read-SetupFactoryDataInteger $Bytes $Offset 1) -ne 0
-  $ForcedAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 1
-  Move-SetupFactoryDataOffset $Bytes $Offset 10
-  $SkipValue = Read-SetupFactoryDataInteger $Bytes $Offset 2
-  if ($SkipValue -gt 32767) { throw 'The Setup Factory file option vector exceeds the configured limit' }
-  Move-SetupFactoryDataOffset $Bytes $Offset ($SkipValue * 2)
+  $RegisterWithDllRegisterServer = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterWithDllRegisterServer'
+  $RegisterTypeLibrary = Read-SetupFactoryDataBoolean $Bytes $Offset 'RegisterTypeLibrary'
+  $SuppressInUseNotice = Read-SetupFactoryDataBoolean $Bytes $Offset 'SuppressInUseNotice'
+  $IsCompressed = Read-SetupFactoryDataBoolean $Bytes $Offset 'Compress'
+  $UseOriginalAttributes = Read-SetupFactoryDataBoolean $Bytes $Offset 'UseOriginalAttributes'
+  $ForcedAttributes = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $DisableCrcCheck = Read-SetupFactoryDataBoolean $Bytes $Offset 'DisableCrcCheck'
+  $InstallOrder = Read-SetupFactoryDataInteger $Bytes $Offset 4
+  $NeverRemove = Read-SetupFactoryDataBoolean $Bytes $Offset 'NeverRemove'
+  $SharedSystemFile = Read-SetupFactoryDataBoolean $Bytes $Offset 'SharedSystemFile'
+  $OperatingSystemConditions = Read-SetupFactoryDataWordArray $Bytes $Offset 128 'operating-system condition'
   $Condition = Read-SetupFactoryDataString $Bytes $Offset Small
-  Move-SetupFactoryDataOffset $Bytes $Offset 2
+  $BuildConfigurations = Read-SetupFactoryDataStringList $Bytes $Offset 128 'build-configuration'
   $InstallType = Read-SetupFactoryDataString $Bytes $Offset Small
-  $null = Read-SetupFactoryDataString $Bytes $Offset Small
-  $PackageCount = Read-SetupFactoryDataInteger $Bytes $Offset 2
-  if ($PackageCount -gt 4096) { throw 'The Setup Factory file package count exceeds the configured limit' }
-  $Packages = [Collections.Generic.List[string]]::new()
-  for ($Index = 0; $Index -lt $PackageCount; $Index++) { $Packages.Add((Read-SetupFactoryDataString $Bytes $Offset Small)) }
+  $Packages = Read-SetupFactoryDataStringList $Bytes $Offset 4096 'file package'
   $Notes = Read-SetupFactoryDataString $Bytes $Offset Small
   $PackedSize = Read-SetupFactoryDataInteger $Bytes $Offset 8
   $Crc32 = Read-SetupFactoryDataInteger $Bytes $Offset 4
-  Move-SetupFactoryDataOffset $Bytes $Offset 8
+  $StoreOnly = Read-SetupFactoryDataBoolean $Bytes $Offset 'StoreOnly'
+  $ShortcutLocationNames = 'StartMenuRoot', 'StartMenuPrograms', 'ApplicationShortcutFolder', 'Startup', 'Desktop', 'QuickLaunch', 'Custom'
+  $ShortcutLocations = for ($Index = 0; $Index -lt $ShortcutFlags.Count; $Index++) { if ($ShortcutFlags[$Index]) { $ShortcutLocationNames[$Index] } }
+  $PolicyValues = @{
+    Recurse = $Recurse; MatchMode = [byte]$MatchMode; UseTrueVersion = $UseTrueVersion; ProductVersionMS = [uint32]$ProductVersionMS; ProductVersionLS = [uint32]$ProductVersionLS; FileVersionMS = [uint32]$FileVersionMS; FileVersionLS = [uint32]$FileVersionLS; FileDateMS = [uint32]$FileDateMS; FileDateLS = [uint32]$FileDateLS
+    OverwriteMode = [byte]$OverwriteMode; CreateBackup = $CreateBackup; ProtectFile = $ProtectFile; ShortcutLocations = [string[]]$ShortcutLocations; UseExternalIcon = $UseExternalIcon; IconIndex = [uint32]$IconIndex; ShortcutWindowMode = [byte]$ShortcutWindowMode; ShortcutHotKey = [uint16]$ShortcutHotKey
+    RegisterTrueTypeFont = $RegisterTrueTypeFont; RegisterWithDllRegisterServer = $RegisterWithDllRegisterServer; RegisterTypeLibrary = $RegisterTypeLibrary; SuppressInUseNotice = $SuppressInUseNotice; UseOriginalAttributes = $UseOriginalAttributes; ForcedAttributes = [uint32]$ForcedAttributes
+    DisableCrcCheck = $DisableCrcCheck; InstallOrder = [uint32]$InstallOrder; NeverRemove = $NeverRemove; SharedSystemFile = $SharedSystemFile; OperatingSystemConditions = [uint16[]]$OperatingSystemConditions; RuntimeCondition = $Condition; BuildConfigurations = [string[]]$BuildConfigurations; PackageSelector = $InstallType; StoreOnly = $StoreOnly
+  }
+  if ($DestinationPolicyLength -eq 11) { $PolicyValues['StartScreenPinning'] = $StartScreenPinning }
+  if ($HasAppUserModelID) { $PolicyValues['AppUserModelID'] = $AppUserModelID }
+  $Policy = ConvertTo-SetupFactoryFilePolicy -Values $PolicyValues
   ConvertTo-SetupFactoryInstalledFileRecord -Values @{
     FileName = $FileName; SourcePath = $SourceFile; SourceDirectory = $SourceDirectory; Description = $Description; DestinationPath = $Destination; StorageClass = $StorageClass; Condition = $Condition
-    InstallType = $InstallType; Packages = $Packages.ToArray(); Notes = $Notes; ShortcutLocation = $ShortcutLocation; ShortcutComment = $ShortcutComment
+    InstallType = $InstallType; Packages = [string[]]$Packages; Notes = $Notes; ShortcutLocation = $ShortcutLocation; ShortcutComment = $ShortcutComment
     ShortcutDescription = $ShortcutDescription; ShortcutArguments = $ShortcutArguments; ShortcutWorkingDirectory = $ShortcutWorkingDirectory; IconPath = $IconPath; FontRegistryName = $FontRegistryName
     PackedSize = $PackedSize; ExpandedSize = $ExpandedSize; Crc32 = $Crc32; IsCompressed = $IsCompressed; RecordOffset = $Start
-    Attributes = $UseOriginalAttributes ? $OriginalAttributes : $ForcedAttributes
+    Attributes = $UseOriginalAttributes ? [uint32]$OriginalAttributes : [uint32]$ForcedAttributes; Policy = $Policy
     CreationTime = if ($CreationTime) { [DateTimeOffset]::FromUnixTimeSeconds($CreationTime).LocalDateTime } else { $null }
     LastWriteTime = if ($LastWriteTime) { [DateTimeOffset]::FromUnixTimeSeconds($LastWriteTime).LocalDateTime } else { $null }
   }
@@ -1841,8 +3215,8 @@ function Get-SetupFactoryDependencyFileCatalog {
       $PayloadOffset = $PayloadDataOffset
       $Entries = [Collections.Generic.List[object]]::new()
       for ($Index = 0; $Index -lt $Count; $Index++) {
-        # Modern Setup Factory serializes four opaque bytes, the source path, two
-        # 64-bit sizes, the source path again, a 16-bit flag, and a build label.
+        # CDependencyFile begins with a four-byte object/version field. It is structural framing;
+        # prerequisite execution policy is not inferred from this value.
         Move-SetupFactoryDataOffset $Bytes $Cursor 4
         $SourcePath = Read-SetupFactoryDataString $Bytes $Cursor Small
         $ExpandedSize = Read-SetupFactoryDataInteger $Bytes $Cursor 8
@@ -1861,7 +3235,10 @@ function Get-SetupFactoryDependencyFileCatalog {
             IsCompressed = $PackedSize -ne $ExpandedSize; IsXored = $false; IsEmbedded = $true; Crc32 = [uint32]0
           })
         $PayloadOffset += $PackedSize
-        if ($Index -lt $Count - 1) { Move-SetupFactoryDataOffset $Bytes $Cursor 2 }
+        if ($Index -lt $Count - 1) {
+          # MFC object-list framing inserts a two-byte separator between dependency records.
+          Move-SetupFactoryDataOffset $Bytes $Cursor 2
+        }
       }
       $Candidates.Add([pscustomobject][ordered]@{ Entries = $Entries.ToArray(); IsComplete = $true; PayloadDataEndOffset = $PayloadOffset; Error = $null })
     } catch {
@@ -1915,29 +3292,44 @@ function Get-SetupFactoryInstalledFileCatalog {
       if ($Count -gt $Script:SetupFactoryMaximumEntries -or $Sentinel -ne 0xFFFF -or $ParsedClassName -cne $ClassName) { continue }
       $LayoutCandidates = if ($ProfileId -eq 'setup-factory-8-plus') {
         @(
-          [pscustomobject]@{ DestinationPadding = 10; CompressionPrefixLength = 0 }
-          [pscustomobject]@{ DestinationPadding = 11; CompressionPrefixLength = 0 }
-          [pscustomobject]@{ DestinationPadding = 11; CompressionPrefixLength = 1 }
+          [pscustomobject]@{ DestinationPolicyLength = 10; HasAppUserModelID = $false }
+          [pscustomobject]@{ DestinationPolicyLength = 11; HasAppUserModelID = $false }
+          [pscustomobject]@{ DestinationPolicyLength = 11; HasAppUserModelID = $true }
         )
       } else {
-        @([pscustomobject]@{ DestinationPadding = 0; CompressionPrefixLength = 0 })
+        @([pscustomobject]@{ DestinationPolicyLength = 0; HasAppUserModelID = $false })
       }
       foreach ($Layout in $LayoutCandidates) {
         try {
           $Cursor = [ref]([long]$HeaderOffset.Value)
           $Records = [Collections.Generic.List[object]]::new()
-          if ($ProfileId -eq 'setup-factory-8-plus') { Move-SetupFactoryDataOffset $Bytes $Cursor 5 }
+          if ($ProfileId -eq 'setup-factory-8-plus') {
+            # The first modern record follows the table's class descriptor directly. Later
+            # records add a two-byte MFC class reference before the same schema/field-reference pair.
+            $RecordSchema = Read-SetupFactoryDataInteger $Bytes $Cursor 4
+            if ($RecordSchema -ne 1) { throw "Unsupported Setup Factory CSetupFileData schema '$RecordSchema'" }
+            $null = Read-SetupFactoryDataBoolean $Bytes $Cursor 'FieldReference'
+          }
           for ($Index = 0; $Index -lt $Count; $Index++) {
             $Record = switch ($ProfileId) {
               'setup-factory-4' { Read-SetupFactoryFileRecord4 $Bytes $Cursor $SubType }
               'setup-factory-5' { Read-SetupFactoryFileRecord5 $Bytes $Cursor }
               'setup-factory-6' { Read-SetupFactoryFileRecord6 $Bytes $Cursor }
               'setup-factory-7' { Read-SetupFactoryFileRecord7 $Bytes $Cursor }
-              'setup-factory-8-plus' { Read-SetupFactoryFileRecord8Plus $Bytes $Cursor $Layout.DestinationPadding $Layout.CompressionPrefixLength }
+              'setup-factory-8-plus' { Read-SetupFactoryFileRecord8Plus $Bytes $Cursor $Layout.DestinationPolicyLength $Layout.HasAppUserModelID }
               default { throw "Unsupported Setup Factory installed-file profile '$ProfileId'" }
             }
             $Records.Add($Record)
-            if ($Index -lt $Count - 1 -and $ProfileId -in 'setup-factory-4', 'setup-factory-5', 'setup-factory-7') { Move-SetupFactoryDataOffset $Bytes $Cursor 2 }
+            if ($Index -lt $Count - 1 -and $ProfileId -in 'setup-factory-4', 'setup-factory-5', 'setup-factory-7') {
+              # These MFC generations serialize a two-byte object-list separator between records.
+              Move-SetupFactoryDataOffset $Bytes $Cursor 2
+            } elseif ($Index -lt $Count - 1 -and $ProfileId -eq 'setup-factory-8-plus') {
+              $ClassReference = Read-SetupFactoryDataInteger $Bytes $Cursor 2
+              if (($ClassReference -band 0x8000) -eq 0) { throw 'The Setup Factory CSetupFileData class reference is malformed' }
+              $RecordSchema = Read-SetupFactoryDataInteger $Bytes $Cursor 4
+              if ($RecordSchema -ne 1) { throw "Unsupported Setup Factory CSetupFileData schema '$RecordSchema'" }
+              $null = Read-SetupFactoryDataBoolean $Bytes $Cursor 'FieldReference'
+            }
           }
 
           $PayloadOffset = $PayloadDataOffset
@@ -1966,8 +3358,8 @@ function Get-SetupFactoryInstalledFileCatalog {
           $CanExtract = $UnavailableEntryCount -eq 0
           $Candidates.Add([pscustomobject][ordered]@{
               Entries = $Projected.ToArray(); IsComplete = $true; CanExtract = $CanExtract; CanExtractPartial = $ExtractableEntryCount -gt 0 -and -not $CanExtract; ExtractableEntryCount = $ExtractableEntryCount; UnavailableEntryCount = $UnavailableEntryCount; ClassName = $ClassName; ClassOffset = $Marker - 8
-              RecordEndOffset = $Cursor.Value; DestinationPadding = $Layout.DestinationPadding ? $Layout.DestinationPadding : $null
-              CompressionPrefixLength = $Layout.CompressionPrefixLength
+              RecordEndOffset = $Cursor.Value; DestinationPolicyLength = $Layout.DestinationPolicyLength ? $Layout.DestinationPolicyLength : $null
+              HasAppUserModelID = [bool]$Layout.HasAppUserModelID
               DeclaredPayloadBytes = $DeclaredPayloadBytes; PayloadDataEndOffset = $ExtractableEntryCount ? $PayloadOffset : $null; Error = $null
             })
         } catch { $Errors.Add($_.Exception.Message) }
@@ -1975,7 +3367,7 @@ function Get-SetupFactoryInstalledFileCatalog {
     } catch { $Errors.Add($_.Exception.Message) }
   }
 
-  $UniqueCandidates = @($Candidates | Sort-Object ClassOffset, DestinationPadding, CompressionPrefixLength -Unique)
+  $UniqueCandidates = @($Candidates | Sort-Object ClassOffset, DestinationPolicyLength, HasAppUserModelID -Unique)
   if ($UniqueCandidates.Count -eq 1) { return $UniqueCandidates[0] }
   if ($UniqueCandidates.Count -gt 1) {
     # Prefer a layout whose file records map to a bounded sequential payload. If neither
@@ -1985,6 +3377,73 @@ function Get-SetupFactoryInstalledFileCatalog {
     return [pscustomobject][ordered]@{ Entries = @(); IsComplete = $false; CanExtract = $false; CanExtractPartial = $false; ExtractableEntryCount = 0; UnavailableEntryCount = 0; ClassName = $ClassName; DeclaredPayloadBytes = $null; PayloadDataEndOffset = $null; Error = 'Multiple structurally valid installed-file table layouts were found' }
   }
   return [pscustomobject][ordered]@{ Entries = @(); IsComplete = $false; CanExtract = $false; CanExtractPartial = $false; ExtractableEntryCount = 0; UnavailableEntryCount = 0; ClassName = $ClassName; DeclaredPayloadBytes = $null; PayloadDataEndOffset = $null; Error = ($Errors | Select-Object -First 1) }
+}
+
+function Get-SetupFactoryFilePolicySummary {
+  <#
+  .SYNOPSIS
+    Summarize behavior-affecting file policy across a decoded installed-file catalog.
+  .PARAMETER Entry
+    Installed-file records returned by Get-SetupFactoryInstalledFileCatalog.
+  #>
+  [OutputType([pscustomobject])]
+  param ([AllowEmptyCollection()][object[]]$Entry)
+
+  $AskUserOverwrite = [Collections.Generic.List[string]]::new()
+  $UnknownOverwrite = [Collections.Generic.List[string]]::new()
+  $Conditional = [Collections.Generic.List[string]]::new()
+  $SelfRegistering = [Collections.Generic.List[string]]::new()
+  $FontRegistration = [Collections.Generic.List[string]]::new()
+  $SuppressInUse = [Collections.Generic.List[string]]::new()
+  $NeverRemove = [Collections.Generic.List[string]]::new()
+  $Shared = [Collections.Generic.List[string]]::new()
+  $StoreOnly = [Collections.Generic.List[string]]::new()
+  $Shortcuts = [Collections.Generic.List[string]]::new()
+  $Protected = [Collections.Generic.List[string]]::new()
+  $Backup = [Collections.Generic.List[string]]::new()
+  $CrcDisabled = [Collections.Generic.List[string]]::new()
+
+  foreach ($File in @($Entry)) {
+    if ($null -eq $File.Policy) { continue }
+    $Policy = $File.Policy
+    if ($Policy.OverwritePolicy -ceq 'AskUser') { $AskUserOverwrite.Add($File.Name) }
+    elseif ($null -ne $Policy.OverwriteMode -and $null -eq $Policy.OverwritePolicy) { $UnknownOverwrite.Add($File.Name) }
+
+    $OperatingSystemConditions = @($Policy.OperatingSystemConditions)
+    $HasNonDefaultOperatingSystemCondition = $OperatingSystemConditions.Count -gt 0 -and ($OperatingSystemConditions[0] -ne 0x8000 -or @($OperatingSystemConditions | Select-Object -Skip 1 | Where-Object { $_ -ne 0xFFFF }).Count -gt 0)
+    $HasPackageSelection = -not [string]::IsNullOrWhiteSpace([string]$Policy.PackageSelector) -and $Policy.PackageSelector -cne 'None'
+    $HasLegacyOperatingSystemCondition = $null -ne $Policy.LegacyOperatingSystemPolicy -and $Policy.LegacyOperatingSystemPolicy.IsRestricted
+    $HasLegacyLanguageCondition = $null -ne $Policy.LegacyLanguageCondition -and $Policy.LegacyLanguageCondition -ne 0
+    $HasLegacyAdvancedCondition = @($Policy.LegacyAdvancedConditions).Count -gt 0
+    if (-not [string]::IsNullOrWhiteSpace([string]$Policy.RuntimeCondition) -or $HasNonDefaultOperatingSystemCondition -or $HasPackageSelection -or @($File.Packages).Count -gt 0 -or @($Policy.LegacySelectionValues).Count -gt 0 -or $HasLegacyOperatingSystemCondition -or $HasLegacyLanguageCondition -or $HasLegacyAdvancedCondition) { $Conditional.Add($File.Name) }
+    if ($Policy.RegisterWithDllRegisterServer -or $Policy.RegisterTypeLibrary) { $SelfRegistering.Add($File.Name) }
+    if ($Policy.RegisterTrueTypeFont) { $FontRegistration.Add($File.Name) }
+    if ($Policy.SuppressInUseNotice) { $SuppressInUse.Add($File.Name) }
+    if ($Policy.NeverRemove) { $NeverRemove.Add($File.Name) }
+    if ($Policy.SharedSystemFile) { $Shared.Add($File.Name) }
+    if ($Policy.StoreOnly) { $StoreOnly.Add($File.Name) }
+    if (@($Policy.ShortcutLocations).Count -gt 0) { $Shortcuts.Add($File.Name) }
+    if ($Policy.ProtectFile) { $Protected.Add($File.Name) }
+    if ($Policy.CreateBackup) { $Backup.Add($File.Name) }
+    if ($Policy.DisableCrcCheck) { $CrcDisabled.Add($File.Name) }
+  }
+
+  [pscustomobject][ordered]@{
+    EntryCount                 = @($Entry).Count
+    AskUserOverwriteEntries    = $AskUserOverwrite.ToArray()
+    UnknownOverwriteEntries    = $UnknownOverwrite.ToArray()
+    ConditionalEntries         = $Conditional.ToArray()
+    SelfRegisteringEntries     = $SelfRegistering.ToArray()
+    FontRegistrationEntries    = $FontRegistration.ToArray()
+    SuppressInUseNoticeEntries = $SuppressInUse.ToArray()
+    NeverRemoveEntries         = $NeverRemove.ToArray()
+    SharedSystemFileEntries    = $Shared.ToArray()
+    StoreOnlyEntries           = $StoreOnly.ToArray()
+    ShortcutEntries            = $Shortcuts.ToArray()
+    ProtectedEntries           = $Protected.ToArray()
+    BackupEntries              = $Backup.ToArray()
+    CrcCheckDisabledEntries    = $CrcDisabled.ToArray()
+  }
 }
 
 function Read-SetupFactoryInstalledFileData {
@@ -2062,6 +3521,522 @@ function Test-SetupFactoryLegacyCatalog {
     return $false
   } finally {
     $Stream.Position = $OriginalPosition
+  }
+}
+
+function Import-SetupFactoryCrusherDecoder {
+  <#
+  .SYNOPSIS
+    Load the bounded Crusher LH5 decoder used by Setup Factory 3.1 media.
+  #>
+  if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerParsers.CrusherLh5Decoder').Type) { return }
+  $SourcePath = Join-Path $PSScriptRoot '..\..\Assets\Source\SetupFactory\CrusherLh5Decoder.cs'
+  $null = Import-InstallerManagedSource -Path $SourcePath -TypeName 'Dumplings.InstallerParsers.CrusherLh5Decoder'
+}
+
+function Read-SetupFactory31DuplicatedString {
+  <#
+  .SYNOPSIS
+    Read one Setup Factory 3.1 string whose 16-bit byte length is serialized twice.
+  .PARAMETER Bytes
+    Complete decompressed IRDATA.DAT byte array.
+  .PARAMETER Offset
+    Mutable zero-based cursor. The value advances past both lengths and the string bytes.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Offset)
+
+  $Cursor = [int]$Offset.Value
+  if ($Cursor -lt 0 -or $Cursor + 4 -gt $Bytes.Length) { throw 'A Setup Factory 3.1 string header is truncated' }
+  $FirstLength = [BitConverter]::ToUInt16($Bytes, $Cursor)
+  $SecondLength = [BitConverter]::ToUInt16($Bytes, $Cursor + 2)
+  if ($FirstLength -ne $SecondLength) { throw 'A Setup Factory 3.1 duplicated string length does not match' }
+  if ($FirstLength -gt $Script:SetupFactoryMaximumScriptStringBytes -or $FirstLength -gt $Bytes.Length - $Cursor - 4) { throw 'A Setup Factory 3.1 string exceeds its bounded record' }
+  $Value = ConvertFrom-SetupFactoryText -Bytes $Bytes -Offset ($Cursor + 4) -Count $FirstLength
+  $Offset.Value = $Cursor + 4 + $FirstLength
+  return $Value
+}
+
+function Get-SetupFactory31ArqCatalog {
+  <#
+  .SYNOPSIS
+    Parse the Crusher ARQ archive stored as Setup Factory 3.1 IRDATA.IRD.
+  .PARAMETER Path
+    Path to IRDATA.IRD. Returned offsets are absolute within this file.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force
+  $Stream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
+  $Entries = [Collections.Generic.List[object]]::new()
+  $TotalExpandedBytes = 0L
+  try {
+    while ($true) {
+      $RecordOffset = $Stream.Position
+      if (41 -gt $Stream.Length - $RecordOffset) { throw 'The Setup Factory 3.1 Crusher catalog is truncated' }
+      $Prefix = Read-SetupFactoryExactByte -Stream $Stream -Count 8
+      if (-not (Test-BinarySequence -Left $Prefix[0..3] -Right ([byte[]](0x67, 0x57, 0x04, 0x01)))) { throw "The Setup Factory 3.1 Crusher record at offset $RecordOffset has invalid magic" }
+      $ArchiveVersion = [BitConverter]::ToUInt16($Prefix, 4)
+      if ($ArchiveVersion -ne 0x1230) { throw "Unsupported Setup Factory 3.1 Crusher archive version 0x$($ArchiveVersion.ToString('X4'))" }
+      $NameLength = [BitConverter]::ToUInt16($Prefix, 6)
+      if ($NameLength -gt 260 -or $NameLength -gt $Stream.Length - $Stream.Position - 33) { throw 'A Setup Factory 3.1 Crusher filename is invalid or truncated' }
+      $Name = if ($NameLength) { ConvertFrom-SetupFactoryText -Bytes (Read-SetupFactoryExactByte -Stream $Stream -Count $NameLength) } else { '' }
+      $Descriptor = Read-SetupFactoryExactByte -Stream $Stream -Count 33
+
+      # An empty name is the 41-byte end record. Its other fields are a runtime-owned template and
+      # are deliberately ignored rather than assigned semantics.
+      if ($NameLength -eq 0) {
+        if ($Stream.Position -ne $Stream.Length) { throw 'The Setup Factory 3.1 Crusher archive contains data after its end record' }
+        break
+      }
+      if ([string]::IsNullOrWhiteSpace($Name) -or $Name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw 'A Setup Factory 3.1 Crusher record has an invalid filename' }
+
+      $PackedSize = [long][BitConverter]::ToUInt32($Descriptor, 10)
+      $ExpandedSize = [long][BitConverter]::ToUInt32($Descriptor, 14)
+      $Crc32 = [BitConverter]::ToUInt32($Descriptor, 18)
+      $Method = $Descriptor[22]
+      if ($Method -notin 1, 2) { throw "Setup Factory 3.1 Crusher record '$Name' uses unsupported method $Method" }
+      if ($Method -eq 1 -and $PackedSize -ne $ExpandedSize) { throw "Stored Setup Factory 3.1 Crusher record '$Name' has inconsistent sizes" }
+      if ($PackedSize -gt $Script:SetupFactoryMaximumFileBytes -or $ExpandedSize -gt $Script:SetupFactoryMaximumFileBytes) { throw "Setup Factory 3.1 Crusher record '$Name' exceeds the per-file limit" }
+      if ($PackedSize -gt $Stream.Length - $Stream.Position) { throw "Setup Factory 3.1 Crusher record '$Name' is truncated" }
+      $TotalExpandedBytes += $ExpandedSize
+      if ($TotalExpandedBytes -gt $Script:SetupFactoryMaximumExpandedBytes) { throw 'The Setup Factory 3.1 Crusher catalog exceeds the total expansion limit' }
+
+      $Entries.Add([pscustomobject][ordered]@{
+          Name            = $Name
+          Kind            = $Name -ieq 'IRDATA.DAT' ? 'Metadata' : ($Name -ieq 'IRSETUP.EXE' ? 'Runtime' : ($Name -ieq 'IRUNIN31.EXE' ? 'UninstallerRuntime' : 'ContainerEntry'))
+          SourcePath      = $File.FullName
+          RecordOffset    = $RecordOffset
+          DataOffset      = $Stream.Position
+          PackedSize      = $PackedSize
+          ExpandedSize    = $ExpandedSize
+          Crc32           = [uint32]$Crc32
+          CrcTarget       = 'Packed'
+          Compression     = $Method -eq 1 ? 'Stored' : 'CrusherLh5'
+          CompressionCode = $Method
+          FileMode        = [char]$Descriptor[0]
+          Attributes      = $Descriptor[1]
+          DosDateTime     = [BitConverter]::ToUInt32($Descriptor, 2)
+          IsEmbedded      = $true
+        })
+      $Stream.Position += $PackedSize
+      if ($Entries.Count -gt $Script:SetupFactoryMaximumEntries) { throw 'The Setup Factory 3.1 Crusher catalog exceeds the entry-count limit' }
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+
+  if (@($Entries | Where-Object Name -CEQ 'IRDATA.DAT').Count -ne 1 -or @($Entries | Where-Object Name -CEQ 'IRSETUP.EXE').Count -ne 1) { throw 'The Crusher archive is not a Setup Factory 3.1 bootstrap catalog' }
+  [pscustomobject][ordered]@{
+    Path               = $File.FullName
+    FileLength         = $File.Length
+    ArchiveVersion     = 0x1230
+    Entries            = $Entries.ToArray()
+    TotalExpandedBytes = $TotalExpandedBytes
+  }
+}
+
+function Copy-SetupFactory31EntryData {
+  <#
+  .SYNOPSIS
+    Decode one validated Setup Factory 3.1 ARQ or companion-file record.
+  .PARAMETER Entry
+    Entry returned by Get-SetupFactory31ArqCatalog or Read-SetupFactory31ProjectData.
+  .PARAMETER Destination
+    Caller-owned writable and seekable output stream. It must be empty on entry.
+  .PARAMETER MaximumBytes
+    Maximum permitted expanded output in bytes.
+  #>
+  [OutputType([long])]
+  param ([Parameter(Mandatory)][psobject]$Entry, [Parameter(Mandatory)][IO.Stream]$Destination, [Parameter(Mandatory)][long]$MaximumBytes)
+
+  if (-not $Destination.CanWrite -or -not $Destination.CanSeek -or $Destination.Length -ne 0) { throw 'Setup Factory 3.1 extraction requires an empty writable and seekable destination stream' }
+  if (-not $Entry.SourcePath -or -not (Test-Path -LiteralPath $Entry.SourcePath -PathType Leaf)) { throw "Setup Factory 3.1 source media for '$($Entry.Name)' is unavailable" }
+  if ($Entry.ExpandedSize -gt $MaximumBytes) { throw "Setup Factory 3.1 entry '$($Entry.Name)' exceeds the configured limit" }
+  Import-SetupFactoryCrusherDecoder
+  $Source = [IO.File]::Open($Entry.SourcePath, 'Open', 'Read', 'ReadWrite')
+  try {
+    if ($Entry.CrcTarget -eq 'Packed') {
+      $PackedView = New-BoundedReadStream -Stream $Source -Offset $Entry.DataOffset -Length $Entry.PackedSize -LeaveOpen
+      try { $ActualPackedCrc = Get-BinaryCrc32 -Stream $PackedView -MaximumBytes $Entry.PackedSize }
+      finally { $PackedView.Dispose() }
+      if ($ActualPackedCrc -ne $Entry.Crc32) { throw "Setup Factory 3.1 entry '$($Entry.Name)' failed its packed CRC32 check" }
+    }
+    if ($Entry.Compression -eq 'Stored') {
+      $Source.Position = $Entry.DataOffset
+      $null = Copy-BoundedStream -Source $Source -Destination $Destination -MaximumBytes $MaximumBytes -ExpectedBytes $Entry.ExpandedSize
+    } elseif ($Entry.Compression -eq 'CrusherLh5') {
+      $null = [Dumplings.InstallerParsers.CrusherLh5Decoder]::Decode($Source, $Entry.DataOffset, $Entry.PackedSize, $Destination, $Entry.ExpandedSize, $MaximumBytes)
+    } elseif ($Entry.Compression -eq 'CrusherLh5Extended') {
+      $null = [Dumplings.InstallerParsers.CrusherLh5Decoder]::DecodeSetupFactory31($Source, $Entry.DataOffset, $Entry.PackedSize, $Destination, $Entry.ExpandedSize, $MaximumBytes)
+    } else {
+      throw "Setup Factory 3.1 entry '$($Entry.Name)' has unsupported compression '$($Entry.Compression)'"
+    }
+  } finally {
+    $Source.Dispose()
+  }
+  if ($Destination.Length -ne $Entry.ExpandedSize) { throw "Setup Factory 3.1 entry '$($Entry.Name)' has an unexpected expanded size" }
+  $Destination.Flush()
+  if ($Entry.CrcTarget -ne 'Packed') {
+    $Destination.Position = 0
+    $ActualCrc = Get-BinaryCrc32 -Stream $Destination -MaximumBytes $MaximumBytes
+    if ($ActualCrc -ne $Entry.Crc32) { throw "Setup Factory 3.1 entry '$($Entry.Name)' failed its expanded CRC32 check" }
+  }
+  $Destination.Position = $Destination.Length
+  return $Destination.Length
+}
+
+function Read-SetupFactory31ArqEntryData {
+  <#
+  .SYNOPSIS
+    Materialize one small Setup Factory 3.1 ARQ entry for metadata analysis.
+  .PARAMETER Entry
+    ARQ entry returned by Get-SetupFactory31ArqCatalog.
+  .PARAMETER MaximumBytes
+    Maximum permitted expanded output in bytes.
+  #>
+  [OutputType([byte[]])]
+  param ([Parameter(Mandatory)][psobject]$Entry, [Parameter(Mandatory)][long]$MaximumBytes)
+
+  $Output = [IO.MemoryStream]::new()
+  try {
+    $null = Copy-SetupFactory31EntryData -Entry $Entry -Destination $Output -MaximumBytes $MaximumBytes
+    return , $Output.ToArray()
+  } finally {
+    $Output.Dispose()
+  }
+}
+
+function Read-SetupFactory31ProjectData {
+  <#
+  .SYNOPSIS
+    Decode Setup Factory 3.1 identity and installed-file records from IRDATA.DAT.
+  .PARAMETER Bytes
+    Complete CRC-validated IRDATA.DAT bytes.
+  .PARAMETER MediaRoot
+    Directory containing the companion compressed payload files.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][string]$MediaRoot)
+
+  if ($Bytes.Length -lt 32 -or -not (Test-BinarySequence -Left $Bytes[0..3] -Right ([byte[]](0x3A, 0xD0, 0x00, 0x7B))) -or [BitConverter]::ToUInt32($Bytes, 4) -ne 0x00000000ABCD1234) { throw 'IRDATA.DAT does not contain the Setup Factory 3.1 project header' }
+  $FormatMajor = [BitConverter]::ToUInt16($Bytes, 8)
+  $FormatMinor = [BitConverter]::ToUInt16($Bytes, 10)
+  $FormatRevision = [BitConverter]::ToUInt16($Bytes, 12)
+  if ($FormatMajor -ne 3 -or $FormatMinor -ne 1) { throw "Unsupported multi-file Setup Factory metadata version $FormatMajor.$FormatMinor.$FormatRevision" }
+
+  $ProductMarker = [byte[]](0x3A, 0xD2, 0x00, 0x7B)
+  $ProductOffsets = @(Find-BinaryPattern -Bytes $Bytes -Pattern $ProductMarker -Maximum 2)
+  if ($ProductOffsets.Count -ne 1) { throw 'Setup Factory 3.1 metadata does not contain exactly one product record' }
+  $Cursor = [int]$ProductOffsets[0] + 4
+  $SourceDirectory = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+  $ProductName = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+  $ProgramGroup = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+  $InstallLocation = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+  $SourceDrive = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+  if ($Cursor -ge $Bytes.Length -or $Bytes[$Cursor] -ne 0x7D) { throw 'The Setup Factory 3.1 product record is malformed' }
+
+  $GroupMarker = [byte[]](0x3A, 0x01, 0x80, 0x7B)
+  $GroupOffsets = @(Find-BinaryPattern -Bytes $Bytes -Pattern $GroupMarker -Maximum 2)
+  if ($GroupOffsets.Count -ne 1) { throw 'Setup Factory 3.1 metadata does not contain exactly one installed-file group' }
+  $Cursor = [int]$GroupOffsets[0] + 4
+  if ($Cursor + 2 -gt $Bytes.Length) { throw 'The Setup Factory 3.1 installed-file count is truncated' }
+  $FileCount = [BitConverter]::ToUInt16($Bytes, $Cursor)
+  $Cursor += 2
+  if ($FileCount -gt $Script:SetupFactoryMaximumEntries) { throw 'The Setup Factory 3.1 installed-file count exceeds the configured limit' }
+
+  # SF3.1 writes every companion beside IRDATA.IRD. Enumerating only that directory prevents an unrelated subtree from becoming media evidence or forcing an unbounded PowerShell array.
+  $AvailableFiles = [Collections.Generic.List[IO.FileInfo]]::new()
+  foreach ($AvailablePath in [IO.Directory]::EnumerateFiles($MediaRoot, '*', [IO.SearchOption]::TopDirectoryOnly)) {
+    $AvailableFiles.Add([IO.FileInfo]::new($AvailablePath))
+    if ($AvailableFiles.Count -gt $Script:SetupFactoryMaximumEntries) { throw 'The Setup Factory 3.1 media directory contains too many files' }
+  }
+  $Entries = [Collections.Generic.List[object]]::new()
+  $TotalExpandedBytes = 0L
+  for ($Index = 0; $Index -lt $FileCount; $Index++) {
+    if ($Cursor + 4 -gt $Bytes.Length -or -not (Test-BinarySequence -Left $Bytes[$Cursor..($Cursor + 3)] -Right ([byte[]](0x3A, 0xC8, 0x00, 0x7B)))) { throw "Setup Factory 3.1 installed-file record $Index has invalid framing" }
+    $Cursor += 4
+    $ProjectSourcePath = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+    $InstallName = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+    if ($Cursor + 39 -gt $Bytes.Length) { throw "Setup Factory 3.1 installed-file record '$InstallName' is truncated" }
+    $DosDateTime = [BitConverter]::ToUInt32($Bytes, $Cursor); $Cursor += 4
+    $ExpandedSize = [long][BitConverter]::ToUInt32($Bytes, $Cursor); $Cursor += 4
+    $FileAttributes = $Bytes[$Cursor]
+    $CreateShortcut = $Bytes[$Cursor + 1] -ne 0
+    $RecordFlags = $Bytes[$Cursor + 2]
+    $Cursor += 3
+    $ShortName = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+    if ($Cursor + 28 -gt $Bytes.Length) { throw "Setup Factory 3.1 installed-file record '$InstallName' has a truncated policy block" }
+    $PolicyBytes = $Bytes[$Cursor..($Cursor + 27)]; $Cursor += 28
+    $Description = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+    $MediaName = Read-SetupFactory31DuplicatedString -Bytes $Bytes -Offset ([ref]$Cursor)
+    if ($Cursor + 30 -gt $Bytes.Length) { throw "Setup Factory 3.1 installed-file record '$InstallName' has a truncated payload descriptor" }
+    $Crc32 = [BitConverter]::ToUInt32($Bytes, $Cursor); $Cursor += 4
+    $PackedSize = [long][BitConverter]::ToUInt32($Bytes, $Cursor); $Cursor += 4
+    $PayloadFlags = $Bytes[$Cursor..($Cursor + 21)]; $Cursor += 22
+    if ($Cursor -ge $Bytes.Length -or $Bytes[$Cursor] -ne 0x7D) { throw "Setup Factory 3.1 installed-file record '$InstallName' has no closing marker" }
+    $Cursor++
+    if ([string]::IsNullOrWhiteSpace($InstallName) -or [string]::IsNullOrWhiteSpace($MediaName)) { throw 'A Setup Factory 3.1 installed-file record has an empty logical or media name' }
+    $null = Resolve-SafeExtractionPath -DestinationPath $MediaRoot -RelativePath $InstallName
+    if ($ExpandedSize -gt $Script:SetupFactoryMaximumFileBytes -or $PackedSize -gt $Script:SetupFactoryMaximumFileBytes) { throw "Setup Factory 3.1 installed file '$InstallName' exceeds the per-file limit" }
+    $TotalExpandedBytes += $ExpandedSize
+    if ($TotalExpandedBytes -gt $Script:SetupFactoryMaximumExpandedBytes) { throw 'The Setup Factory 3.1 installed-file table exceeds the total expansion limit' }
+
+    $MediaFile = try { Resolve-UniqueInstallerFile -Item $AvailableFiles -Pattern $MediaName -BasePath $MediaRoot -Description "Setup Factory 3.1 companion '$MediaName'" } catch { $null }
+    $MediaError = if (-not $MediaFile) { 'Missing' } elseif ($MediaFile.Length -ne $PackedSize) { 'SizeMismatch' } else { $null }
+    $Entries.Add([pscustomobject][ordered]@{
+        Name              = $InstallName.Replace('/', '\')
+        Kind              = 'InstalledFile'
+        ProjectSourcePath = $ProjectSourcePath
+        SourceName        = $MediaName
+        SourcePath        = $MediaFile ? $MediaFile.FullName : $null
+        DataOffset        = 0L
+        PackedSize        = $PackedSize
+        ExpandedSize      = $ExpandedSize
+        Crc32             = [uint32]$Crc32
+        CrcTarget         = 'Expanded'
+        Compression       = $PackedSize -eq $ExpandedSize ? 'Stored' : 'CrusherLh5Extended'
+        IsCompressed      = $PackedSize -ne $ExpandedSize
+        IsEmbedded        = -not $MediaError
+        MediaError        = $MediaError
+        DosDateTime       = $DosDateTime
+        FileAttributes    = $FileAttributes
+        CreateShortcut    = $CreateShortcut
+        RecordFlags       = $RecordFlags
+        ShortName         = $ShortName
+        Description       = $Description
+        PolicyBytes       = $PolicyBytes
+        PayloadFlags      = $PayloadFlags
+      })
+  }
+  if ($Cursor -ge $Bytes.Length -or $Bytes[$Cursor] -ne 0x7D) { throw 'The Setup Factory 3.1 installed-file group has no closing marker' }
+
+  [pscustomobject][ordered]@{
+    FormatVersion          = "$FormatMajor.$FormatMinor.$FormatRevision"
+    SourceDirectory        = $SourceDirectory
+    ProductName            = $ProductName
+    ProgramGroup           = $ProgramGroup
+    DefaultInstallLocation = $InstallLocation
+    SourceDrive            = $SourceDrive
+    Entries                = $Entries.ToArray()
+    TotalExpandedBytes     = $TotalExpandedBytes
+    IsComplete             = @($Entries | Where-Object MediaError).Count -eq 0
+  }
+}
+
+function Get-SetupFactory31Media {
+  <#
+  .SYNOPSIS
+    Resolve and validate a Setup Factory 3.1 launcher and its companion IRDATA.IRD.
+  .PARAMETER Path
+    Path to SETUP.EXE or IRDATA.IRD in one Setup Factory 3.1 media directory.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $InputFile = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force
+  $MediaRoot = $InputFile.Directory.FullName
+  $LauncherPath = Join-Path $MediaRoot 'SETUP.EXE'
+  $ArchivePath = Join-Path $MediaRoot 'IRDATA.IRD'
+  if ($InputFile.Name -ieq 'IRDATA.IRD') { $ArchivePath = $InputFile.FullName }
+  elseif ($InputFile.Name -ieq 'SETUP.EXE') { $LauncherPath = $InputFile.FullName }
+  else { throw 'Setup Factory 3.1 multi-file parsing requires SETUP.EXE or IRDATA.IRD' }
+  if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) { throw 'Setup Factory 3.1 companion IRDATA.IRD is missing' }
+
+  if (Test-Path -LiteralPath $LauncherPath -PathType Leaf) {
+    $LauncherFile = Get-Item -LiteralPath $LauncherPath -Force
+    if ($LauncherFile.Length -gt $Script:SetupFactory31MaximumLauncherBytes) { throw 'The Setup Factory 3.1 launcher exceeds the configured size limit' }
+    $LauncherBytes = [IO.File]::ReadAllBytes($LauncherFile.FullName)
+    if ($LauncherBytes.Length -lt 64 -or $LauncherBytes[0] -ne 0x4D -or $LauncherBytes[1] -ne 0x5A) { throw 'The Setup Factory 3.1 launcher is not an MZ executable' }
+    $NewHeaderOffset = [BitConverter]::ToUInt32($LauncherBytes, 0x3C)
+    if ($NewHeaderOffset + 2 -gt $LauncherBytes.Length -or $LauncherBytes[$NewHeaderOffset] -ne 0x4E -or $LauncherBytes[$NewHeaderOffset + 1] -ne 0x45) { throw 'The Setup Factory 3.1 launcher does not contain its expected 16-bit NE runtime' }
+    if (@(Find-BinaryPattern -Bytes $LauncherBytes -Pattern ([Text.Encoding]::ASCII.GetBytes('\IRDATA.IRD')) -Maximum 1).Count -ne 1 -or @(Find-BinaryPattern -Bytes $LauncherBytes -Pattern ([Text.Encoding]::ASCII.GetBytes('IRSETUP.EXE')) -Maximum 1).Count -ne 1) { throw 'The NE launcher does not contain the Setup Factory 3.1 companion bootstrap references' }
+  } elseif ($InputFile.Name -ieq 'SETUP.EXE') {
+    throw 'The Setup Factory 3.1 launcher is missing'
+  }
+
+  $ArqCatalog = Get-SetupFactory31ArqCatalog -Path $ArchivePath
+  $MetadataEntry = @($ArqCatalog.Entries | Where-Object Name -CEQ 'IRDATA.DAT')
+  $MetadataBytes = Read-SetupFactory31ArqEntryData -Entry $MetadataEntry[0] -MaximumBytes $Script:SetupFactoryMaximumFileBytes
+  $Metadata = Read-SetupFactory31ProjectData -Bytes $MetadataBytes -MediaRoot $MediaRoot
+  [pscustomobject][ordered]@{
+    Path           = $InputFile.FullName
+    MediaRoot      = $MediaRoot
+    LauncherPath   = (Test-Path -LiteralPath $LauncherPath -PathType Leaf) ? (Get-Item -LiteralPath $LauncherPath).FullName : $null
+    ArchivePath    = (Get-Item -LiteralPath $ArchivePath).FullName
+    ArchiveCatalog = $ArqCatalog
+    Metadata       = $Metadata
+  }
+}
+
+function Test-SetupFactory31Media {
+  <#
+  .SYNOPSIS
+    Test whether a path belongs to structurally valid Setup Factory 3.1 multi-file media.
+  .PARAMETER Path
+    Path to SETUP.EXE or IRDATA.IRD.
+  #>
+  [OutputType([bool])]
+  param ([Parameter(Mandatory)][string]$Path)
+  try { $null = Get-SetupFactory31Media -Path $Path; return $true } catch { return $false }
+}
+
+function Expand-SetupFactory31Media {
+  <#
+  .SYNOPSIS
+    Expand installed or raw Setup Factory 3.1 multi-file entries.
+  .PARAMETER Media
+    Validated media context returned by Get-SetupFactory31Media.
+  .PARAMETER DestinationPath
+    Root directory for safe extraction.
+  .PARAMETER Name
+    Exact name or wildcard selecting installed paths, or ARQ member names with RawEntries.
+  .PARAMETER RawEntries
+    Extract IRDATA.DAT, IRSETUP.EXE, IRUNIN31.EXE, and other physical ARQ members instead of application payloads.
+  .PARAMETER CollisionAction
+    Behavior applied only when an output collision occurs.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total number of output bytes.
+  #>
+  [OutputType([IO.FileInfo[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$Media,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [string]$Name = '*',
+    [switch]$RawEntries,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
+    [long]$MaximumExpandedBytes = $Script:SetupFactoryMaximumExpandedBytes
+  )
+
+  $Entries = $RawEntries ? $Media.ArchiveCatalog.Entries : $Media.Metadata.Entries
+  $SelectedEntries = @($Entries | Where-Object { Test-ExtractionPattern -Path $_.Name -Pattern $Name })
+  $Missing = @($SelectedEntries | Where-Object { -not $_.IsEmbedded })
+  if ($Missing.Count) { throw "The Setup Factory 3.1 media is missing or has an invalid companion for '$($Missing[0].Name)'" }
+
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $null = New-Item -ItemType Directory -Path $DestinationPath -Force
+  $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Written = 0L
+  foreach ($Entry in $SelectedEntries) {
+    $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+    if (-not $Target.ShouldWrite) { continue }
+    $Remaining = [Math]::Min($MaximumExpandedBytes - $Written, $Script:SetupFactoryMaximumFileBytes)
+    if ($Remaining -le 0) { throw 'The Setup Factory 3.1 expansion exceeds the configured limit' }
+    $Parent = [IO.Path]::GetDirectoryName($Target.Path)
+    if ($Parent) { $null = New-Item -ItemType Directory -Path $Parent -Force }
+    $TemporaryPath = "$($Target.Path).Dumplings-$([guid]::NewGuid().ToString('N')).tmp"
+    $Output = [IO.File]::Open($TemporaryPath, 'CreateNew', 'ReadWrite', 'None')
+    try {
+      $Length = Copy-SetupFactory31EntryData -Entry $Entry -Destination $Output -MaximumBytes $Remaining
+    } finally {
+      $Output.Dispose()
+    }
+    try {
+      $Written += $Length
+      if ($Written -gt $MaximumExpandedBytes) { throw 'The Setup Factory 3.1 expansion exceeds the configured limit' }
+      [IO.File]::Move($TemporaryPath, $Target.Path, $true)
+      Get-Item -LiteralPath $Target.Path
+    } finally {
+      Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Get-SetupFactory31Info {
+  <#
+  .SYNOPSIS
+    Compose the common parser result for Setup Factory 3.1 multi-file media.
+  .PARAMETER Path
+    Path to SETUP.EXE or IRDATA.IRD.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $Media = Get-SetupFactory31Media -Path $Path
+  $Metadata = $Media.Metadata
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $UnresolvedFields = [Collections.Generic.List[string]]::new()
+  $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.SilentUnsupportedByGeneration' -Source 'SetupFactory' -Message 'Setup Factory 3.1 predates the /S silent-installation feature and is interactive-only.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence ([ordered]@{ MetadataRoute = 'irdat-v3.1'; Reason = 'GenerationPredatesSilentMode' })))
+  $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.NoWindowsArpByGeneration' -Source 'SetupFactory' -Message 'Setup Factory 3.1 targets Windows 3.1 Program Manager and predates the Windows Add/Remove Programs registry contract.' -Kind Information -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries))
+  foreach ($Field in 'DisplayVersion', 'Publisher', 'Scope') { $UnresolvedFields.Add($Field) }
+  $UnavailableEntries = @($Metadata.Entries | Where-Object MediaError)
+  if ($UnavailableEntries.Count) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Payload.MultiFileCompanionMissing' -Source 'SetupFactory' -Message "$($UnavailableEntries.Count) Setup Factory 3.1 companion payload file(s) are missing or do not match their declared packed sizes." -Kind Incomplete -Areas Extraction -AffectedFields InstallationMetadata -Evidence $UnavailableEntries))
+    $UnresolvedFields.Add('InstallationMetadata.Files')
+  }
+  $EmptyAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite @()
+  $RuntimeEntry = $Media.ArchiveCatalog.Entries | Where-Object Name -CEQ 'IRSETUP.EXE' | Select-Object -First 1
+  $EmbeddedRuntimeInfo = [pscustomobject][ordered]@{
+    IsPresent           = $true
+    IsReadable          = $true
+    IsTrusted           = $false
+    IsProfileCompatible = $true
+    Version             = $null
+    MajorVersion        = $null
+    ProductName         = $null
+    OriginalFilename    = 'IRSETUP.EXE'
+    FileDescription     = $null
+    MatchingProfileIds  = @('setup-factory-3.1-multifile')
+    Error               = $null
+    Entry               = $RuntimeEntry
+  }
+  $EmptyActions = [pscustomobject][ordered]@{
+    VariableAssignments = @(); ExecutionActions = @(); FileSystemActions = @(); IniActions = @(); VariableReads = @(); UserInteractionActions = @(); InstallabilityActions = @(); ShortcutActions = @(); ServiceActions = @(); RebootActions = @(); ExternalCodeActions = @(); UnknownActions = @()
+  }
+  [pscustomobject][ordered]@{
+    Path                         = $Media.Path
+    InstallerType                = 'exe'
+    ProductCode                  = $null
+    UpgradeCode                  = $null
+    DisplayName                  = $Metadata.ProductName
+    DisplayVersion               = $null
+    Publisher                    = $null
+    Scope                        = $null
+    DefaultInstallLocation       = $Metadata.DefaultInstallLocation
+    WritesAppsAndFeaturesEntry   = $false
+    AppsAndFeaturesProductCode   = $null
+    AppsAndFeaturesInstallerType = $null
+    AppsAndFeaturesEntries       = @()
+    Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
+    UnresolvedFields             = [string[]]@($UnresolvedFields | Sort-Object -Unique)
+    Family                       = 'Setup Factory'
+    RegistryWrites               = @()
+    RegistryArpEntries           = @()
+    RegistryAssociationInfo      = $EmptyAssociationInfo
+    Protocols                    = @()
+    FileExtensions               = @()
+    ContainerEntries             = $Media.ArchiveCatalog.Entries
+    DependencyPayloads           = @()
+    PayloadCatalog               = $Metadata.Entries
+    InstalledFileCatalog         = [pscustomobject][ordered]@{ Entries = $Metadata.Entries; IsComplete = $Metadata.IsComplete; CanExtract = $Metadata.IsComplete; CanExtractPartial = @($Metadata.Entries | Where-Object IsEmbedded).Count -gt 0; ExtractableEntryCount = @($Metadata.Entries | Where-Object IsEmbedded).Count; UnavailableEntryCount = $UnavailableEntries.Count }
+    FilePolicySummary            = [pscustomobject][ordered]@{}
+    ExtractedFiles               = @()
+    CanExpand                    = $Metadata.IsComplete
+    CanExpandPartial             = @($Metadata.Entries | Where-Object IsEmbedded).Count -gt 0
+    CanExpandRawEntries          = $true
+    SupportsSilentInstallation   = $false
+    StartsInSilentMode           = $false
+    InstallerSwitches            = [pscustomobject][ordered]@{}
+    InstallModes                 = [string[]]@('interactive')
+    SilentInstallationEvidence   = [pscustomobject][ordered]@{ MetadataRoute = 'irdat-v3.1'; Reason = 'GenerationPredatesSilentMode' }
+    ProductMetadata              = [pscustomobject][ordered]@{ ProductName = $Metadata.ProductName; ProgramGroup = $Metadata.ProgramGroup; SourceDirectory = $Metadata.SourceDirectory; SourceDrive = $Metadata.SourceDrive; DefaultInstallLocation = $Metadata.DefaultInstallLocation }
+    UninstallConfiguration       = [pscustomobject][ordered]@{ RuntimeEntry = 'IRUNIN31.EXE'; RegistrationModel = 'Windows3xProgramManager'; WritesAppsAndFeaturesEntry = $false }
+    LegacyActionCatalog          = $null
+    ActionEffects                = $EmptyActions
+    VariableAssignments          = @()
+    ExecutionActions             = @()
+    FileSystemActions            = @()
+    IniActions                   = @()
+    VariableReads                = @()
+    UserInteractionActions       = @()
+    InstallabilityActions        = @()
+    Shortcuts                    = @($Metadata.Entries | Where-Object CreateShortcut | ForEach-Object { [pscustomobject][ordered]@{ Name = $_.ShortName; Target = $_.Name; Description = $_.Description } })
+    ServiceActions               = @()
+    RebootActions                = @()
+    ExternalCodeActions          = @()
+    EmbeddedRuntimeInfo          = $EmbeddedRuntimeInfo
+    ParserVersionInfo            = [pscustomobject][ordered]@{ Family = 'Setup Factory'; MajorVersion = 3; BuilderVersion = $Metadata.FormatVersion; BuilderVersionSource = 'IRDATA.DAT project header'; OuterRuntimeVersion = $null; EmbeddedRuntimeVersion = $Metadata.FormatVersion; ProfileId = 'setup-factory-3.1-multifile'; FormatGeneration = 'MultiFile31'; MetadataRoute = 'irdat-v3.1'; MetadataProfile = 'SetupFactory31Records'; HeaderRoute = 'crusher-arq-companion-media'; HeaderPrefixLength = 0; OverlayOffset = $null }
   }
 }
 
@@ -2274,6 +4249,23 @@ function Get-SetupFactoryArchiveCatalog {
   )
 
   $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force
+  # Version 3.1 is companion media rather than a PE overlay. Dispatch it before opening the
+  # requested file as the later single-file stream, and preserve source paths on every ARQ entry.
+  if ($File.Name -ieq 'IRDATA.IRD' -or ($File.Name -ieq 'SETUP.EXE' -and (Test-Path -LiteralPath (Join-Path $File.Directory.FullName 'IRDATA.IRD') -PathType Leaf))) {
+    $Media = Get-SetupFactory31Media -Path $File.FullName
+    $FormatProfile31 = $Script:SetupFactoryFormatCatalog.Profiles.MultiFile31
+    return [pscustomobject][ordered]@{
+      Path              = $Media.Path
+      FileLength        = $Media.ArchiveCatalog.FileLength
+      Overlay           = [pscustomobject][ordered]@{
+        Version = 3; BuilderVersion = $Media.Metadata.FormatVersion; BuilderVersionSource = 'IRDATA.DAT project header'; ProfileId = $FormatProfile31.Id; FormatGeneration = $FormatProfile31.FormatGeneration; HeaderRoute = $FormatProfile31.HeaderRoute; MetadataRoute = $FormatProfile31.MetadataRoute; HeaderPrefixLength = 0; IsSupported = $true; SupportsMetadata = $true; Offset = $null; Length = $Media.ArchiveCatalog.FileLength
+      }
+      Entries           = $Media.ArchiveCatalog.Entries
+      PayloadDataOffset = $null
+      MediaRoot         = $Media.MediaRoot
+      Metadata          = $Media.Metadata
+    }
+  }
   $Entries = [Collections.Generic.List[object]]::new()
   $OwnedStream = $null
   if (-not $Stream) {
@@ -2477,7 +4469,7 @@ function Get-SetupFactoryEmbeddedRuntimeInfo {
 function Expand-SetupFactoryInstaller {
   <#
   .SYNOPSIS
-    Expand a Setup Factory 4-10 installer without executing it
+    Expand a Setup Factory 3.1-10 installer without executing it
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   .PARAMETER DestinationPath
@@ -2504,6 +4496,11 @@ function Expand-SetupFactoryInstaller {
     $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-SetupFactory-' + [guid]::NewGuid().ToString('N'))
+    }
+    if ($File.Name -ieq 'IRDATA.IRD' -or ($File.Name -ieq 'SETUP.EXE' -and (Test-Path -LiteralPath (Join-Path $File.Directory.FullName 'IRDATA.IRD') -PathType Leaf))) {
+      $Media = Get-SetupFactory31Media -Path $File.FullName
+      Expand-SetupFactory31Media -Media $Media -DestinationPath $DestinationPath -Name $Name -RawEntries:$RawEntries -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
+      return
     }
     $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -ItemType Directory -Path $DestinationPath -Force
@@ -2662,6 +4659,9 @@ function Get-SetupFactoryInfo {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process {
     $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force
+    if ($File.Name -ieq 'IRDATA.IRD' -or ($File.Name -ieq 'SETUP.EXE' -and (Test-Path -LiteralPath (Join-Path $File.Directory.FullName 'IRDATA.IRD') -PathType Leaf))) {
+      return Get-SetupFactory31Info -Path $File.FullName
+    }
     $ScriptStream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
     try {
       $Catalog = Get-SetupFactoryArchiveCatalog -Path $File.FullName -Stream $ScriptStream
@@ -2678,6 +4678,21 @@ function Get-SetupFactoryInfo {
 
     $Diagnostics = [Collections.Generic.List[object]]::new()
     $UnresolvedFields = [Collections.Generic.List[string]]::new()
+    $SilentInstallationInfo = Get-SetupFactorySilentInstallationInfo -Bytes $Bytes -MetadataRoute $Overlay.MetadataRoute
+    if ($SilentInstallationInfo.IsResolved) {
+      if (-not $SilentInstallationInfo.SupportsSilentInstallation) {
+        $EvidenceReason = $SilentInstallationInfo.Evidence.PSObject.Properties['Reason']
+        if ($EvidenceReason -and $EvidenceReason.Value -ceq 'GenerationPredatesSilentMode') {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.SilentUnsupportedByGeneration' -Source 'SetupFactory' -Message 'This Setup Factory generation predates the /S silent-installation feature and is interactive-only.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $SilentInstallationInfo.Evidence))
+        } else {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.SilentDisabled' -Source 'SetupFactory' -Message 'The compiled Setup Factory project disables silent installation, so the documented /S switch is not valid for this artifact.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $SilentInstallationInfo.Evidence))
+        }
+      }
+    } else {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.SilentSupportUnresolved' -Source 'SetupFactory' -Message 'The compiled Setup Factory silent-installation setting could not be resolved for this structural generation; do not infer /S support from runtime strings alone.' -Kind Incomplete -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $SilentInstallationInfo.Evidence))
+      $UnresolvedFields.Add('InstallerSwitches')
+      $UnresolvedFields.Add('InstallModes')
+    }
     if (-not $EmbeddedRuntimeInfo.IsReadable) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Release.EmbeddedRuntimeUnreadable' -Source 'SetupFactory' -Message "The embedded Setup Factory runtime could not be used as release evidence: $($EmbeddedRuntimeInfo.Error)" -Kind Incomplete -Areas Detection -Evidence ([ordered]@{ ProfileId = $Overlay.ProfileId; Error = $EmbeddedRuntimeInfo.Error })))
     } elseif (-not $EmbeddedRuntimeInfo.IsTrusted) {
@@ -2717,6 +4732,7 @@ function Get-SetupFactoryInfo {
     $InstalledPayloadOffset = $DependencyCatalog.IsComplete ? $DependencyCatalog.PayloadDataEndOffset : $Catalog.PayloadDataOffset
     $InstalledCatalog = Get-SetupFactoryInstalledFileCatalog -Bytes $Bytes -Catalog $Catalog -Variables $Variables -PayloadDataOffset $InstalledPayloadOffset
     if (-not $DependencyCatalog.IsComplete) { $InstalledCatalog.CanExtract = $false }
+    $FilePolicySummary = Get-SetupFactoryFilePolicySummary -Entry $InstalledCatalog.Entries
     $Resolve = { param($Name) if ($Variables.ContainsKey($Name)) { Resolve-SetupFactoryVariable -Value ([string]$Variables[$Name]) -Variables $Variables } }
     $DisplayName = & $Resolve '%ProductName%'
     $DisplayVersion = & $Resolve '%ProductVer%'
@@ -2728,11 +4744,11 @@ function Get-SetupFactoryInfo {
     $UnresolvedRegistryCallCount = 0
     $LegacyActionCatalog = $null
     if ($LegacyMetadata -and $Overlay.MetadataRoute -eq 'irdat-v4') {
-      $LegacyActionCatalog = Get-SetupFactoryRegistryCatalog4 -Bytes $Bytes
+      $LegacyActionCatalog = Get-SetupFactoryActionCatalog4 -Bytes $Bytes -UninstallOffset $LegacyMetadata.Uninstall.Offset
       [object[]]$RegistryWrites = @($LegacyActionCatalog.RegistryWrites)
       $UnresolvedRegistryCallCount = $LegacyActionCatalog.UnresolvedCount
     } elseif ($LegacyMetadata -and $Overlay.MetadataRoute -eq 'irdat-v5') {
-      $LegacyActionCatalog = Get-SetupFactoryRegistryCatalog5 -Bytes $Bytes -UninstallOffset $LegacyMetadata.Uninstall.Offset
+      $LegacyActionCatalog = Get-SetupFactoryActionCatalog5 -Bytes $Bytes -UninstallOffset $LegacyMetadata.Uninstall.Offset
       [object[]]$RegistryWrites = @($LegacyActionCatalog.RegistryWrites)
       $UnresolvedRegistryCallCount = $LegacyActionCatalog.UnresolvedCount
     } elseif ($LegacyMetadata -and $Overlay.MetadataRoute -eq 'irdat-v6') {
@@ -2743,6 +4759,26 @@ function Get-SetupFactoryInfo {
       [object[]]$RegistryWrites = @(Get-SetupFactoryLiteralRegistryWrite -Bytes $Bytes -UnresolvedCount ([ref]$UnresolvedRegistryCallCount))
     } else {
       [object[]]$RegistryWrites = @()
+    }
+    $ActionEffects = [pscustomobject][ordered]@{
+      VariableAssignments    = @()
+      ExecutionActions       = @()
+      FileSystemActions      = @()
+      IniActions             = @()
+      VariableReads          = @()
+      UserInteractionActions = @()
+      InstallabilityActions  = @()
+      ShortcutActions        = @()
+      ServiceActions         = @()
+      RebootActions          = @()
+      ExternalCodeActions    = @()
+      UnknownActions         = @()
+    }
+    if ($LegacyActionCatalog -and $Overlay.MetadataRoute -in 'irdat-v4', 'irdat-v5', 'irdat-v6') {
+      foreach ($PropertyName in $ActionEffects.PSObject.Properties.Name) {
+        $CatalogProperty = $LegacyActionCatalog.PSObject.Properties[$PropertyName]
+        if ($CatalogProperty) { $ActionEffects.$PropertyName = [object[]]@($CatalogProperty.Value) }
+      }
     }
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $RegistryArpEntries = @(Get-SetupFactoryArpEntry -RegistryWrite $RegistryWrites -Variables $Variables)
@@ -2806,9 +4842,59 @@ function Get-SetupFactoryInfo {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.SessionVariablesUnavailable' -Source 'SetupFactory' -Message 'CSessionVar records were not found or were malformed.' -Kind Incomplete -Areas Metadata -AffectedFields DisplayName, DisplayVersion, Publisher, DefaultInstallLocation))
       foreach ($Field in 'DisplayName', 'DisplayVersion', 'Publisher', 'DefaultInstallLocation') { $UnresolvedFields.Add($Field) }
     }
-    if ($LegacyActionCatalog -and -not $LegacyActionCatalog.IsComplete) {
-      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.LegacyRegistryActionsPartial' -Source 'SetupFactory' -Message "The Setup Factory legacy registry/action table was only partially decoded: $($LegacyActionCatalog.Error)" -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, Scope, AppsAndFeaturesEntries, Protocols, FileExtensions -Evidence ([ordered]@{ MetadataRoute = $Overlay.MetadataRoute; ParsedEntryCount = @($LegacyActionCatalog.Entries).Count })))
-      $UnresolvedFields.Add('RegistryActions')
+    if ($LegacyActionCatalog) {
+      $RegistryCatalogProperty = $LegacyActionCatalog.PSObject.Properties['RegistryCatalog']
+      if ($RegistryCatalogProperty -and -not $RegistryCatalogProperty.Value.IsComplete) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.LegacyRegistryActionsPartial' -Source 'SetupFactory' -Message "The Setup Factory legacy registry table was only partially decoded: $($RegistryCatalogProperty.Value.Error)" -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, Scope, AppsAndFeaturesEntries, Protocols, FileExtensions -Evidence ([ordered]@{ MetadataRoute = $Overlay.MetadataRoute; ParsedEntryCount = @($RegistryCatalogProperty.Value.Entries).Count })))
+        $UnresolvedFields.Add('RegistryActions')
+      }
+      if (-not $LegacyActionCatalog.IsComplete) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.LegacyActionsPartial' -Source 'SetupFactory' -Message "One or more Setup Factory legacy command tables were only partially decoded: $($LegacyActionCatalog.Error)" -Kind Incomplete -Areas Metadata, Installability -AffectedFields InstallationMetadata, InstallerSwitches, InstallModes -Evidence ([ordered]@{ MetadataRoute = $Overlay.MetadataRoute; ParsedEntryCount = @($LegacyActionCatalog.Entries).Count })))
+        $UnresolvedFields.Add('InstallationMetadata.Actions')
+      }
+    }
+    if ($Overlay.MetadataRoute -in 'irdat-v4', 'irdat-v5', 'irdat-v6' -and $LegacyActionCatalog) {
+      $ActiveExecutionActions = @($ActionEffects.ExecutionActions | Where-Object { $_.Phase -ne 'Uninstall' -and $_.ConditionState -ne 'False' })
+      $ActiveInteractionActions = @($ActionEffects.UserInteractionActions | Where-Object { $_.Phase -ne 'Uninstall' -and $_.ConditionState -ne 'False' })
+      $ActiveInstallabilityActions = @($ActionEffects.InstallabilityActions | Where-Object { $_.Phase -ne 'Uninstall' -and $_.ConditionState -ne 'False' })
+      $ActiveRebootActions = @($ActionEffects.RebootActions | Where-Object { $_.Phase -ne 'Uninstall' -and $_.ConditionState -ne 'False' })
+      $ActiveExternalCodeActions = @($ActionEffects.ExternalCodeActions | Where-Object { $_.Phase -ne 'Uninstall' -and $_.ConditionState -ne 'False' })
+      $SilentModeAssignments = @($ActionEffects.VariableAssignments | Where-Object { $_.Phase -ne 'Uninstall' -and $_.ConditionState -ne 'False' -and $_.Details.VariableName -ieq '%SilentMode%' })
+
+      if ($Overlay.MetadataRoute -eq 'irdat-v6' -and $SilentModeAssignments.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.SilentModeAction' -Source 'SetupFactory' -Message 'A Setup Factory 6 action assigns %SilentMode% during installation. The assignment can override both the project default and the /S command-line request.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $SilentModeAssignments))
+        $UnresolvedFields.Add('InstallerSwitches')
+        $UnresolvedFields.Add('InstallModes')
+      }
+      if ($ActiveExecutionActions.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.ExecutionActions' -Source 'SetupFactory' -Message 'Setup Factory actions can execute or open another file during installation or shutdown. Review their condition, arguments, and payload ownership before treating /S as fully unattended.' -Kind ManualValidation -Areas Metadata, Installability -AffectedFields Dependencies, InstallerSwitches, InstallModes -Evidence $ActiveExecutionActions))
+        $UnresolvedFields.Add('Dependencies')
+      }
+      if ($ActiveInteractionActions.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.UserInteractionActions' -Source 'SetupFactory' -Message 'Setup Factory contains a message or Yes/No action on a reachable or runtime-dependent installation path.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $ActiveInteractionActions))
+        $UnresolvedFields.Add('InstallerSwitches')
+        $UnresolvedFields.Add('InstallModes')
+      }
+      if ($ActiveInstallabilityActions.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.RuntimeActions' -Source 'SetupFactory' -Message 'Setup Factory contains process-closing, abort, or connectivity actions whose runtime outcome can change whether installation completes.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes, InstallerSuccessCodes -Evidence $ActiveInstallabilityActions))
+        $UnresolvedFields.Add('InstallerSuccessCodes')
+      }
+      if ($ActiveRebootActions.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.RebootActions' -Source 'SetupFactory' -Message 'Setup Factory schedules file operations or execution for reboot; restart behavior and return-code mapping require VM validation.' -Kind Risk -Areas Installability -AffectedFields ExpectedReturnCodes -Evidence $ActiveRebootActions))
+        $UnresolvedFields.Add('ExpectedReturnCodes')
+      }
+      if ($ActiveExternalCodeActions.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.ExternalCodeActions' -Source 'SetupFactory' -Message 'Setup Factory calls an external DLL function. Its registry, filesystem, prerequisite, and installability effects cannot be derived from the CAction record alone.' -Kind ManualValidation -Areas Metadata, Installability, Security -AffectedFields ProductCode, Scope, AppsAndFeaturesEntries, Protocols, FileExtensions, Dependencies, InstallerSwitches, InstallModes -Evidence $ActiveExternalCodeActions))
+        foreach ($Field in 'AppsAndFeaturesEntries', 'Protocols', 'FileExtensions', 'Dependencies') { $UnresolvedFields.Add($Field) }
+      }
+      if ($ActionEffects.UnknownActions.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.UnknownActionIds' -Source 'SetupFactory' -Message 'A Setup Factory command table contains action IDs absent from the source-backed vocabulary for that generation.' -Kind Unsupported -Areas Metadata, Installability -AffectedFields InstallationMetadata, InstallerSwitches, InstallModes -Evidence $ActionEffects.UnknownActions))
+        $UnresolvedFields.Add('InstallationMetadata.Actions')
+      }
+      if ($LegacyActionCatalog.PSObject.Properties['UnresolvedControlFlowCount'] -and $LegacyActionCatalog.UnresolvedControlFlowCount -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.ActionControlFlowUnresolved' -Source 'SetupFactory' -Message "$($LegacyActionCatalog.UnresolvedControlFlowCount) Setup Factory 6 loop, jump, or malformed block path(s) depend on runtime state and were preserved without speculative execution." -Kind Ambiguous -Areas Metadata, Installability -AffectedFields InstallationMetadata, InstallerSwitches, InstallModes -Evidence ([ordered]@{ Count = $LegacyActionCatalog.UnresolvedControlFlowCount })))
+        $UnresolvedFields.Add('InstallationMetadata.Actions')
+      }
     }
     if ($HasBuiltInUninstall -and -not $VisibleRegistryArpEntries.Count -and [string]::IsNullOrWhiteSpace([string]$BuiltInProductCode)) {
       # An enabled uninstaller proves that an ARP route exists, but unresolved variables in its key
@@ -2826,6 +4912,29 @@ function Get-SetupFactoryInfo {
     } elseif (-not $InstalledCatalog.CanExtract) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Payload.LayoutUnresolved' -Source 'SetupFactory' -Message 'The installed-file catalog is readable, but none of its records map to the remaining executable as the supported sequential payload layout; extraction is disabled.' -Kind Unsupported -Areas Extraction -AffectedFields InstallationMetadata -Evidence ([ordered]@{ EntryCount = @($InstalledCatalog.Entries).Count; DeclaredPayloadBytes = $InstalledCatalog.DeclaredPayloadBytes; AvailablePayloadBytes = $Catalog.FileLength - $InstalledPayloadOffset })))
       $UnresolvedFields.Add('InstallationMetadata.Files')
+    }
+    if ($FilePolicySummary.AskUserOverwriteEntries.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.FileOverwritePrompt' -Source 'SetupFactory' -Message 'One or more payload files use the AskUser overwrite policy. An existing destination file can therefore make an otherwise unattended installation prompt for input.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence ([ordered]@{ EntryCount = $FilePolicySummary.AskUserOverwriteEntries.Count; Entries = $FilePolicySummary.AskUserOverwriteEntries })))
+    }
+    if ($FilePolicySummary.UnknownOverwriteEntries.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.FileOverwritePolicyUnresolved' -Source 'SetupFactory' -Message 'One or more payload files use an overwrite-policy value that is not defined by the supported Setup Factory runtime.' -Kind Incomplete -Areas Metadata, Installability -AffectedFields InstallationMetadata, InstallerSwitches, InstallModes -Evidence ([ordered]@{ EntryCount = $FilePolicySummary.UnknownOverwriteEntries.Count; Entries = $FilePolicySummary.UnknownOverwriteEntries })))
+      $UnresolvedFields.Add('InstallationMetadata.FilePolicy')
+    }
+    if ($FilePolicySummary.ConditionalEntries.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.ConditionalInstalledFiles' -Source 'SetupFactory' -Message 'The installed-file catalog contains operating-system, language, advanced comparison, runtime, build-configuration, or package conditions; the effective installed-file set depends on the selected installation scenario.' -Kind Ambiguous -Areas Metadata -AffectedFields InstallationMetadata -Evidence ([ordered]@{ EntryCount = $FilePolicySummary.ConditionalEntries.Count; Entries = $FilePolicySummary.ConditionalEntries })))
+      $UnresolvedFields.Add('InstallationMetadata.Files')
+    }
+    if ($FilePolicySummary.SelfRegisteringEntries.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Metadata.SelfRegistrationEffects' -Source 'SetupFactory' -Message 'One or more payload files are registered through DllRegisterServer or type-library registration. Registry effects implemented by those binaries require static inspection or VM validation.' -Kind ManualValidation -Areas Metadata -AffectedFields Protocols, FileExtensions -Evidence ([ordered]@{ EntryCount = $FilePolicySummary.SelfRegisteringEntries.Count; Entries = $FilePolicySummary.SelfRegisteringEntries })))
+      $UnresolvedFields.Add('Protocols')
+      $UnresolvedFields.Add('FileExtensions')
+    }
+    if ($FilePolicySummary.SuppressInUseNoticeEntries.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Installability.InUseReplacementDeferred' -Source 'SetupFactory' -Message 'One or more payload files suppress the in-use warning. Setup Factory can defer their replacement until restart, so reboot behavior and exit-code evidence require VM validation.' -Kind Risk -Areas Installability -AffectedFields ExpectedReturnCodes -Evidence ([ordered]@{ EntryCount = $FilePolicySummary.SuppressInUseNoticeEntries.Count; Entries = $FilePolicySummary.SuppressInUseNoticeEntries })))
+      $UnresolvedFields.Add('ExpectedReturnCodes')
+    }
+    if ($FilePolicySummary.CrcCheckDisabledEntries.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Security.FileCrcCheckDisabled' -Source 'SetupFactory' -Message 'The compiled project disables Setup Factory CRC verification for one or more payload files.' -Kind Risk -Areas Extraction, Security -AffectedFields InstallationMetadata -Evidence ([ordered]@{ EntryCount = $FilePolicySummary.CrcCheckDisabledEntries.Count; Entries = $FilePolicySummary.CrcCheckDisabledEntries })))
     }
     if (-not $DependencyCatalog.IsComplete) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'SetupFactory.Payload.DependencyTableIncomplete' -Source 'SetupFactory' -Message "The bundled prerequisite table could not be decoded: $($DependencyCatalog.Error)" -Kind Unsupported -Areas Extraction, Installability -AffectedFields Dependencies -Evidence ([ordered]@{ ProfileId = $Overlay.ProfileId })))
@@ -2880,6 +4989,16 @@ function Get-SetupFactoryInfo {
       $AppsAndFeaturesEntries.Add([pscustomobject]$ManifestEntry)
     }
 
+    $InstallerSwitches = [ordered]@{}
+    $InstallModes = if ($SilentInstallationInfo.IsResolved -and $SilentInstallationInfo.SupportsSilentInstallation) {
+      $InstallerSwitches['Silent'] = '/S'
+      @('interactive', 'silent')
+    } elseif ($SilentInstallationInfo.IsResolved) {
+      @('interactive')
+    } else {
+      @()
+    }
+
     # Construct the shared result from Setup Factory evidence directly.
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
@@ -2907,13 +5026,31 @@ function Get-SetupFactoryInfo {
       DependencyPayloads           = $DependencyCatalog.Entries
       PayloadCatalog               = $InstalledCatalog.Entries
       InstalledFileCatalog         = $InstalledCatalog
+      FilePolicySummary            = $FilePolicySummary
       ExtractedFiles               = @()
       CanExpand                    = [bool]$InstalledCatalog.CanExtract
       CanExpandPartial             = [bool]$InstalledCatalog.CanExtractPartial
       CanExpandRawEntries          = $true
+      SupportsSilentInstallation   = $SilentInstallationInfo.SupportsSilentInstallation
+      StartsInSilentMode           = $SilentInstallationInfo.StartsInSilentMode
+      InstallerSwitches            = [pscustomobject]$InstallerSwitches
+      InstallModes                 = [string[]]$InstallModes
+      SilentInstallationEvidence   = $SilentInstallationInfo.Evidence
       ProductMetadata              = $LegacyMetadata ? $LegacyMetadata.Product : $null
       UninstallConfiguration       = $LegacyMetadata ? $LegacyMetadata.Uninstall : $null
       LegacyActionCatalog          = $LegacyActionCatalog
+      ActionEffects                = $ActionEffects
+      VariableAssignments          = $ActionEffects.VariableAssignments
+      ExecutionActions             = $ActionEffects.ExecutionActions
+      FileSystemActions            = $ActionEffects.FileSystemActions
+      IniActions                   = $ActionEffects.IniActions
+      VariableReads                = $ActionEffects.VariableReads
+      UserInteractionActions       = $ActionEffects.UserInteractionActions
+      InstallabilityActions        = $ActionEffects.InstallabilityActions
+      Shortcuts                    = $ActionEffects.ShortcutActions
+      ServiceActions               = $ActionEffects.ServiceActions
+      RebootActions                = $ActionEffects.RebootActions
+      ExternalCodeActions          = $ActionEffects.ExternalCodeActions
       EmbeddedRuntimeInfo          = $EmbeddedRuntimeInfo
       ParserVersionInfo            = [pscustomobject][ordered]@{
         Family                 = 'Setup Factory'

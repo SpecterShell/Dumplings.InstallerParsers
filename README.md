@@ -61,7 +61,7 @@ Do not write informational output to standard output in parser modules because i
 | `QtInstallerFramework.GetFormatInfo` | Identify the Qt IFW generation, framework version, media role, capabilities, and selected parser routes. | `Path` |
 | `QtInstallerFramework.GetInfo` | Parse Qt Installer Framework trailer, metadata, packages, operations, scope, and identity. | `Path` |
 | `QtInstallerFramework.Expand` | Expand selected Qt IFW resources and archives. | `Path`, optional `DestinationPath`, `Name`, `CollisionAction`, `MaximumExpandedBytes` |
-| `SetupFactory.GetInfo` | Parse Setup Factory 4-10 outer and installed-file catalogs, Setup Factory 5/6 product and built-in uninstall blocks, Setup Factory 7-10 session variables, literal registry evidence, and bundled prerequisites. | `Path` |
+| `SetupFactory.GetInfo` | Parse Setup Factory 3.1 Crusher companion media, Setup Factory 4-10 outer and installed-file catalogs, Setup Factory 5/6 product and built-in uninstall blocks, Setup Factory 7-10 session variables, literal registry evidence, and bundled prerequisites. | `Path` |
 | `SetupFactory.Expand` | Expand selected installed files, or outer bootstrap records with `RawEntries`. | `Path`, optional `DestinationPath`, `Name`, `RawEntries`, `CollisionAction`, `MaximumExpandedBytes` |
 
 The `ValidateSet` in `Cli.ps1` is authoritative. Add a CLI action whenever a new public parser operation must cross the PackageModule boundary.
