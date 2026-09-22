@@ -2,7 +2,7 @@
 . (Join-Path $PSScriptRoot '..\Support\InnoTestSetup.ps1')
 
 Describe 'Inno Pascal Script analysis' -Tag Unit {
-  It 'Should return bounded Pascal Script disassembly on explicit request' {
+  It 'Should return bounded Pascal Script disassembly on explicit request' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'winscp-6.5.6-setup.exe' -Url 'https://sourceforge.net/projects/winscp/files/WinSCP/6.5.6/WinSCP-6.5.6-Setup.exe/download' -UseSourceForgeMetaRefresh
     $Info = Get-InnoPascalScriptInfo -Path $Fixture -IncludeDisassembly -MaximumDisassemblyCharacters 2048
 

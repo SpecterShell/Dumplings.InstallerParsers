@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 
@@ -188,6 +189,33 @@ namespace Dumplings.InstallerInfrastructure
     public static class BinaryIO
     {
         private static readonly uint[] CrcTable = CreateCrcTable();
+
+        // Read directly from caller-owned storage. Slicing allocates no temporary byte array and
+        // subtraction-based bounds remain safe even when the supplied offset is Int64.MaxValue.
+        public static object ReadInteger(byte[] bytes, long offset, int size, bool bigEndian, bool signed)
+        {
+            if (bytes == null) throw new ArgumentNullException(nameof(bytes));
+            if (size != 1 && size != 2 && size != 4 && size != 8) throw new ArgumentOutOfRangeException(nameof(size));
+            if (offset < 0 || offset > bytes.LongLength - size) throw new EndOfStreamException("Binary integer read is outside the buffer.");
+            ReadOnlySpan<byte> data = bytes.AsSpan((int)offset, size);
+            // Separate returns preserve the exact signed/unsigned CLR type; a numeric conditional
+            // expression would otherwise widen or change signedness before boxing.
+            switch (size)
+            {
+                case 1:
+                    if (signed) return unchecked((sbyte)data[0]);
+                    return data[0];
+                case 2:
+                    if (signed) return bigEndian ? BinaryPrimitives.ReadInt16BigEndian(data) : BinaryPrimitives.ReadInt16LittleEndian(data);
+                    return bigEndian ? BinaryPrimitives.ReadUInt16BigEndian(data) : BinaryPrimitives.ReadUInt16LittleEndian(data);
+                case 4:
+                    if (signed) return bigEndian ? BinaryPrimitives.ReadInt32BigEndian(data) : BinaryPrimitives.ReadInt32LittleEndian(data);
+                    return bigEndian ? BinaryPrimitives.ReadUInt32BigEndian(data) : BinaryPrimitives.ReadUInt32LittleEndian(data);
+                default:
+                    if (signed) return bigEndian ? BinaryPrimitives.ReadInt64BigEndian(data) : BinaryPrimitives.ReadInt64LittleEndian(data);
+                    return bigEndian ? BinaryPrimitives.ReadUInt64BigEndian(data) : BinaryPrimitives.ReadUInt64LittleEndian(data);
+            }
+        }
 
         public static byte[] ReadExactly(Stream stream, long offset, int count, bool restorePosition)
         {

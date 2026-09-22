@@ -12,7 +12,7 @@ Describe 'Inno structures and version handling' -Tag Unit {
   }
 
   It 'Resolves every catalog row to a complete route descriptor' {
-    InModuleScope Inno {
+    InModuleScope InnoFormat {
       $Script:InnoFormatCatalog.Formats.Count | Should -Be 104
       @($Script:InnoFormatCatalog.Formats.Id | Select-Object -Unique).Count | Should -Be 104
       $Script:InnoResolvedFormats.Count | Should -Be 104

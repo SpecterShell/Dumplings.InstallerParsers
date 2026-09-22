@@ -12,6 +12,8 @@ The parsers inspect untrusted installer bytes, decode bounded metadata and paylo
 
 ## CLI
 
+The CLI loads only the requested family. Inno keeps format/catalog decoding, Pascal Script analysis, and payload extraction in nested `InnoFormat`, `InnoScript`, and `InnoPayload` modules. Setup Factory separates project records, action interpretation, and containers into `SetupFactoryProject`, `SetupFactoryActions`, and `SetupFactoryContainer`. Public commands stay in the original family modules; nested commands are internal and are not added to the caller's global command table. Parsed contexts are passed explicitly, and each layer owns its streams and temporary resources.
+
 [`Cli.ps1`](Cli.ps1) is the stable integration boundary. It writes one compact JSON value to standard output, writes a failure message to standard error, and exits with code `0` on success or `1` on failure.
 
 ```powershell

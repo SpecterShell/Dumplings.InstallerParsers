@@ -403,7 +403,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
       VariableRoute    = 'current'
       NoticePattern    = $null
     }
-  ) {
+  ) -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name $Name) -Uri $Url -Sha256 $Sha256 -UseSourceForgeMetaRefresh
     $Result = Get-NSISFormatInfo -Path $Fixture
 
@@ -552,7 +552,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     Test-Path -LiteralPath (Join-Path $Destination 'payload.bin') | Should -BeFalse
   }
 
-  It 'Should extract a selected executable from a solid LZMA AList installer' {
+  It 'Should extract a selected executable from a solid LZMA AList installer' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-alist'
     Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -571,7 +571,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     }
   }
 
-  It 'Should extract every catalogued AList payload when Name is omitted' {
+  It 'Should extract every catalogued AList payload when Name is omitted' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-alist-all'
     Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -589,7 +589,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     }
   }
 
-  It 'Should extract a selected non-solid vendor LZMA2 payload from UU Remote' {
+  It 'Should extract a selected non-solid vendor LZMA2 payload from UU Remote' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'UURemote_Setup_4.34.0.8979.exe' `
       -Url 'https://a56.gdl.netease.com/UURemote_Setup_4.34.0.8979_0723104500_gwqd.exe' `
       -Sha256 '237EB74939A62935AE3E2B1FD43C484D634CCD96FB1094BA764C8CB64065DC9A'
@@ -607,7 +607,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     }
   }
 
-  It 'Should decode and extract a solid raw-BZip2 Exr-IO installer' {
+  It 'Should decode and extract a solid raw-BZip2 Exr-IO installer' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'Exr-IO_2.06.00.exe' `
       -Url 'https://www.exr-io.com/wp-content/uploads/Exr-IO_2.06.00.exe' `
       -Sha256 '4BAE349608064A28806C81554C1D8867AFCCF2883BCE4112568A3F3715AC1E87'
@@ -641,7 +641,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     }
   }
 
-  It 'Should decode and extract a non-solid raw-BZip2 Visual C++ libjpeg-turbo installer' {
+  It 'Should decode and extract a non-solid raw-BZip2 Visual C++ libjpeg-turbo installer' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'libjpeg-turbo-3.2.0-vc-x64.exe' `
       -Url 'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0-vc-x64.exe' `
       -Sha256 '662761D8BA8DAE04AEC74023EBAECEB856C2B56B9B59CFD180759D26300DDA42'
@@ -667,7 +667,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     }
   }
 
-  It 'Should decode and extract a non-solid raw-BZip2 GCC libjpeg-turbo installer' {
+  It 'Should decode and extract a non-solid raw-BZip2 GCC libjpeg-turbo installer' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'libjpeg-turbo-3.2.0-gcc-x64.exe' `
       -Url 'https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0-gcc-x64.exe' `
       -Sha256 '5A71EA596C573EA3B44C8E7B5E78613D3A28DC9490DC714E7222C9F63F55E454'
@@ -692,7 +692,7 @@ Describe 'NSIS compression and extraction' -Tag Unit {
     }
   }
 
-  It 'Should reject payload output beyond the extraction limit without retaining a partial file' {
+  It 'Should reject payload output beyond the extraction limit without retaining a partial file' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-expanded-limit'
     Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue

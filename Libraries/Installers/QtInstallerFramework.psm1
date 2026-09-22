@@ -159,72 +159,6 @@ function Read-QtInstallerFrameworkBytes {
   return , (Read-BinaryBytes -Stream $Stream -Offset $Offset -Count ([int]$Count))
 }
 
-function Read-QtInstallerFrameworkInt64 {
-  <#
-  .SYNOPSIS
-    Read a little-endian qint64 value used by Qt Installer Framework trailer records
-  .PARAMETER Stream
-    The file stream to read from
-  .PARAMETER Offset
-    The byte offset to read from
-  #>
-  [OutputType([int64])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The file stream to read from')]
-    [System.IO.Stream]$Stream,
-
-    [Parameter(Mandatory, HelpMessage = 'The byte offset to read from')]
-    [int64]$Offset
-  )
-
-  $Bytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset $Offset -Count 8
-  return [System.BitConverter]::ToInt64($Bytes, 0)
-}
-
-function Read-QtInstallerFrameworkUInt16BE {
-  <#
-  .SYNOPSIS
-    Read a big-endian UInt16 value from a Qt RCC resource
-  .PARAMETER Bytes
-    The RCC byte buffer
-  .PARAMETER Offset
-    The byte offset to read from
-  #>
-  [OutputType([uint16])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The RCC byte buffer')]
-    [byte[]]$Bytes,
-
-    [Parameter(Mandatory, HelpMessage = 'The byte offset to read from')]
-    [int]$Offset
-  )
-
-  if ($Offset -lt 0 -or $Offset + 2 -gt $Bytes.Length) { throw 'The Qt RCC UInt16 read is outside the buffer' }
-  return [uint16]((([uint16]$Bytes[$Offset]) -shl 8) -bor ([uint16]$Bytes[$Offset + 1]))
-}
-
-function Read-QtInstallerFrameworkUInt32BE {
-  <#
-  .SYNOPSIS
-    Read a big-endian UInt32 value from a Qt RCC resource
-  .PARAMETER Bytes
-    The RCC byte buffer
-  .PARAMETER Offset
-    The byte offset to read from
-  #>
-  [OutputType([uint32])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The RCC byte buffer')]
-    [byte[]]$Bytes,
-
-    [Parameter(Mandatory, HelpMessage = 'The byte offset to read from')]
-    [int]$Offset
-  )
-
-  if ($Offset -lt 0 -or $Offset + 4 -gt $Bytes.Length) { throw 'The Qt RCC UInt32 read is outside the buffer' }
-  return [uint32]((([uint32]$Bytes[$Offset]) -shl 24) -bor (([uint32]$Bytes[$Offset + 1]) -shl 16) -bor (([uint32]$Bytes[$Offset + 2]) -shl 8) -bor ([uint32]$Bytes[$Offset + 3]))
-}
-
 function Find-QtInstallerFrameworkBytePattern {
   <#
   .SYNOPSIS
@@ -319,7 +253,7 @@ function Read-QtInstallerFrameworkRange {
     [int64]$Offset
   )
 
-  ConvertTo-QtInstallerFrameworkRange -Start (Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Offset) -Length (Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset ($Offset + 8))
+  ConvertTo-QtInstallerFrameworkRange -Start (Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Offset) -Length (Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset ($Offset + 8))
 }
 
 function Move-QtInstallerFrameworkRange {
@@ -426,7 +360,7 @@ function Get-QtInstallerFrameworkBinaryLayout {
       $MetaDataCountOffset = $EndOfBinaryContent - 32
       if ($MetaDataCountOffset -lt 0) { throw 'Qt Installer Framework trailer is truncated' }
 
-      $MetaResourceCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $MetaDataCountOffset
+      $MetaResourceCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $MetaDataCountOffset
       if ($MetaResourceCount -lt 0 -or $MetaResourceCount -gt $QTIFW_MAX_META_RESOURCE_COUNT) {
         throw "Invalid Qt Installer Framework meta resource count: $MetaResourceCount"
       }
@@ -444,9 +378,9 @@ function Get-QtInstallerFrameworkBinaryLayout {
       }
 
       $OperationsSegment = Read-QtInstallerFrameworkRange -Stream $Stream -Offset $Cursor
-      $ResourceCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset ($Cursor + 16)
-      $BinaryContentSize = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset ($Cursor + 24)
-      $MagicMarker = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset ($Cursor + 32)
+      $ResourceCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset ($Cursor + 16)
+      $BinaryContentSize = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset ($Cursor + 24)
+      $MagicMarker = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset ($Cursor + 32)
       $MagicCookieBytes = Read-QtInstallerFrameworkBytes -Stream $Stream -Offset ($Cursor + 40) -Count 8
       $MagicCookieHex = '0x' + (($MagicCookieBytes[7..0] | ForEach-Object { $_.ToString('x2') }) -join '')
       $EndOfExecutable = $EndOfBinaryContent - $BinaryContentSize
@@ -520,7 +454,7 @@ function Read-QtInstallerFrameworkByteArray {
   if ($Cursor.Value -lt 0 -or $Cursor.Value + 8 -gt $MaximumOffset) {
     throw 'The Qt Installer Framework byte-array length is outside its enclosing segment'
   }
-  $Length = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+  $Length = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
   if ($Length -lt 0 -or $Length -gt $QTIFW_MAX_BYTE_ARRAY_LENGTH) {
     throw "Invalid Qt Installer Framework byte-array length: $Length"
   }
@@ -563,7 +497,7 @@ function Get-QtInstallerFrameworkResourceCollection {
     # length/range framing, but their ranges are independently relative to BinaryContent.
     $Cursor = [ref][int64]$Layout.ResourceCollectionsSegment.Start
     if ($Layout.ResourceCollectionsSegment.Length -lt 8) { return @() }
-    $CollectionCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $CollectionCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
     $Cursor.Value += 8
     if ($CollectionCount -lt 0 -or $CollectionCount -gt $QTIFW_MAX_RESOURCE_COLLECTION_COUNT) {
       throw "Invalid Qt Installer Framework resource collection count: $CollectionCount"
@@ -580,7 +514,7 @@ function Get-QtInstallerFrameworkResourceCollection {
 
       # Enter the collection-specific catalog only after validating its rebased file range.
       $DataCursor = [ref][int64]$CollectionDataSegment.Start
-      $ResourceCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $DataCursor.Value
+      $ResourceCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $DataCursor.Value
       $DataCursor.Value += 8
       if ($ResourceCount -lt 0 -or $ResourceCount -gt $QTIFW_MAX_RESOURCE_COUNT) {
         throw "Invalid Qt Installer Framework resource count: $ResourceCount"
@@ -609,7 +543,7 @@ function Get-QtInstallerFrameworkResourceCollection {
     if ($Cursor.Value + 8 -ne $Layout.ResourceCollectionsSegment.End) {
       throw "The Qt Installer Framework resource-collection index was not consumed exactly: cursor=$($Cursor.Value) end=$($Layout.ResourceCollectionsSegment.End)"
     }
-    $TrailingCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $TrailingCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
     if ($TrailingCount -ne $CollectionCount) { throw 'The Qt Installer Framework resource-collection count footer does not match its header' }
 
     return $Collections.ToArray()
@@ -641,7 +575,7 @@ function Get-QtInstallerFrameworkLegacyComponentCollection {
     $IndexSegment = $Layout.ComponentIndexSegment
     if ($IndexSegment.Length -lt 16) { throw 'The Qt IFW 1.x component index is truncated' }
     $Cursor = [ref][int64]$IndexSegment.Start
-    $ComponentCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $ComponentCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
     $Cursor.Value += 8
     if ($ComponentCount -lt 0 -or $ComponentCount -gt $QTIFW_MAX_COMPONENT_COUNT) {
       throw "Invalid Qt Installer Framework component count: $ComponentCount"
@@ -656,7 +590,7 @@ function Get-QtInstallerFrameworkLegacyComponentCollection {
       Assert-QtInstallerFrameworkRange -Range $ComponentSegment -FileLength $Stream.Length -Name 'legacy component data'
 
       $DataCursor = [ref][int64]$ComponentSegment.Start
-      $ArchiveCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $DataCursor.Value
+      $ArchiveCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $DataCursor.Value
       $DataCursor.Value += 8
       if ($ArchiveCount -lt 0 -or $ArchiveCount -gt $QTIFW_MAX_RESOURCE_COUNT) {
         throw "Invalid Qt Installer Framework archive count: $ArchiveCount"
@@ -684,11 +618,47 @@ function Get-QtInstallerFrameworkLegacyComponentCollection {
     }
 
     if ($Cursor.Value + 8 -ne $IndexSegment.End) { throw 'The Qt IFW 1.x component index was not consumed exactly' }
-    $TrailingCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $TrailingCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
     if ($TrailingCount -ne $ComponentCount) { throw 'The Qt IFW 1.x component index count footer does not match its header' }
     return $Components.ToArray()
   } finally {
     if ($OwnsStream) { $Stream.Dispose() } else { $Stream.Position = $OriginalPosition }
+  }
+}
+
+function Read-QtInstallerFrameworkXml {
+  <#
+  .SYNOPSIS
+    Read bounded Qt XML without DTDs or external entity resolution.
+  .PARAMETER Content
+    Raw XML text from a validated resource.
+  .PARAMETER Path
+    Resolved local XML file path. The helper owns and closes its input stream.
+  .PARAMETER MaximumCharacters
+    Maximum decoded document length, including markup.
+  #>
+  [OutputType([xml])]
+  [CmdletBinding()]
+  param (
+    [Parameter(Mandatory, ParameterSetName = 'Content')][AllowEmptyString()][string]$Content,
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumCharacters
+  )
+  $Settings = [Xml.XmlReaderSettings]::new()
+  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+  $Settings.XmlResolver = $null
+  $Settings.MaxCharactersInDocument = $MaximumCharacters
+  $SourceReader = if ($PSCmdlet.ParameterSetName -eq 'Path') { [IO.File]::OpenRead($Path) } else { [IO.StringReader]::new($Content) }
+  $Reader = $null
+  try {
+    $Reader = [Xml.XmlReader]::Create($SourceReader, $Settings)
+    $Document = [Xml.XmlDocument]::new()
+    $Document.XmlResolver = $null
+    $Document.Load($Reader)
+    return ,$Document
+  } finally {
+    if ($Reader) { $Reader.Dispose() }
+    $SourceReader.Dispose()
   }
 }
 
@@ -704,20 +674,7 @@ function ConvertFrom-QtInstallerFrameworkOperationXml {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][AllowEmptyString()][string]$Xml)
 
-  $ReaderSettings = [Xml.XmlReaderSettings]::new()
-  $ReaderSettings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-  $ReaderSettings.XmlResolver = $null
-  $ReaderSettings.MaxCharactersInDocument = $QTIFW_MAX_OPERATION_BYTES
-  $StringReader = [IO.StringReader]::new($Xml)
-  $Reader = [Xml.XmlReader]::Create($StringReader, $ReaderSettings)
-  try {
-    $Document = [Xml.XmlDocument]::new()
-    $Document.XmlResolver = $null
-    $Document.Load($Reader)
-  } finally {
-    $Reader.Dispose()
-    $StringReader.Dispose()
-  }
+  $Document = Read-QtInstallerFrameworkXml -Content $Xml -MaximumCharacters $QTIFW_MAX_OPERATION_BYTES
 
   if ($Document.DocumentElement.LocalName -cne 'operation') {
     throw "The Qt Installer Framework performed-operation XML root is '$($Document.DocumentElement.LocalName)', expected 'operation'"
@@ -1065,7 +1022,7 @@ function Get-QtInstallerFrameworkOperation {
   $OriginalPosition = $Stream.Position
   try {
     $Cursor = [ref][int64]$Segment.Start
-    $Count = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $Count = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
     $Cursor.Value += 8
     if ($Count -lt 0 -or $Count -gt $QTIFW_MAX_OPERATION_COUNT) {
       throw "Invalid Qt Installer Framework performed-operation count: $Count"
@@ -1091,7 +1048,7 @@ function Get-QtInstallerFrameworkOperation {
     if ($Cursor.Value + 8 -ne $Segment.End) {
       throw "The Qt Installer Framework operations segment was not consumed exactly: cursor=$($Cursor.Value) end=$($Segment.End)"
     }
-    $TrailingCount = Read-QtInstallerFrameworkInt64 -Stream $Stream -Offset $Cursor.Value
+    $TrailingCount = Read-BinaryInteger -Size 8 -Signed -Stream $Stream -Offset $Cursor.Value
     if ($TrailingCount -ne $Count) { throw 'The Qt Installer Framework performed-operation count footer does not match its header' }
     return $Operations.ToArray()
   } finally {
@@ -1114,7 +1071,7 @@ function Expand-QtInstallerFrameworkCompressedRccData {
 
   if ($Data.Length -lt 4) { throw 'The compressed Qt RCC payload is truncated' }
   # qCompress prefixes its Zlib stream with the expected size in network byte order.
-  $ExpectedLength = Read-QtInstallerFrameworkUInt32BE -Bytes $Data -Offset 0
+  $ExpectedLength = Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Data -Offset 0
   if ($ExpectedLength -gt $QTIFW_MAX_BYTE_ARRAY_LENGTH) {
     throw "The compressed Qt RCC payload expands too large: $ExpectedLength bytes"
   }
@@ -1158,7 +1115,7 @@ function Read-QtInstallerFrameworkRccName {
   )
 
   $Offset = $NamesOffset + [int]$NameOffset
-  $Length = Read-QtInstallerFrameworkUInt16BE -Bytes $Bytes -Offset $Offset
+  $Length = Read-BinaryInteger -Size 2 -Endian BigEndian -Bytes $Bytes -Offset $Offset
   $StringOffset = $Offset + 6
   $ByteLength = [int]$Length * 2
   if ($StringOffset + $ByteLength -gt $Bytes.Length) { throw 'The Qt RCC name is truncated' }
@@ -1185,10 +1142,10 @@ function Get-QtInstallerFrameworkRccResource {
 
   # RCC stores three absolute offsets from the start of the qres buffer. Validate the complete
   # section map before following any tree node or data pointer.
-  $Version = Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 4
-  $TreeOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 8)
-  $DataOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 12)
-  $NamesOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset 16)
+  $Version = Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset 4
+  $TreeOffset = [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset 8)
+  $DataOffset = [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset 12)
+  $NamesOffset = [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset 16)
   if ($Version -ne 1) { throw "Unsupported Qt RCC version: $Version" }
   if ($TreeOffset -lt 0 -or $DataOffset -lt 0 -or $NamesOffset -lt 0 -or $TreeOffset -ge $Bytes.Length -or $DataOffset -ge $Bytes.Length -or $NamesOffset -ge $Bytes.Length) {
     throw 'The Qt RCC section offsets are invalid'
@@ -1205,16 +1162,16 @@ function Get-QtInstallerFrameworkRccResource {
     $NodeOffset = $TreeOffset + ([int]$Current.Index * $QTIFW_RCC_NODE_SIZE)
     if ($NodeOffset + $QTIFW_RCC_NODE_SIZE -gt $Bytes.Length) { throw 'The Qt RCC node table is truncated' }
 
-    $NameOffset = Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset $NodeOffset
-    $Flags = Read-QtInstallerFrameworkUInt16BE -Bytes $Bytes -Offset ($NodeOffset + 4)
+    $NameOffset = Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset $NodeOffset
+    $Flags = Read-BinaryInteger -Size 2 -Endian BigEndian -Bytes $Bytes -Offset ($NodeOffset + 4)
     $IsRootNode = [int]$Current.Index -eq 0 -and [string]$Current.Path -eq ':'
     $Name = if ($IsRootNode) { '' } else { Read-QtInstallerFrameworkRccName -Bytes $Bytes -NamesOffset $NamesOffset -NameOffset $NameOffset }
     $Path = if ($IsRootNode) { ':' } elseif ($Current.Path -eq ':') { ":/$Name" } else { "$($Current.Path)/$Name" }
 
     if (($Flags -band $QTIFW_RCC_FLAG_DIRECTORY) -ne 0) {
       # Directory records point to a contiguous run of child nodes in the tree table.
-      $ChildCount = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset ($NodeOffset + 6))
-      $ChildOffset = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset ($NodeOffset + 10))
+      $ChildCount = [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset ($NodeOffset + 6))
+      $ChildOffset = [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset ($NodeOffset + 10))
       if ($ChildCount -lt 0 -or $ChildCount -gt $QTIFW_MAX_RESOURCE_COUNT) {
         throw "Invalid Qt RCC child count: $ChildCount"
       }
@@ -1223,8 +1180,8 @@ function Get-QtInstallerFrameworkRccResource {
       }
     } else {
       # File records point into the data section, where a BE length precedes the payload.
-      $DataBlobOffset = $DataOffset + [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset ($NodeOffset + 10))
-      $DataLength = [int](Read-QtInstallerFrameworkUInt32BE -Bytes $Bytes -Offset $DataBlobOffset)
+      $DataBlobOffset = $DataOffset + [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset ($NodeOffset + 10))
+      $DataLength = [int](Read-BinaryInteger -Size 4 -Endian BigEndian -Bytes $Bytes -Offset $DataBlobOffset)
       $PayloadOffset = $DataBlobOffset + 4
       if ($DataLength -lt 0 -or $PayloadOffset + $DataLength -gt $Bytes.Length) { throw 'The Qt RCC payload is truncated' }
       $Payload = [byte[]]::new($DataLength)
@@ -1921,17 +1878,7 @@ function Read-QtInstallerFrameworkRepositoryManifest {
   $UpdatesPath = Resolve-InstallerFileSystemPath -Path $UpdatesPath -PathType Leaf
   $File = Get-Item -LiteralPath $UpdatesPath -Force
   if ($File.Length -gt $QTIFW_MAX_XML_SCAN_BYTES) { throw "Qt IFW repository metadata exceeds the $QTIFW_MAX_XML_SCAN_BYTES-byte limit: $UpdatesPath" }
-  $Settings = [Xml.XmlReaderSettings]::new()
-  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-  $Settings.XmlResolver = $null
-  $Reader = [Xml.XmlReader]::Create($UpdatesPath, $Settings)
-  try {
-    $Document = [Xml.XmlDocument]::new()
-    $Document.XmlResolver = $null
-    $Document.Load($Reader)
-  } finally {
-    $Reader.Dispose()
-  }
+  $Document = Read-QtInstallerFrameworkXml -Path $UpdatesPath -MaximumCharacters $QTIFW_MAX_XML_SCAN_BYTES
   if ($Document.DocumentElement.LocalName -ne 'Updates') { throw "The Qt IFW repository metadata root is not Updates: $UpdatesPath" }
   $Resource = [pscustomobject]@{ Xml = $Document; Root = 'Updates'; Source = $UpdatesPath }
   [pscustomobject][ordered]@{

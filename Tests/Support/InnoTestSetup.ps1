@@ -13,13 +13,16 @@ BeforeAll {
   & $InnoModule {
     function script:Get-TestInnoCatalogLayout {
       param([int]$VersionNumber, [bool]$UnicodeVariant)
-      $InternalVersion = $VersionNumber -eq 7000 ? 700003 : $VersionNumber
-      $Mode = $UnicodeVariant ? 'Unicode' : 'Ansi'
-      $Format = $Script:InnoFormatCatalog.Formats | Where-Object {
-        $_.InternalStructureVersion -eq $InternalVersion -and $_.CharacterMode -eq $Mode -and $_.EditionId -eq 'official'
-      } | Select-Object -First 1
-      if (-not $Format) { throw "No test catalog format exists for $VersionNumber/$Mode" }
-      Copy-InnoResolvedCatalogFormat -Format $Script:InnoResolvedFormats[$Format.Id] -LayoutResolution Exact -CandidateIds @($Format.Id)
+      & (Get-Module -Name InnoFormat -All | Select-Object -First 1) {
+        param($VersionNumber, $UnicodeVariant)
+        $InternalVersion = $VersionNumber -eq 7000 ? 700003 : $VersionNumber
+        $Mode = $UnicodeVariant ? 'Unicode' : 'Ansi'
+        $Format = $Script:InnoFormatCatalog.Formats | Where-Object {
+          $_.InternalStructureVersion -eq $InternalVersion -and $_.CharacterMode -eq $Mode -and $_.EditionId -eq 'official'
+        } | Select-Object -First 1
+        if (-not $Format) { throw "No test catalog format exists for $VersionNumber/$Mode" }
+        Copy-InnoResolvedCatalogFormat -Format $Script:InnoResolvedFormats[$Format.Id] -LayoutResolution Exact -CandidateIds @($Format.Id)
+      } $VersionNumber $UnicodeVariant
     }
   }
 

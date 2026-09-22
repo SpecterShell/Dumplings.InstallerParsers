@@ -76,7 +76,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.Traversal | Should -Be '_\payload.exe'
   }
 
-  It 'Should keep NSIS blocks as byte arrays for fast entry parsing' {
+  It 'Should keep NSIS blocks as byte arrays for fast entry parsing' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -315,7 +315,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.Current | Should -Be 'current'
   }
 
-  It 'Should report a catalogued NSIS 3 Unicode profile for a real installer' {
+  It 'Should report a catalogued NSIS 3 Unicode profile for a real installer' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Result = Get-NSISFormatInfo -Path $Fixture
 
@@ -330,7 +330,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.IsSupported | Should -BeTrue
   }
 
-  It 'Should recover visible ARP metadata from a real Park3 ANSI installer' {
+  It 'Should recover visible ARP metadata from a real Park3 ANSI installer' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\NSIS\EastMoney.EastMoney\12.1.0\dfcft8.exe' -Uri 'https://swdlcdn.eastmoney.com/swc8_free_new/dfcft8.exe' -Sha256 'AF4261F01A13F9C326749F0C0BA4088DBE9C0399EB65062B6EED205E3988F808'
     $Format = Get-NSISFormatInfo -Path $Fixture
     $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine -FileSystemComplete
@@ -345,7 +345,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Count | Should -BeGreaterThan 0
   }
 
-  It 'Should verify the stock archive CRC and reject corruption inside its source range' {
+  It 'Should verify the stock archive CRC and reject corruption inside its source range' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'nsis204.exe') -Uri 'https://sourceforge.net/projects/nsis/files/NSIS%202/2.04/nsis204.exe/download' -Sha256 '967CC080B8CB1D5B750C324805F1687591761E91BE2EAFE1FC71677FF2DF03F3' -UseSourceForgeMetaRefresh
     $Info = Get-NSISFormatInfo -Path $Fixture
     $Info.ArchiveCrcStatus | Should -Be 'Valid'
@@ -484,7 +484,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.IgnoredExtensionOperands[0].OperandIndexes | Should -Be 6
   }
 
-  It 'Should parse Google Antigravity through its source-backed log-enabled command layout' {
+  It 'Should parse Google Antigravity through its source-backed log-enabled command layout' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'Google-Antigravity-2.8.1-x64.exe') -Uri 'https://storage.googleapis.com/antigravity-public/antigravity-hub/2.8.1-6512087774658560/windows-x64/Antigravity-x64.exe' -Sha256 '05085047994932949BB6777765710CDC28ADB61C804851167995A3C285ACCA47'
     $Format = Get-NSISFormatInfo -Path $Fixture
     $Info = Get-NSISInfo -Path $Fixture
@@ -497,7 +497,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Info.DisplayName | Should -Be 'Antigravity 2.8.1'
   }
 
-  It 'Should prefer stock raw-Deflate framing over an accidental legacy NSISBI header collision' {
+  It 'Should prefer stock raw-Deflate framing over an accidental legacy NSISBI header collision' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/iQIYI.iQIYI/14.8.0.10198/IQIYIsetup_winget.exe' -Uri 'https://mesh.if.iqiyi.com/player/upgrade/file/14.8.0.10198/IQIYIsetup_winget.exe' -Sha256 'D5C1F2FF746B05A7B5ABE1C5E9E5BD736829162FE484B114B1FBAF8C7B1E1641'
 
     $Info = Get-NSISInfo -Path $Fixture
@@ -510,7 +510,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Info.ProductCode | Should -Not -BeNullOrEmpty
   }
 
-  It 'Should retain Tencent Video metadata without empty-INI binding failures or unbounded section walking' {
+  It 'Should retain Tencent Video metadata without empty-INI binding failures or unbounded section walking' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Tencent.TencentVideo/11.180.7429.0/TencentVideo11.180.7429.0.exe' -Uri 'https://dldir1v6.qq.com/qqtv/TencentVideo11.180.7429.0.exe' -Sha256 '3FF27EE167CC4D28175D204BAEAE76E350535DF55EB216728FAAB35D3350D411'
 
     $Info = Get-NSISInfo -Path $Fixture -Architecture x86 -Scope machine
@@ -520,7 +520,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     ($Info.Diagnostics | Where-Object Kind -EQ Information).Message | Should -Match 'Full section simulation was skipped'
   }
 
-  It 'Should resolve paired LockWindow records in a vendor NSIS 3 Unicode installer' {
+  It 'Should resolve paired LockWindow records in a vendor NSIS 3 Unicode installer' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/NetEase.YoudaoPokeClass/2.18.9/YoudaoPokeClass-2.18.9.exe' -Uri 'https://codown.youdao.com/ke/pokeClass/2.18.9.0/YoudaoPokeClass-2.18.9.exe' -Sha256 '3C6F8A4D6FCC9023E9A4FD8D7D5A07059D372A4BBCCA452F8071F3F633CC0162'
 
     $Format = Get-NSISFormatInfo -Path $Fixture
@@ -531,7 +531,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Format.HasSemanticAmbiguity | Should -BeFalse
   }
 
-  It 'Should retain a vendor extension operand as nonfatal format evidence' {
+  It 'Should retain a vendor extension operand as nonfatal format evidence' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Tencent.Yuanbao/2.81.0/yuanbao_2.81.0.629_x64.exe' -Uri 'https://cdn-hybrid-prod.hunyuan.tencent.com/Desktop/official/b2640c59915a11b284a81d8d469c715d/yuanbao_2.81.0.629_x64.exe' -Sha256 'AB3DC14CDD2CB5EAF89B6A4CCC9EE268AF8AE5DDBDFAD84DD55DE7622FD44898'
 
     $Format = Get-NSISFormatInfo -Path $Fixture
@@ -542,7 +542,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     ($Format.Diagnostics | Where-Object Kind -EQ Information).Message | Should -Match 'vendor-extension operand'
   }
 
-  It 'Should initialize CMDLINE with the quoted installer path for bounded runtime scans' {
+  It 'Should initialize CMDLINE with the quoted installer path for bounded runtime scans' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/SonicWall.GlobalVPNClient/5.0.0.2008/GVCSetup-Win32_5.0.0.2008.exe' -Uri 'https://software.sonicwall.com/GlobalVPNClient/GVCSetup-Win32_5.0.0.2008.exe' -Sha256 'A5CA2B31C5B56D7DC616DFC7B1D3D3AB557363FEC4E207EEB6067AC4C34AFE14'
 
     $Info = Get-NSISInfo -Path $Fixture
@@ -588,7 +588,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 2
   }
 
-  It 'Should locate an archive aligned relative to an embedded stub and reject orphan headers' {
+  It 'Should locate an archive aligned relative to an embedded stub and reject orphan headers' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -654,7 +654,7 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.Unrelated | Should -Be 'D:\Custom\App'
   }
 
-  It 'Should read static metadata from an NSIS payload embedded as a PE resource' {
+  It 'Should read static metadata from an NSIS payload embedded as a PE resource' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe' -Url 'https://cdn.isealsuite.com/windows/FeiLian_Windows_x86_v3.2.16_r4828_a60997.exe'
     $Info = Get-NSISInfo -Path $Fixture
 

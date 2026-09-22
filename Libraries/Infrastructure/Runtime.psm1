@@ -59,6 +59,9 @@ function Import-InstallerManagedAssembly {
     Load a pinned managed assembly from the submodule asset directory once
   .PARAMETER Name
     File name of the managed assembly below the asset root.
+  .PARAMETER Path
+    Explicit assembly path, resolved against PowerShell's filesystem location. Use this for
+    source-shipped providers outside the standard Assemblies directory.
   .PARAMETER TypeName
     Fully qualified type used to detect whether the assembly is already loaded.
   .PARAMETER AssetRoot
@@ -66,15 +69,17 @@ function Import-InstallerManagedAssembly {
     globally visible mirrored loader may belong to either independently consumable submodule.
   #>
   [OutputType([System.Reflection.Assembly])]
+  [CmdletBinding(DefaultParameterSetName = 'Asset')]
   param (
-    [Parameter(Mandatory)][string]$Name,
-    [Parameter(Mandatory)][string]$TypeName,
-    [string]$AssetRoot
+    [Parameter(Position = 0, Mandatory, ParameterSetName = 'Asset')][string]$Name,
+    [Parameter(Position = 0, Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Position = 1, Mandatory)][string]$TypeName,
+    [Parameter(Position = 2, ParameterSetName = 'Asset')][string]$AssetRoot
   )
 
   $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
   if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
-  $AssemblyName = $Name
+  $AssemblyName = if ($PSCmdlet.ParameterSetName -eq 'Path') { (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName } else { $Name }
   $SimpleAssemblyName = [IO.Path]::GetFileNameWithoutExtension($AssemblyName)
   Use-InstallerRuntimeLoadLock {
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
@@ -96,7 +101,7 @@ function Import-InstallerManagedAssembly {
     } else {
       [IO.Path]::GetFullPath($AssetRoot)
     }
-    $AssemblyPath = Join-Path -Path $ResolvedAssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName
+    $AssemblyPath = if ([IO.Path]::IsPathFullyQualified($AssemblyName)) { $AssemblyName } else { Join-Path -Path $ResolvedAssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName }
     if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) { throw "The managed dependency is missing: $AssemblyPath" }
     Add-Type -Path $AssemblyPath -PassThru -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Assembly
   }

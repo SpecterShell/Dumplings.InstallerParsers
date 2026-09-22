@@ -232,7 +232,7 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.Wildcard | Should -Be 'Present'
   }
 
-  It 'Should fork unresolved file predicates and merge common registry effects' {
+  It 'Should fork unresolved file predicates and merge common registry effects' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' `
       -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
@@ -306,7 +306,7 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.Predicates | Should -HaveCount 1
   }
 
-  It 'Should preserve divergent branch variables as unknown values' {
+  It 'Should preserve divergent branch variables as unknown values' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' `
       -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
@@ -355,7 +355,7 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.Diagnostics | Should -BeNullOrEmpty
   }
 
-  It 'Should bound exponential branch exploration and retain truncation evidence' {
+  It 'Should bound exponential branch exploration and retain truncation evidence' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' `
       -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
@@ -806,7 +806,7 @@ Describe 'NSIS command simulation' -Tag Unit {
     $Result.PublicStackSize | Should -Be 0
   }
 
-  It 'Should classify standard Tauri command-line switches by purpose' {
+  It 'Should classify standard Tauri command-line switches by purpose' -Tag RealFixture {
     $Fixture = Get-InstallerFixture -Name 'Yaak_2026.4.0_x64-setup.exe' -Url 'https://github.com/mountain-loop/yaak/releases/download/v2026.4.0/Yaak_2026.4.0_x64-setup.exe' -Sha256 '026DC0753F4880313B93BBFF848A9CD09A114F87111AAAEF5E4E698C52C8B561'
     $Info = Get-NSISInstallerSwitchInfo -Path $Fixture
 
