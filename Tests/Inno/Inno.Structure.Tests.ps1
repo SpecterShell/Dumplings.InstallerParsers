@@ -296,4 +296,35 @@ Describe 'Inno structures and version handling' -Tag Unit {
         Should -Be 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv~1fc2e6d2_is1'
     }
   }
+
+  It 'Should identify required x64-only constants without treating literals or sysnative as restrictions' {
+    InModuleScope Inno {
+      $Requirement = Get-InnoArchitectureConstantRequirement -Values ([ordered]@{
+          DefaultDirName = '{commonpf64}\Product'
+          RegistryProbe  = '{reg:HKLM64\Software\Vendor,Path}'
+          DotNetPath     = '{dotnet4064}'
+          Literal        = '{{commoncf64}\Documentation'
+          SystemPath     = '{sysnative}\cmd.exe'
+        }) -DefaultScope machine
+
+      $Requirement.Requires64BitWindows | Should -BeTrue
+      $Requirement.RequiredConstants | Should -Be @('commonpf64', 'dotnet4064', 'reg:HKLM64')
+      $Requirement.UnsupportedArchitectures | Should -Be @('x86')
+      $Requirement.Evidence.Field | Should -Be @('DefaultDirName', 'RegistryProbe', 'DotNetPath')
+      $Requirement.ConditionalEvidence | Should -BeNullOrEmpty
+
+      $DualScope = Get-InnoArchitectureConstantRequirement -Values ([ordered]@{
+          DefaultDirName = '{autopf64}\Product'
+        }) -DefaultScope machine -SupportsScopeOverride
+      $DualScope.Requires64BitWindows | Should -BeFalse
+      $DualScope.UnsupportedArchitectures | Should -BeNullOrEmpty
+      $DualScope.ConditionalEvidence | Should -HaveCount 1
+
+      $FixedMachine = Get-InnoArchitectureConstantRequirement -Values ([ordered]@{
+          DefaultDirName = '{autocf64}\Product'
+        }) -DefaultScope machine
+      $FixedMachine.Requires64BitWindows | Should -BeTrue
+      $FixedMachine.RequiredConstants | Should -Be @('commoncf64')
+    }
+  }
 }

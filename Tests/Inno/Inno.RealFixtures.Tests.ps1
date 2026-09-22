@@ -141,6 +141,25 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
+  It 'Should exclude x86 when a required setup path uses commonpf64' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\ProWare.AmortizationPlus\1.0.0.0\ap_setup.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The optional ProWare Amortization Plus fixture is not cached.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be '22C8B9FF5A528D1EBC2D604765AD2BD9EDFB2D577073B3CEDEEC561600135010'
+
+    $Info = Get-InnoInfo -Path $Fixture
+
+    $Info.RawDefaultDirName | Should -Be '{commonpf64}\AP2'
+    $Info.RequiredArchitectureConstants | Should -Be @('commonpf64')
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.UnsupportedArchitectures | Should -Be @('x86')
+    $Info.ArchitectureRequirementEvidence | Should -HaveCount 1
+    $Info.ArchitectureRequirementEvidence[0].Field | Should -Be 'DefaultDirName'
+    @($Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 1
+  }
+
   It 'Should parse the controlled historical Hyper-V fixture <Name>' -ForEach @(
     @{ Name = 'inno-catalog-1.3.26-a.exe'; Hash = '2A06109751F9D99B3FA24A00EE4184B1ED729538EADC497D8B19EC2057405F98'; Id = '1325-a'; DisplayName = 'Dumplings Inno Catalog Fixture version 1.3.26' }
     @{ Name = 'inno-catalog-2.0.19-a.exe'; Hash = '63328B2E20FA1675CFE1CDCF0123265B01D0D9E540DEA375337D66EC0FAA4E06'; Id = '2018-a'; DisplayName = 'Dumplings Inno Catalog Fixture 2.0.19' }

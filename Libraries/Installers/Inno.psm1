@@ -2284,6 +2284,120 @@ function Get-InnoStaticStringInfo {
   }
 }
 
+function Get-InnoArchitectureConstantRequirement {
+  <#
+  .SYNOPSIS
+    Identify required Inno constants that cannot be expanded on 32-bit Windows.
+  .PARAMETER Values
+    Named, always-expanded setup values. Keys identify the source field in the
+    returned evidence and values contain the raw compiled Inno strings.
+  .PARAMETER DefaultScope
+    The compiled default install scope used to resolve auto* constants.
+  .PARAMETER SupportsScopeOverride
+    Whether command-line scope selection can avoid a machine-only auto*64 path.
+  .OUTPUTS
+    A requirement object containing direct evidence, scope-conditional evidence,
+    required constant names, and unsupported operating-system architectures.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'Named setup values that Inno expands on every applicable installation path')]
+    [System.Collections.IDictionary]$Values,
+
+    [AllowNull()]
+    [string]$DefaultScope,
+
+    [switch]$SupportsScopeOverride
+  )
+
+  $DirectConstantNames = @{
+    'commonpf64' = 'commonpf64'
+    'pf64'       = 'commonpf64'
+    'commoncf64' = 'commoncf64'
+    'cf64'       = 'commoncf64'
+    'dotnet2064' = 'dotnet2064'
+    'dotnet4064' = 'dotnet4064'
+  }
+  $AutoConstantNames = @{
+    'autopf64' = 'commonpf64'
+    'autocf64' = 'commoncf64'
+  }
+  $Requirements = [Collections.Generic.List[object]]::new()
+  $ConditionalRequirements = [Collections.Generic.List[object]]::new()
+  $RequiredConstants = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+  foreach ($Field in $Values.GetEnumerator()) {
+    $Value = [string]$Field.Value
+    if ([string]::IsNullOrEmpty($Value)) { continue }
+
+    $Index = 0
+    while ($Index -lt $Value.Length) {
+      $OpenIndex = $Value.IndexOf('{', $Index)
+      if ($OpenIndex -lt 0) { break }
+      if ($OpenIndex + 1 -lt $Value.Length -and $Value[$OpenIndex + 1] -eq '{') {
+        # Inno treats doubled opening braces as literal text, so they cannot
+        # impose an operating-system requirement.
+        $Index = $OpenIndex + 2
+        continue
+      }
+
+      $EndIndex = Find-InnoConstantEnd -Value $Value -StartIndex $OpenIndex
+      if ($EndIndex -lt 0) { break }
+      $RawConstant = $Value.Substring($OpenIndex + 1, $EndIndex - $OpenIndex - 1)
+      $ConstantName = $RawConstant.Trim().ToLowerInvariant()
+      $CanonicalName = $null
+      $Reason = $null
+      $IsScopeConditional = $false
+
+      if ($DirectConstantNames.ContainsKey($ConstantName)) {
+        $CanonicalName = $DirectConstantNames[$ConstantName]
+        $Reason = 'The Inno runtime raises an internal error when this constant is expanded on 32-bit Windows.'
+      } elseif ($ConstantName -match '^reg:(?<Root>hk(?:a|cr|cu|lm|u|cc)64)\\') {
+        $CanonicalName = "reg:$($Matches.Root.ToUpperInvariant())"
+        $Reason = 'The Inno runtime rejects the 64-bit registry view on 32-bit Windows.'
+      } elseif ($AutoConstantNames.ContainsKey($ConstantName)) {
+        # auto*64 becomes common*64 in administrative mode and user* in
+        # non-administrative mode. A supported command-line scope override can
+        # therefore keep x86 viable even when the default scope is machine.
+        if ($DefaultScope -eq 'machine' -and -not $SupportsScopeOverride) {
+          $CanonicalName = $AutoConstantNames[$ConstantName]
+          $Reason = 'The auto*64 constant resolves to a common 64-bit folder in the installer''s fixed machine scope.'
+        } elseif ($DefaultScope -ne 'user') {
+          $CanonicalName = $AutoConstantNames[$ConstantName]
+          $Reason = 'The auto*64 constant requires 64-bit Windows only when this installer runs in machine scope.'
+          $IsScopeConditional = $true
+        }
+      }
+
+      if ($CanonicalName) {
+        $Evidence = [pscustomobject][ordered]@{
+          Field             = [string]$Field.Key
+          Constant          = "{$RawConstant}"
+          CanonicalConstant = $CanonicalName
+          RawValue          = $Value
+          Reason            = $Reason
+          ScopeConditional  = $IsScopeConditional
+        }
+        if ($IsScopeConditional) {
+          $ConditionalRequirements.Add($Evidence)
+        } else {
+          $Requirements.Add($Evidence)
+          $null = $RequiredConstants.Add($CanonicalName)
+        }
+      }
+      $Index = $EndIndex + 1
+    }
+  }
+
+  return [pscustomobject][ordered]@{
+    Requires64BitWindows            = $Requirements.Count -gt 0
+    RequiredConstants               = [string[]]@($RequiredConstants | Sort-Object)
+    UnsupportedArchitectures        = [string[]]@($Requirements.Count -gt 0 ? @('x86') : @())
+    Evidence                        = [pscustomobject[]]$Requirements.ToArray()
+    ConditionalEvidence             = [pscustomobject[]]$ConditionalRequirements.ToArray()
+  }
+}
+
 function ConvertFrom-InnoEscapedString {
   <#
   .SYNOPSIS
@@ -3526,7 +3640,6 @@ function Get-InnoInfo {
     } else {
       @()
     }
-    $SupportedArchitectures = @($HeaderArchitectureData.SupportedArchitectures)
     $InstallIn64BitMode = $HeaderArchitectureData.InstallIn64BitMode
 
     $DefaultDirectoryConstantMap = Get-InnoDefaultDirectoryConstantMap -DefaultScope $DefaultScope -InstallIn64BitMode $InstallIn64BitMode
@@ -3535,6 +3648,34 @@ function Get-InnoInfo {
     }
     $DefaultDirInfo = Get-InnoStaticStringInfo -Value $DefaultDirName -ConstantMap $DefaultDirectoryConstantMap
     $ResolvedDefaultDirName = $DefaultDirInfo.Value
+
+    # ArchitecturesAllowed is not sufficient when a mandatory setup path uses
+    # a constant that ExpandIndividualConst rejects on 32-bit Windows. Inno
+    # expands DefaultDirName while initializing the wizard, before file-table
+    # conditions can suppress the path, so this is deterministic compatibility
+    # evidence rather than payload-architecture inference.
+    $RequiredArchitectureValues = [ordered]@{ DefaultDirName = $DefaultDirName }
+    if ($DefaultDirInfo.DecodedValue -cne $DefaultDirName) {
+      # A statically interpreted {code:*} function can return another built-in
+      # constant. Inspect that recovered value as a second expansion stage.
+      $RequiredArchitectureValues['ResolvedDefaultDirName'] = $DefaultDirInfo.DecodedValue
+    }
+    $ArchitectureConstantRequirement = Get-InnoArchitectureConstantRequirement -Values $RequiredArchitectureValues `
+      -DefaultScope $DefaultScope -SupportsScopeOverride:$HeaderFixedData.SupportsCommandLineScopeOverride
+    $SupportedArchitectures = [string[]]@(
+      $HeaderArchitectureData.SupportedArchitectures |
+        Where-Object { $ArchitectureConstantRequirement.UnsupportedArchitectures -notcontains $_ }
+    )
+    $UnsupportedArchitectures = [string[]]@(
+      @($HeaderArchitectureData.UnsupportedArchitectures) + @($ArchitectureConstantRequirement.UnsupportedArchitectures) |
+        Select-Object -Unique
+    )
+    if ($ArchitectureConstantRequirement.Requires64BitWindows) {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Architecture.Required64BitConstant' -Source 'Inno' -Message "Inno expands an x64-only constant from a required setup field; x86 is excluded even though ArchitecturesAllowed may permit it." -Kind Information -Areas Metadata, Installability -AffectedFields SupportedArchitectures, UnsupportedArchitectures -Evidence ([ordered]@{
+            RequiredConstants = $ArchitectureConstantRequirement.RequiredConstants
+            Fields            = [string[]]@($ArchitectureConstantRequirement.Evidence.Field | Select-Object -Unique)
+          })))
+    }
 
     # A resolved root token is stronger scope evidence than the launcher PE
     # architecture. Dynamic {code:...} paths remain unresolved and do not guess.
@@ -3651,7 +3792,10 @@ function Get-InnoInfo {
       PackedArchitecturesInstallIn64BitMode    = $HeaderArchitectureData.PackedArchitecturesInstallIn64BitMode
       InstallIn64BitMode                       = $InstallIn64BitMode
       SupportedArchitectures                   = $SupportedArchitectures
-      UnsupportedArchitectures                 = @($HeaderArchitectureData.UnsupportedArchitectures)
+      UnsupportedArchitectures                 = $UnsupportedArchitectures
+      RequiredArchitectureConstants            = $ArchitectureConstantRequirement.RequiredConstants
+      ArchitectureRequirementEvidence          = $ArchitectureConstantRequirement.Evidence
+      ConditionalArchitectureRequirementEvidence = $ArchitectureConstantRequirement.ConditionalEvidence
       InstallerArchitecture                    = $PEInfo.Architecture
       AppName                                  = $AppNameInfo.DecodedValue
       AppVerName                               = $AppVerNameInfo.DecodedValue
