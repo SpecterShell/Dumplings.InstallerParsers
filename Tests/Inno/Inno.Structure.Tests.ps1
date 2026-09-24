@@ -97,6 +97,7 @@ Describe 'Inno structures and version handling' -Tag Unit {
         [pscustomobject]@{ RootKey = 'HKCU'; Subkey = 'Software\Vendor\.ignored'; ValueName = ''; ValueData = 'Ignored'; Conditional = $false; Components = ''; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 40 }
         [pscustomobject]@{ RootKey = 'HKCR'; Subkey = '.optional'; ValueName = ''; ValueData = 'Dumplings.Optional'; Conditional = $true; Components = 'optional'; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 50 }
         [pscustomobject]@{ RootKey = 'HKCR'; Subkey = 'optional-protocol'; ValueName = 'URL Protocol'; ValueData = ''; Conditional = $true; Components = ''; Tasks = ''; Languages = ''; Check = 'ShouldRegisterProtocol'; RecordOffset = 60 }
+        [pscustomobject]@{ RootKey = 'HKCR'; Subkey = '.myp'; ValueName = ''; ValueData = 'InnoSetupProjectFile'; Conditional = $false; Components = ''; Tasks = ''; Languages = ''; Check = ''; RecordOffset = 70 }
       )
 
       $Associations = Get-InnoRegistryAssociationInfo -RegistryEntries $RegistryEntries
@@ -108,6 +109,7 @@ Describe 'Inno structures and version handling' -Tag Unit {
       $Associations.FileExtensionAssociations | Should -HaveCount 2
       $Associations.ProtocolAssociations | Should -HaveCount 2
       $Associations.ConditionalRegistryAssociations | Should -HaveCount 2
+      $Associations.FileExtensionAssociations.Name | Should -Not -Contain 'myp'
       ($Associations.ConditionalRegistryAssociations | Where-Object Name -EQ 'optional').Components | Should -Be 'optional'
       ($Associations.ConditionalRegistryAssociations | Where-Object Name -EQ 'optional-protocol').Check | Should -Be 'ShouldRegisterProtocol'
     }

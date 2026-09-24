@@ -3118,6 +3118,10 @@ function Get-InnoRegistryAssociationInfo {
     if (-not $Kind) { continue }
 
     $Name = $Kind -eq 'FileExtension' ? $FirstSegment.TrimStart('.').ToLowerInvariant() : $FirstSegment.ToLowerInvariant()
+    # Inno Setup registers .myp as its project-source extension. It describes the
+    # installer authoring tool rather than a file type handled by the installed app.
+    if ($Kind -eq 'FileExtension' -and $Name -ieq 'myp') { continue }
+
     $Association = [pscustomobject][ordered]@{
       Kind         = $Kind
       Name         = $Name

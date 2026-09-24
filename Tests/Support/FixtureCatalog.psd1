@@ -1,4 +1,11 @@
 @{
+  # AKInstaller and AKInstallerMSI
+  'AKInstaller-4.4.505.exe'                                    = 'Installers\AKInstaller\AKApplications.AKInstaller\4.4.505\AKInstaller-4.4.505.exe'
+  'AKInstaller-6.6.225.exe'                                    = 'Installers\AKInstaller\AKApplications.AKInstaller\6.6.225\AKInstaller-6.6.225.exe'
+  'AKInstallerMSI-3.5.1.exe'                                   = 'Installers\AKInstaller\AKApplications.AKInstallerMSI\3.5.1\AKInstallerMSI-3.5.1.exe'
+  'AKInstallerMSI-5.6.700.exe'                                 = 'Installers\AKInstaller\AKApplications.AKInstallerMSI\5.6.700\AKInstallerMSI-5.6.700.exe'
+  'regipay-5.0.0-233.x86.exe'                                  = 'Installers\AKInstaller\regify.regipay\5.0.0-233\regipay-5.0.0-233.x86.exe'
+
   # Advanced Installer
   'AccountResetInstaller.zip'                                  = 'Installers\AdvancedInstaller\Cjwdev.ADAccountResetTool\Current\AccountResetInstaller.zip'
   'bm-14.2.0.exe'                                              = 'Installers\AdvancedInstaller\MatthiasZronek.BenchMate\14.2.0\bm-14.2.0.exe'

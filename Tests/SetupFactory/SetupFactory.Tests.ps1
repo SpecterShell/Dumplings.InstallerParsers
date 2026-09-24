@@ -474,6 +474,7 @@ Registry.SetValue(rootName, "Software\Classes\computed", "", "value")
     $Info.SupportsSilentInstallation | Should -BeTrue
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.InstallerSwitches.Silent | Should -Be '/S'
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be '/S'
   }
 
   It 'selectively expands the runtime and metadata records from OutCALL when available' {
@@ -678,8 +679,10 @@ Registry.SetValue(rootName, "Software\Classes\computed", "", "value")
     $Info.CanExpand | Should -BeTrue
     $Info.SupportsSilentInstallation | Should -Be $Silent
     $Info.InstallModes | Should -Be ($Silent ? @('interactive', 'silent') : @('interactive'))
-    if ($Silent) { $Info.InstallerSwitches.Silent | Should -Be '/S' }
-    else { $Info.Diagnostics.Id | Should -Contain 'SetupFactory.Installability.SilentDisabled' }
+    if ($Silent) {
+      $Info.InstallerSwitches.Silent | Should -Be '/S'
+      $Info.InstallerSwitches.SilentWithProgress | Should -Be '/S'
+    } else { $Info.Diagnostics.Id | Should -Contain 'SetupFactory.Installability.SilentDisabled' }
   }
 
   It 'decodes the full Setup Factory 4 conclusion object without fabricating disabled ARP metadata' {
@@ -765,6 +768,7 @@ Registry.SetValue(rootName, "Software\Classes\computed", "", "value")
     $Info.InstallModes | Should -Be ($SupportsSilent ? @('interactive', 'silent') : @('interactive'))
     if ($SupportsSilent) {
       $Info.InstallerSwitches.Silent | Should -Be '/S'
+      $Info.InstallerSwitches.SilentWithProgress | Should -Be '/S'
       $Info.Diagnostics.Id | Should -Not -Contain 'SetupFactory.Installability.SilentUnsupportedByGeneration'
     } else {
       $Info.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'Silent'

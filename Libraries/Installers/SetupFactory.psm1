@@ -578,6 +578,7 @@ function Get-SetupFactoryInfo {
     $InstallerSwitches = [ordered]@{}
     $InstallModes = if ($SilentInstallationInfo.IsResolved -and $SilentInstallationInfo.SupportsSilentInstallation) {
       $InstallerSwitches['Silent'] = '/S'
+      $InstallerSwitches['SilentWithProgress'] = '/S'
       @('interactive', 'silent')
     } elseif ($SilentInstallationInfo.IsResolved) {
       @('interactive')
