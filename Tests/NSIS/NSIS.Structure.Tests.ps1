@@ -2,6 +2,48 @@
 . (Join-Path $PSScriptRoot '..\Support\NSISTestSetup.ps1')
 
 Describe 'NSIS structure and command layouts' -Tag Unit {
+  It 'Should validate electron-builder payload architecture: <Name>' -ForEach @(
+    @{ Name = 'matching x64'; Target = 'x64'; Packages = @('app-64.7z'); IsElectronBuilder = $true; HasMismatch = $false }
+    @{ Name = 'x86 entry for x64 package'; Target = 'x86'; Packages = @('app-64.7z'); IsElectronBuilder = $true; HasMismatch = $true }
+    @{ Name = 'arm64 entry for x64 package'; Target = 'arm64'; Packages = @('app-64.7z'); IsElectronBuilder = $true; HasMismatch = $true }
+    @{ Name = 'x64 entry for x86 package'; Target = 'x64'; Packages = @('app-32.zip'); IsElectronBuilder = $true; HasMismatch = $true }
+    @{ Name = 'matching arm64'; Target = 'arm64'; Packages = @('app-arm64.7z'); IsElectronBuilder = $true; HasMismatch = $false }
+    @{ Name = 'x64 entry for arm64 package'; Target = 'x64'; Packages = @('app-arm64.7z'); IsElectronBuilder = $true; HasMismatch = $true }
+    @{ Name = 'matching dual-architecture'; Target = 'x64'; Packages = @('app-arm64.7z', 'app-64.7z'); IsElectronBuilder = $true; HasMismatch = $false }
+    @{ Name = 'matching universal'; Target = 'x86'; Packages = @('app-arm64.7z', 'app-64.7z', 'app-32.7z'); IsElectronBuilder = $true; HasMismatch = $false }
+    @{ Name = 'unspecified entry architecture'; Target = ''; Packages = @('app-64.7z'); IsElectronBuilder = $true; HasMismatch = $false }
+    @{ Name = 'no decisive package evidence'; Target = 'x64'; Packages = @('Electron', 'app-64.7z.bak'); IsElectronBuilder = $false; HasMismatch = $false }
+  ) {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      param($Target, $Packages)
+      $State = [pscustomobject]@{
+        TargetArchitecture = $Target
+        VersionInfo        = [pscustomobject]@{ Unicode = $true }
+        StringsBlock       = [byte[]](0, 0)
+        Variables          = @{}
+        Files              = [string[]]@('$PLUGINSDIR\System.dll')
+        ExecutedPayloads   = @()
+        Metadata           = @{ WritesAppsAndFeaturesEntry = $true }
+      }
+      Get-ElectronBuilderNSISDetection -State $State -Strings $Packages
+    } $Target $Packages
+
+    $Result.IsElectronBuilder | Should -Be $IsElectronBuilder
+    $Result.Diagnostics.GetType() | Should -Be ([object[]])
+    $Mismatches = @($Result.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch')
+    $Mismatches.Count | Should -Be ([int]$HasMismatch)
+    if ($HasMismatch) {
+      $Mismatches[0].Evidence.RequestedArchitecture | Should -Be $Target
+      $Mismatches[0].Evidence.SupportedArchitectures | Should -Be $Result.Architectures
+      $Mismatches[0].Evidence.AppPackageFiles | Should -Be $Result.AppPackageFiles
+      $Mismatches[0].AffectedFields | Should -Contain 'Architecture'
+      $Resolved = Resolve-InstallerDiagnostic -Diagnostic $Mismatches[0] -Scenario ManifestUpdate -ConfirmedFamily
+      $Resolved.Level | Should -Be 'Warning'
+      $Resolved.IsBlocking | Should -BeFalse
+    }
+  }
+
   It 'Should render extraction strings with stable symbolic NSIS variables and shell folders' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {

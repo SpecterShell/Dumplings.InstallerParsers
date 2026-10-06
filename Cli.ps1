@@ -127,7 +127,9 @@ try {
     }
     'NSIS.GetElectronBuilderInfo' {
       Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
-      Get-ElectronBuilderNSISInfo -Path $Path
+      $Arguments = @{ Path = $Path }
+      if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
+      Get-ElectronBuilderNSISInfo @Arguments
     }
     'NSIS.GetInstallerSwitchInfo' {
       Import-Module (Join-Path $InstallerPath 'NSIS.psm1') -Force
@@ -145,6 +147,7 @@ try {
         IncludeDisassembly          = $IncludeDisassembly
       }
       if ($MaximumDisassemblyCharacters -gt 0) { $Arguments.MaximumDisassemblyCharacters = $MaximumDisassemblyCharacters }
+      if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
       Get-InnoInfo @Arguments
     }
     'Inno.GetFormatInfo' {

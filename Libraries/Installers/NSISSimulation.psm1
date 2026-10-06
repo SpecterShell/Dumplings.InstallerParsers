@@ -2,6 +2,8 @@
 # NSIS command interpreter and virtual system-effect simulation.
 # Instructor Registry plug-in stack and registry semantics are grounded in the
 # published v4.2 source: https://nsis.sourceforge.io/Registry_plug-in
+# electron-builder payload names and architecture selection:
+# https://github.com/electron-userland/electron-builder/blob/master/packages/app-builder-lib/templates/nsis/include/extractAppPackage.nsh
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -412,7 +414,7 @@ function Get-NSISSymbolicString {
 
   # Decode the bounded code-unit sequence once, then render control sequences in
   # a second pass. This follows the same NSIS 2/3/Park layouts as Get-NSISString
-  # but intentionally does not read mutable simulated variable values.
+  # but does not read mutable simulated variable values.
   if ($State.VersionInfo.Unicode) {
     $EndOffset = $Offset
     while ($EndOffset + 1 -lt $State.StringsBlock.Length -and
@@ -1701,8 +1703,8 @@ function Get-NSISRegistryWriteFromEntry {
 
   if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { return $null }
 
-  # EW_WRITEREG operand positions differ for NSISBI's expanded records. Decode
-  # type fields from the detected layout instead of the obsolete fake opcode map.
+  # Decode EW_WRITEREG type fields from the detected layout. NSISBI uses
+  # expanded records with different operand positions.
   $IsNsisBi = $State.VersionInfo.PSObject.Properties.Name -contains 'IsNsisBi' -and $State.VersionInfo.IsNsisBi
   $TypeIndex = if ($IsNsisBi) { 6 } else { 5 }
   $RegistryTypeIndex = if ($IsNsisBi) { 7 } else { 6 }
@@ -4206,7 +4208,7 @@ function Initialize-NSISOpcodeHandlers {
   $Handlers[$Script:NSIS_OPCODE_MESSAGE_BOX] = {
     param($State, $Entry)
     # my_MessageBox returns the compiled /SD response without displaying UI in
-    # silent mode. Interactive responses remain intentionally unresolved.
+    # silent mode. Interactive responses remain unresolved.
     $IsSilent = $State.ExecFlags.ContainsKey($Script:NSIS_EXEC_FLAG_SILENT) -and $State.ExecFlags[$Script:NSIS_EXEC_FLAG_SILENT] -ne 0
     $DefaultResponse = ([uint32]$Entry.Values[1]) -shr 21
     if (-not $IsSilent -or $DefaultResponse -eq 0) { return $Script:NSIS_CONTINUE_RESULT }
@@ -4787,7 +4789,7 @@ function Get-NSISAppsAndFeaturesEntryInfo {
   $OriginalLanguageVariable = if ($HadLanguageVariable) { $State.Variables[$Script:NSIS_PREDEFINED_VAR_LANGUAGE] } else { $null }
   $LanguageTablesToScan = if ($HasTargetScope) { @() } else { $LanguageTables }
   try {
-    # Untargeted analysis intentionally evaluates every language table. A
+    # Untargeted analysis evaluates every language table. A
     # targeted scope uses reached writes above because rescanning source entries
     # would lose runtime-computed key suffixes such as " (current user)".
     foreach ($LanguageTable in $LanguageTablesToScan) {
@@ -5024,7 +5026,7 @@ function Repair-NSISIncompleteInstallMetadata {
   }
 
   # Re-evaluate path-valued uninstall writes with the repaired live variables.
-  # This intentionally bypasses direct lexical data-flow: current variables now
+  # This bypasses direct lexical data-flow: current variables now
   # contain the branch selected by simulation rather than every compiled branch.
   foreach ($Entry in $State.Entries) {
     if ($Entry.Opcode -ne $Script:NSIS_OPCODE_WRITE_REG) { continue }
@@ -5424,7 +5426,7 @@ function Complete-NSISMetadata {
     )
     $State.Metadata.HasLocalizedAppsAndFeaturesEntries = $AppsAndFeaturesInfo.HasLocalizedEntries
 
-    # Architecture-targeted simulation can intentionally skip a direct scan.
+    # Architecture-targeted simulation can skip a direct scan.
     # Recover a missing scalar only when every explicit visible ARP projection
     # agrees, preserving localized or architecture-specific differences.
     foreach ($PropertyName in @('ProductCode', 'DisplayName', 'DisplayVersion', 'Publisher')) {
@@ -5913,7 +5915,7 @@ function Get-ElectronBuilderNSISDetection {
   .SYNOPSIS
     Detect electron-builder payload evidence from simulated NSIS state
   .PARAMETER State
-    The mutable NSIS execution state
+    The mutable NSIS execution state, including the caller's TargetArchitecture.
   .PARAMETER Strings
     Plain strings recovered from the NSIS strings block
   #>
@@ -5957,6 +5959,20 @@ function Get-ElectronBuilderNSISDetection {
   $OrderedArchitectures = @('arm64', 'x64', 'x86').Where({ $Architectures.Contains($_) })
   $PortableInfo = Get-NSISPortableLauncherInfo -State $State
 
+  # These names are emitted by extractAppPackage.nsh for APP_32, APP_64, and
+  # APP_ARM64. Check the entry's payload architecture, not whether Windows could
+  # emulate a different payload or run the common x86 NSIS launcher.
+  $Diagnostics = [System.Collections.Generic.List[object]]::new()
+  $RequestedArchitecture = [string]$State.TargetArchitecture
+  if ($Architectures.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($RequestedArchitecture) -and
+    $Architectures -notcontains $RequestedArchitecture) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'NSIS.ElectronBuilder.ArchitectureMismatch' -Source 'NSIS' -Message "The electron-builder installer packages '$($OrderedArchitectures -join ', ')' application architecture(s), not the requested '$RequestedArchitecture' installer-entry architecture." -Kind Mismatch -Areas Metadata, Installability -AffectedFields Architecture -Evidence ([ordered]@{
+            RequestedArchitecture  = $RequestedArchitecture
+            SupportedArchitectures = [string[]]$OrderedArchitectures
+            AppPackageFiles        = [string[]]@($AppPackageEvidence)
+          })))
+  }
+
   return [pscustomobject]@{
     IsElectronBuilder = $Architectures.Count -gt 0
     IsPortable        = $PortableInfo.IsPortable
@@ -5965,6 +5981,7 @@ function Get-ElectronBuilderNSISDetection {
     AppPackageFiles   = $AppPackageEvidence
     HasUpdatedSwitch  = @($Strings).Where({ $_ -eq '--updated' }, 'First').Count -gt 0
     HasDualScopeUi    = $HasDualScopeUi
+    Diagnostics       = [object[]]$Diagnostics.ToArray()
   }
 }
 
@@ -5994,15 +6011,21 @@ function Get-ElectronBuilderNSISInfo {
     Get static electron-builder traits from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    Installer-entry architecture to compare with the compiled application payloads.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
-    $Simulation = Invoke-NSISStaticSimulation -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($PSBoundParameters.ContainsKey('Architecture')) { $Arguments.Architecture = $Architecture }
+    $Simulation = Invoke-NSISStaticSimulation @Arguments
     $State = $Simulation.State
     $Strings = Get-NSISPlainStrings -State $State
     $Detection = Get-ElectronBuilderNSISDetection -State $State -Strings $Strings
@@ -6035,6 +6058,7 @@ function Get-ElectronBuilderNSISInfo {
       DisplayVersion         = $State.Metadata.DisplayVersion
       Publisher              = $State.Metadata.Publisher
       DefaultInstallLocation = $State.Metadata.DefaultInstallLocation
+      Diagnostics            = @(Merge-InstallerDiagnostics -Diagnostic @($State.Metadata.Diagnostics, $Detection.Diagnostics))
       Evidence               = [pscustomobject]@{
         AppPackageFiles  = $Detection.AppPackageFiles
         HasUpdatedSwitch = $Detection.HasUpdatedSwitch

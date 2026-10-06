@@ -1,8 +1,8 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # Internal Inno implementation. See Inno.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# Inno Format layer. Internal modules are imported locally; public commands stay in the facade.
+# Inno format implementation, imported locally by the public facade.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -850,14 +850,14 @@ function Read-InnoCompressedBlock {
     throw 'The Inno Setup compressed block payload size is invalid'
   }
 
-  # StoredSize includes one CRC32 before each <=4 KiB chunk. Allocate the
-  # payload once instead of growing a List[byte] and copying every chunk twice.
+  # StoredSize includes one CRC32 before each <=4 KiB chunk. Allocate one
+  # payload buffer to avoid repeated growth and copying.
   $RawBytes = [byte[]]::new([int]$RawLength)
   $Remaining = [long]$BlockHeader.StoredSize
   $WriteOffset = 0
 
-  # Reassemble each <=4 KiB data chunk only after its adjacent stored CRC
-  # matches; no partial block is returned after a failed chunk.
+  # Verify each <=4 KiB chunk's CRC before reassembly. Reject the whole block
+  # if any chunk fails.
   while ($Remaining -gt 0) {
     if ($Remaining -lt 5) { throw 'The Inno Setup compressed block contains a truncated chunk record' }
     $ChunkCrc = $Reader.ReadUInt32()
@@ -1713,7 +1713,7 @@ function Get-InnoBooleanDirectiveInfo {
 
   # Inno's EvalDirectiveCheck passes nonliteral values through TSimpleExpression.
   # Translate its not/and/or spelling to the shared bounded three-valued parser;
-  # parameterized callbacks and unknown functions deliberately remain unknown.
+  # parameterized callbacks and unknown functions remain unknown.
   $IdentifierStates = [ordered]@{}
   foreach ($Entry in $StaticReturnValues.GetEnumerator()) {
     if ($Entry.Value -is [bool]) { $IdentifierStates[[string]$Entry.Key] = $Entry.Value ? 'True' : 'False' }
@@ -2311,7 +2311,7 @@ function Get-InnoDefaultDirectoryConstantMap {
   )
 
   # Map only deterministic built-in constants to WinGet-style environment paths.
-  # Dynamic {code:*} constants are intentionally left unresolved elsewhere.
+  # Dynamic {code:*} constants are left unresolved elsewhere.
   $Map = [ordered]@{
     'win'           = '%SystemRoot%'
     'sysnative'     = '%SystemRoot%\System32'
@@ -2342,8 +2342,8 @@ function Get-InnoDefaultDirectoryConstantMap {
     $Map['cf'] = $Map['commoncf']
   }
 
-  # auto* constants select user or common roots from default scope; unresolved
-  # or dual defaults deliberately leave those constants unmapped.
+  # auto* constants select user or common roots from the default scope. Unresolved
+  # or dual defaults leave those constants unmapped.
   if ($DefaultScope -eq 'user') {
     foreach ($Name in @('autopf', 'autopf32', 'autopf64')) { $Map[$Name] = $Map['userpf'] }
     foreach ($Name in @('autocf', 'autocf32', 'autocf64')) { $Map[$Name] = $Map['usercf'] }

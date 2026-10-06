@@ -3031,7 +3031,7 @@ function Get-QtInstallerFrameworkFormatInfo {
       if ($Layout.MagicMarkerName -eq 'Unknown') { throw "Unsupported Qt Installer Framework magic marker: $($Layout.MagicMarker)" }
       $PELayout = try { Get-PELayout -Stream $Stream } catch { $null }
       $Result = Get-QtInstallerFrameworkFormatInfoInternal -Path $InstallerPath -Layout $Layout -Stream $Stream -PELayout $PELayout
-      # Internal parse objects are deliberately omitted from the public diagnostic contract.
+      # Internal parse objects are omitted from the public diagnostic contract.
       foreach ($PropertyName in @('Layout', 'PackageCollections', 'Operations', 'MetadataResources', 'TextResources')) { $Result.PSObject.Properties.Remove($PropertyName) }
       return $Result
     } finally {

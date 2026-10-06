@@ -22,7 +22,7 @@
 
 # Apply default function parameters
 
-# Inno Public layer. Internal modules are imported locally; public commands stay in the facade.
+# Public Inno commands. Implementation modules are imported locally.
 Import-Module (Join-Path $PSScriptRoot 'InnoFormat.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'InnoScript.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'InnoPayload.psm1') -ErrorAction Stop
@@ -138,6 +138,9 @@ function Get-InnoInfo {
     Include bounded textual IFPS disassembly. This implies IncludePascalScriptAnalysis.
   .PARAMETER MaximumDisassemblyCharacters
     Maximum characters retained from optional disassembly.
+  .PARAMETER Architecture
+    Architecture of the installer entry being analyzed. Suppress the required
+    64-bit constant diagnostic for x64 entries while retaining compatibility evidence.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -145,7 +148,10 @@ function Get-InnoInfo {
     [string]$Path,
     [switch]$IncludePascalScriptAnalysis,
     [switch]$IncludeDisassembly,
-    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = $INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = $INNO_DEFAULT_MAX_DISASSEMBLY_CHARACTERS,
+    [Parameter(HelpMessage = 'Architecture of the installer entry used to avoid redundant compatibility diagnostics')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
@@ -284,7 +290,9 @@ function Get-InnoInfo {
       @($HeaderArchitectureData.UnsupportedArchitectures) + @($ArchitectureConstantRequirement.UnsupportedArchitectures) |
         Select-Object -Unique
     )
-    if ($ArchitectureConstantRequirement.Requires64BitWindows) {
+    # An authored x64 entry already satisfies this requirement. Keep the
+    # architecture evidence above without repeating the redundant diagnostic.
+    if ($ArchitectureConstantRequirement.Requires64BitWindows -and $Architecture -ne 'x64') {
       $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Architecture.Required64BitConstant' -Source 'Inno' -Message 'Inno expands an x64-only constant from a required setup field; x86 is excluded even though ArchitecturesAllowed may permit it.' -Kind Information -Areas Metadata, Installability -AffectedFields SupportedArchitectures, UnsupportedArchitectures -Evidence ([ordered]@{
               RequiredConstants = $ArchitectureConstantRequirement.RequiredConstants
               Fields            = [string[]]@($ArchitectureConstantRequirement.Evidence.Field | Select-Object -Unique)

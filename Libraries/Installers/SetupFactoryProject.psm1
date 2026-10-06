@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Internal SetupFactory implementation. See SetupFactory.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# SetupFactory Project layer. Internal modules are imported locally; public commands stay in the facade.
+# SetupFactory project implementation, imported locally by the public facade.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -219,7 +219,7 @@ function Resolve-SetupFactoryVariable {
   if ($null -eq $Value -or $Depth -ge 32) { return $null }
   $Result = $Value
   # Resolve only values present in the parsed session table. Cycles, unknown variables, and the
-  # depth bound intentionally produce no inferred manifest value.
+  # depth bound produce no inferred manifest value.
   foreach ($Match in [regex]::Matches($Value, '%[^%]+%')) {
     $Name = $Match.Value
     if ($Stack -contains $Name -or -not $Variables.ContainsKey($Name)) { return $null }
@@ -589,7 +589,7 @@ function Get-SetupFactorySilentInstallationInfo {
     try {
       $Candidates.Add((Read-SetupFactoryProjectDataCandidate -Bytes $Bytes -Offset $CandidateOffset))
     } catch {
-      # Candidate scanning intentionally rejects malformed schema prefixes. A parser diagnostic is
+      # Candidate scanning rejects malformed schema prefixes. A parser diagnostic is
       # emitted only when the complete scan cannot identify one authoritative project record.
     }
   }

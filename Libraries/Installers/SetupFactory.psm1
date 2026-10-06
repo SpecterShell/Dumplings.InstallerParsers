@@ -39,7 +39,7 @@
 
 # Apply default function parameters
 
-# SetupFactory Public layer. Internal modules are imported locally; public commands stay in the facade.
+# Public SetupFactory commands. Implementation modules are imported locally.
 Import-Module (Join-Path $PSScriptRoot 'SetupFactoryContainer.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'SetupFactoryProject.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'SetupFactoryActions.psm1') -ErrorAction Stop

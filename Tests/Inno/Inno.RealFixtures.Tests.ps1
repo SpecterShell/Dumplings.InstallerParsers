@@ -158,6 +158,16 @@ Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
     $Info.ArchitectureRequirementEvidence | Should -HaveCount 1
     $Info.ArchitectureRequirementEvidence[0].Field | Should -Be 'DefaultDirName'
     @($Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 1
+
+    $X64Info = Get-InnoInfo -Path $Fixture -Architecture x64
+    @($X64Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 0
+    $X64Info.SupportedArchitectures | Should -Be $Info.SupportedArchitectures
+    $X64Info.UnsupportedArchitectures | Should -Be $Info.UnsupportedArchitectures
+    $X64Info.RequiredArchitectureConstants | Should -Be $Info.RequiredArchitectureConstants
+    $X64Info.ArchitectureRequirementEvidence[0].Field | Should -Be 'DefaultDirName'
+
+    $X86Info = Get-InnoInfo -Path $Fixture -Architecture x86
+    @($X86Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 1
   }
 
   It 'Should parse the controlled historical Hyper-V fixture <Name>' -ForEach @(

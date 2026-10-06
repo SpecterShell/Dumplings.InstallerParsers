@@ -92,7 +92,8 @@ function Get-NSISInfo {
   .PARAMETER Path
     The path to the NSIS installer
   .PARAMETER Architecture
-    The target Windows architecture used when the installer selects architecture-specific ARP metadata
+    The installer-entry architecture used to resolve architecture-specific ARP metadata
+    and check electron-builder's compiled application payloads.
   .PARAMETER Scope
     The target installation scope used when the installer selects scope-specific ARP metadata
   .PARAMETER Environment
@@ -142,7 +143,8 @@ function Get-NSISInfo {
     if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $SimulationArguments.Architecture = $Architecture }
     if (-not [string]::IsNullOrWhiteSpace($Scope)) { $SimulationArguments.Scope = $Scope }
     if ($AnsiCodePage -gt 0) { $SimulationArguments.AnsiCodePage = $AnsiCodePage }
-    $Metadata = (Invoke-NSISStaticSimulation @SimulationArguments).Metadata
+    $Simulation = Invoke-NSISStaticSimulation @SimulationArguments
+    $Metadata = $Simulation.Metadata
     if ([string]::IsNullOrWhiteSpace($Metadata.DisplayName) -and [string]::IsNullOrWhiteSpace($Metadata.DisplayVersion)) {
       throw 'The NSIS installer does not expose deterministic uninstall metadata'
     }
@@ -150,10 +152,18 @@ function Get-NSISInfo {
     # Structural ambiguity and external-media warnings are discovered before
     # simulation. Merge them into the aggregate result so Get-NSISInfo callers
     # do not need a second parse through Get-NSISFormatInfo.
-    $Metadata.Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Metadata.Diagnostics, $FormatInfo.Diagnostics))
+    # Reuse the decoded strings and completed state, not the PE stub machine or
+    # another installer parse, to identify the packaged application architectures.
+    $ElectronBuilder = Get-ElectronBuilderNSISDetection -State $Simulation.State -Strings (Get-NSISPlainStrings -State $Simulation.State)
+    Add-Member -InputObject $Metadata -NotePropertyMembers ([ordered]@{
+        IsElectronBuilder       = $ElectronBuilder.IsElectronBuilder
+        SupportedArchitectures  = [string[]]@($ElectronBuilder.Architectures)
+        ElectronBuilderEvidence = [string[]]@($ElectronBuilder.AppPackageFiles)
+      })
+    $Metadata.Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Metadata.Diagnostics, $FormatInfo.Diagnostics, $ElectronBuilder.Diagnostics))
 
     # Invoke-NSISStaticSimulation constructs the canonical aggregate result;
-    # return it unchanged so bridge callers see exactly the parser's evidence.
+    # return its metadata plus the format and payload evidence above.
     return [pscustomobject]$Metadata
   }
 }

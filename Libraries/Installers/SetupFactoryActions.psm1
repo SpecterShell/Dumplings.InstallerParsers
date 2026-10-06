@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Internal SetupFactory implementation. See SetupFactory.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# SetupFactory Actions layer. Internal modules are imported locally; public commands stay in the facade.
+# SetupFactory actions implementation, imported locally by the public facade.
 Import-Module (Join-Path $PSScriptRoot 'SetupFactoryProject.psm1') -ErrorAction Stop
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -613,7 +613,7 @@ function Resolve-SetupFactoryActionCondition6 {
 
   # The Setup Factory editor serializes AND/OR/NOT and wraps built-in variables in percent signs.
   # Normalize only that Boolean surface syntax; comparisons, arithmetic, functions, and quoted
-  # values intentionally remain unsupported and resolve to Unknown.
+  # values remain unsupported and resolve to Unknown.
   $NormalizedExpression = $Expression -replace '(?i)\bAND\b', '&&' -replace '(?i)\bOR\b', '||' -replace '(?i)\bNOT\b', '!'
   $NormalizedStates = [ordered]@{}
   foreach ($Match in [regex]::Matches($NormalizedExpression, '%(?<Name>[A-Za-z_][A-Za-z0-9_]*)%')) {

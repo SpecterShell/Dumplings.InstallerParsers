@@ -3477,7 +3477,7 @@ function Expand-NSISNonSolidPayloads {
     }
 
     # NSISBI checksums the serialized body first and the original packed-size
-    # field second. For compressed records this deliberately differs from the
+    # field second. For compressed records this differs from the
     # CRC of the extracted file.
     $UsesSerializedCrc = $HeaderData.FirstHeaderFlagRoute -eq 'nsisbi-compact-3.12'
     if ($UsesSerializedCrc) {

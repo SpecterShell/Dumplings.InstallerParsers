@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Internal SetupFactory implementation. See SetupFactory.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# SetupFactory Container layer. Internal modules are imported locally; public commands stay in the facade.
+# SetupFactory container implementation, imported locally by the public facade.
 Import-Module (Join-Path $PSScriptRoot 'SetupFactoryProject.psm1') -ErrorAction Stop
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -44,7 +44,7 @@ function Read-SetupFactoryInstalledFileData {
   $Stream.Position = $Entry.DataOffset
   $Packed = Read-SetupFactoryExactByte -Stream $Stream -Count ([int]$Entry.PackedSize)
   if ($Entry.PackedSize -eq 0) {
-    # Legacy projects can deliberately install an empty placeholder file while retaining the
+    # Legacy projects can install an empty placeholder file while retaining the
     # record's compression flag. No compressed member exists in that case.
     if ($Entry.ExpandedSize -ne 0) { throw "The Setup Factory installed file '$($Entry.Name)' has no packed data for its declared expanded size" }
     [byte[]]$Expanded = [byte[]]::new(0)
@@ -164,7 +164,7 @@ function Get-SetupFactory31ArqCatalog {
       $Descriptor = Read-SetupFactoryExactByte -Stream $Stream -Count 33
 
       # An empty name is the 41-byte end record. Its other fields are a runtime-owned template and
-      # are deliberately ignored rather than assigned semantics.
+      # are ignored rather than assigned semantics.
       if ($NameLength -eq 0) {
         if ($Stream.Position -ne $Stream.Length) { throw 'The Setup Factory 3.1 Crusher archive contains data after its end record' }
         break

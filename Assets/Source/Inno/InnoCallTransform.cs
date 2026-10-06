@@ -150,7 +150,7 @@ namespace Dumplings.InstallerParsers
         /// blocks selected by the Inno Setup extractor.
         /// </summary>
         /// <remarks>
-        /// Inno Setup 5.2 and later deliberately applies the stateless transform
+        /// Inno Setup 5.2 and later applies the stateless transform
         /// to independent 65536-byte buffers and advances AddrOffset by that
         /// amount. The final four bytes of each buffer are therefore not joined
         /// to the next buffer. Using an arbitrary PowerShell buffer size changes
@@ -172,7 +172,7 @@ namespace Dumplings.InstallerParsers
         /// <summary>
         /// Decodes the stateful CALL/JMP transform used before Inno Setup 5.2.
         /// The four address bytes may cross read-buffer boundaries, so the
-        /// decoder state deliberately survives each stream read.
+        /// decoder state survives each stream read.
         /// </summary>
         public static void DecodeStateful(Stream input, Stream output, long count, IncrementalHash hash)
         {

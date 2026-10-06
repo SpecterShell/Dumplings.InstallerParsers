@@ -1,8 +1,8 @@
 # License: GPL-3.0-or-later. See Modules\InstallerParsers\LICENSE.
 # Internal Inno implementation. See Inno.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# Inno Script layer. Internal modules are imported locally; public commands stay in the facade.
+# Inno script implementation, imported locally by the public facade.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 

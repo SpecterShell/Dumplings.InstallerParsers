@@ -446,6 +446,22 @@ Describe 'NSIS real installer fixtures' -Tag 'RealFixture', 'Network' {
     @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
+  It 'Should warn about an x86 entry for a real x64-only electron-builder installer' {
+    $Fixture = Get-InstallerFixture -Name 'Aircall-Workspace-1.15.13-x64.exe' -Url 'https://download-electron.aircall.io/aircall-workspace/Aircall-Workspace-1.15.13-x64.exe'
+    $MatchingInfo = Get-NSISInfo -Path $Fixture -Architecture x64
+    $MismatchingInfo = Get-NSISInfo -Path $Fixture -Architecture x86
+
+    $MatchingInfo.IsElectronBuilder | Should -BeTrue
+    $MatchingInfo.SupportedArchitectures | Should -Be @('x64')
+    $MatchingInfo.ElectronBuilderEvidence | Should -Contain 'app-64.7z'
+    @($MatchingInfo.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 0
+    $Diagnostic = @($MismatchingInfo.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch')
+    $Diagnostic | Should -HaveCount 1
+    $Diagnostic[0].Evidence.RequestedArchitecture | Should -Be 'x86'
+    $Diagnostic[0].Evidence.SupportedArchitectures | Should -Be @('x64')
+    $MismatchingInfo.ProductCode | Should -Be $MatchingInfo.ProductCode
+  }
+
   It 'Should read NetEase UU Remote metadata from a vendor LZMA2 NSIS header' {
     $Fixture = Get-InstallerFixture -Name 'UURemote_Setup_4.34.0.8979.exe' `
       -Url 'https://a56.gdl.netease.com/UURemote_Setup_4.34.0.8979_0723104500_gwqd.exe' `
