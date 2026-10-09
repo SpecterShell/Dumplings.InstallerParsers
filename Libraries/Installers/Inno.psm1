@@ -175,6 +175,7 @@ function Get-InnoInfo {
     $Warnings = [System.Collections.Generic.List[object]]::new()
     foreach ($Warning in $HeaderArchitectureData.Diagnostics) { $Warnings.Add($Warning) }
     $PascalScriptInfo = $null
+    $RegistryArchitectureRequirement = $null
     $HeaderFields = $Layout.HeaderFields
     $ManifestHeaderValues = [string[]]@(
       $HeaderValues[$HeaderFields.AppName], $HeaderValues[$HeaderFields.AppVerName], $HeaderValues[$HeaderFields.AppId]
@@ -193,9 +194,14 @@ function Get-InnoInfo {
       if ($RequiresDetailedPascalAnalysis) {
         $PascalScriptInfo = ConvertTo-InnoPascalScriptInfo -Bytes $ParsedLayout.CompiledCodeBytes `
           -IncludeDisassembly:$IncludeDisassembly -MaximumDisassemblyCharacters $MaximumDisassemblyCharacters
+        if ($null -ne $PascalScriptInfo.PSObject.Properties['ArchitectureRequirement']) {
+          $RegistryArchitectureRequirement = $PascalScriptInfo.ArchitectureRequirement
+        }
       } else {
-        # Ordinary metadata parsing validates only the fixed IFPS header.
+        # Registry-free scripts keep the header-only path. Registry scripts also
+        # receive a bounded startup check, without detailed function projections.
         $PascalScriptInfo = Read-InnoPascalScriptHeader -Bytes $ParsedLayout.CompiledCodeBytes
+        $RegistryArchitectureRequirement = Get-InnoPascalScriptArchitectureRequirement -Bytes $ParsedLayout.CompiledCodeBytes
       }
     } catch {
       # Compiled code can be absent, vendor-modified, or from a future IFPS
@@ -282,12 +288,15 @@ function Get-InnoInfo {
     }
     $ArchitectureConstantRequirement = Get-InnoArchitectureConstantRequirement -Values $RequiredArchitectureValues `
       -DefaultScope $DefaultScope -SupportsScopeOverride:$HeaderFixedData.SupportsCommandLineScopeOverride
+    $RegistryUnsupportedArchitectures = $null -ne $RegistryArchitectureRequirement ? $RegistryArchitectureRequirement.UnsupportedArchitectures : [string[]]@()
+    $RegistryArchitectureEvidence = $null -ne $RegistryArchitectureRequirement ? $RegistryArchitectureRequirement.Evidence : [object[]]@()
+    $ConditionalRegistryArchitectureEvidence = $null -ne $RegistryArchitectureRequirement ? $RegistryArchitectureRequirement.ConditionalEvidence : [object[]]@()
     $SupportedArchitectures = [string[]]@(
       $HeaderArchitectureData.SupportedArchitectures |
-        Where-Object { $ArchitectureConstantRequirement.UnsupportedArchitectures -notcontains $_ }
+        Where-Object { $ArchitectureConstantRequirement.UnsupportedArchitectures -notcontains $_ -and $RegistryUnsupportedArchitectures -notcontains $_ }
     )
     $UnsupportedArchitectures = [string[]]@(
-      @($HeaderArchitectureData.UnsupportedArchitectures) + @($ArchitectureConstantRequirement.UnsupportedArchitectures) |
+      @($HeaderArchitectureData.UnsupportedArchitectures) + @($ArchitectureConstantRequirement.UnsupportedArchitectures) + @($RegistryUnsupportedArchitectures) |
         Select-Object -Unique
     )
     # An authored x64 entry already satisfies this requirement. Keep the
@@ -297,6 +306,14 @@ function Get-InnoInfo {
               RequiredConstants = $ArchitectureConstantRequirement.RequiredConstants
               Fields            = [string[]]@($ArchitectureConstantRequirement.Evidence.Field | Select-Object -Unique)
             })))
+    }
+    if ($null -ne $RegistryArchitectureRequirement -and $RegistryArchitectureRequirement.Requires64BitWindows -and $Architecture -ne 'x64') {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Architecture.Required64BitRegistry' -Source 'Inno' -Message 'Inno startup code requires a 64-bit registry view that fails on 32-bit Windows; x86 is excluded even though ArchitecturesAllowed may permit it.' -Kind Information -Areas Metadata, Installability -AffectedFields SupportedArchitectures, UnsupportedArchitectures -Evidence $RegistryArchitectureRequirement.Evidence))
+    }
+    if ($ConditionalRegistryArchitectureEvidence.Count -gt 0 -and $Architecture -ne 'x64' -and $SupportedArchitectures -contains 'x86') {
+      # Registry-dependent migration paths can fail on a fresh x86 installation
+      # while succeeding with an existing product. Keep admission unchanged.
+      $Warnings.Add((New-InstallerDiagnostic -Id 'Inno.Architecture.Conditional64BitRegistry' -Source 'Inno' -Message 'Inno pre-install code can access a 64-bit registry view on 32-bit Windows. The path depends on runtime state or opaque calls; x86 compatibility requires VM validation and has not been excluded automatically.' -Kind ManualValidation -Areas Installability -AffectedFields SupportedArchitectures -Evidence $ConditionalRegistryArchitectureEvidence))
     }
 
     # A resolved root token is stronger scope evidence than the launcher PE
@@ -416,8 +433,9 @@ function Get-InnoInfo {
       SupportedArchitectures                     = $SupportedArchitectures
       UnsupportedArchitectures                   = $UnsupportedArchitectures
       RequiredArchitectureConstants              = $ArchitectureConstantRequirement.RequiredConstants
-      ArchitectureRequirementEvidence            = $ArchitectureConstantRequirement.Evidence
-      ConditionalArchitectureRequirementEvidence = $ArchitectureConstantRequirement.ConditionalEvidence
+      ArchitectureRequirementEvidence            = @($ArchitectureConstantRequirement.Evidence) + @($RegistryArchitectureEvidence)
+      ConditionalArchitectureRequirementEvidence = @($ArchitectureConstantRequirement.ConditionalEvidence) + @($ConditionalRegistryArchitectureEvidence)
+      RegistryArchitectureRequirement            = $RegistryArchitectureRequirement
       InstallerArchitecture                      = $PEInfo.Architecture
       AppName                                    = $AppNameInfo.DecodedValue
       AppVerName                                 = $AppVerNameInfo.DecodedValue
