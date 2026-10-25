@@ -2736,6 +2736,16 @@ function Measure-NSISCommandLayoutCandidate {
       continue
     }
 
+    # Source/script.cpp emits EW_FPUTWS offsets[2] as 0 for UTF-16 text or
+    # 1 for FileWriteWord. Unlike EW_FGETWS's maximum-length string offset,
+    # this is a literal selector. An inserted EW_LOG shifts raw opcode 69
+    # from FGETWS to FPUTWS, so arity alone cannot distinguish these layouts.
+    # Validate the documented operand, not trailing vendor-extension words.
+    if ($Opcode -eq $Script:NSIS_OPCODE_FILE_WRITE_UTF16 -and $Entry.Raw[3] -notin @(0, 1)) {
+      $FatalInvalidCommandCount++
+      continue
+    }
+
     $LastNonZeroParameter = 0
     $MaximumOperand = if ($IsNsisBi) { 8 } else { 6 }
     for ($Index = $MaximumOperand; $Index -ge 1; $Index--) {
@@ -3804,7 +3814,7 @@ function Expand-NSISPayload {
     $FormatContext = Get-NSISFormatContext -Path $InstallerPath
     $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
     if (-not $FormatInfo.IsSupported) {
-      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $($FormatInfo.Diagnostics.Message -join ' ')"
     }
     $HeaderData = $FormatContext.HeaderData
     $Initialized = & $StateInitializer $FormatContext

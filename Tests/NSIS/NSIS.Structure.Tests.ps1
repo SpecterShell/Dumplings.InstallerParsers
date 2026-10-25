@@ -495,6 +495,82 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Result.WithLog.SemanticPenalty | Should -Be 0
   }
 
+  It 'Should distinguish UTF-16 reads from writes by the code-point mode operand' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      # No-log EW_FGETWS stores a maximum-length string offset in offsets[2].
+      # The same raw opcode is EW_FPUTWS with logging enabled, where that word
+      # is the literal 0/1 string-versus-code-point selector, not a string offset.
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]69
+        RawOpcode    = [uint32]69
+        Raw          = [uint32[]]@(69, 68, 69, 326, 0, 0, 0)
+        Values       = [int[]]@(69, 68, 69, 326, 0, 0, 0)
+      }
+      [pscustomobject]@{
+        WithoutLog = Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $false
+        WithLog    = Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $true
+        Selected   = Get-NSISVersionInfo -StringsBlock ([byte[]](0, 0, 0, 0, 3, 0, 128, 128, 0, 0)) -Entries @($Entry)
+      }
+    }
+
+    $Result.WithoutLog.FatalInvalidCommandCount | Should -Be 0
+    $Result.WithLog.FatalInvalidCommandCount | Should -Be 1
+    $Result.Selected.LogCmdIsEnabled | Should -BeFalse
+    $Result.Selected.HasSemanticAmbiguity | Should -BeFalse
+  }
+
+  It 'Should accept source-defined UTF-16 write selectors: <Mode>' -ForEach @(
+    @{ Mode = 0; Invalid = 0 }
+    @{ Mode = 1; Invalid = 0 }
+    @{ Mode = 2; Invalid = 1 }
+    @{ Mode = [uint32]::MaxValue; Invalid = 1 }
+  ) {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      param($Mode)
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]$Script:NSIS_OPCODE_FILE_WRITE_UTF16
+        RawOpcode    = [uint32]$Script:NSIS_OPCODE_FILE_WRITE_UTF16
+        Raw          = [uint32[]]@($Script:NSIS_OPCODE_FILE_WRITE_UTF16, 20, 500, $Mode, 0, 0, 0)
+      }
+      Measure-NSISCommandLayoutCandidate -Entries @($Entry) -Type NSIS3 -Unicode $true -LogCmdIsEnabled $false
+    } $Mode
+
+    $Result.FatalInvalidCommandCount | Should -Be $Invalid
+  }
+
+  It 'Should keep UTF-16 read/write ambiguity when both operand interpretations are valid' {
+    $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
+    $Result = & $Module {
+      $Entry = [pscustomobject]@{
+        LayoutOpcode = [uint32]69
+        RawOpcode    = [uint32]69
+        Raw          = [uint32[]]@(69, 68, 69, 1, 0, 0, 0)
+        Values       = [int[]]@(69, 68, 69, 1, 0, 0, 0)
+      }
+      Get-NSISVersionInfo -StringsBlock ([byte[]](0, 0, 0, 0, 3, 0, 128, 128, 0, 0)) -Entries @($Entry)
+    }
+
+    $Result.HasSemanticAmbiguity | Should -BeTrue
+    $Result.DetectionConfidence | Should -Be 'UnsupportedAmbiguous'
+  }
+
+  It 'Should render diagnostic messages when a command layout remains unsupported' {
+    $Path = Join-Path $TestDrive 'unsupported-layout.exe'
+    [IO.File]::WriteAllBytes($Path, [byte[]]@())
+    Mock -ModuleName NSIS Get-NSISFormatContext { [pscustomobject]@{} }
+    Mock -ModuleName NSIS ConvertTo-NSISFormatInfo {
+      [pscustomobject]@{
+        IsSupported      = $false
+        CatalogProfileId = 'official-nsis3-unicode'
+        Diagnostics      = @([pscustomobject]@{ Id = 'NSIS.Format.CommandLayoutAmbiguous'; Message = 'The command mappings remain ambiguous.' })
+      }
+    }
+
+    { Get-NSISInfo -Path $Path } | Should -Throw -ExpectedMessage "The NSIS command layout 'official-nsis3-unicode' is unsupported: The command mappings remain ambiguous."
+  }
+
   It 'Should interpret negative log operands without unsigned-to-signed overflow' {
     $Module = Get-Module NSIS | Where-Object Path -Like '*InstallerParsers*' | Select-Object -First 1
     $Result = & $Module {
@@ -537,6 +613,21 @@ Describe 'NSIS structure and command layouts' -Tag Unit {
     $Format.IsSupported | Should -BeTrue
     $Info.ProductCode | Should -Be '121a0be4-63bd-531e-acf8-fc3924c7e984'
     $Info.DisplayName | Should -Be 'Antigravity 2.8.1'
+  }
+
+  It 'Should resolve the no-log UTF-16 read layout in Varin ARM64 media' -Tag RealFixture {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Youzini-afk.Varin/0.9.32/Varin-0.9.32-win-arm64.exe' -Uri 'https://github.com/Youzini-afk/Varin/releases/download/v0.9.32/Varin-0.9.32-win-arm64.exe' -Sha256 '2CF783591B4AF54C14A7F7C809C791DD4316CD8534F894AE13F3C789C8FEF613'
+    $Info = Get-NSISInfo -Path $Fixture -Architecture arm64 -Scope machine
+
+    $Info.ParserVersionInfo.CatalogProfileId | Should -Be 'official-nsis3-unicode'
+    $Info.ParserVersionInfo.LogCmdIsEnabled | Should -BeFalse
+    $Info.ParserVersionInfo.HasSemanticAmbiguity | Should -BeFalse
+    $Info.ParserVersionInfo.FatalInvalidCommandCount | Should -Be 0
+    $Info.ProductCode | Should -Be '97ba5f9d-69e7-5ca0-b9bd-16d3f3697f80'
+    $Info.DisplayName | Should -Be 'Varin 0.9.32'
+    $Info.DisplayVersion | Should -Be '0.9.32'
+    $Info.SupportedArchitectures | Should -Be @('arm64')
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should prefer stock raw-Deflate framing over an accidental legacy NSISBI header collision' -Tag RealFixture {

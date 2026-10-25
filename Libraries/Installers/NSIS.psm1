@@ -135,7 +135,7 @@ function Get-NSISInfo {
     $Context = Get-NSISFormatContext -Path (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf)
     $FormatInfo = ConvertTo-NSISFormatInfo -Context $Context
     if (-not $FormatInfo.IsSupported) {
-      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is unsupported: $($FormatInfo.Diagnostics.Message -join ' ')"
     }
     $SimulationArguments = @{ FormatContext = $Context; Environment = $Environment; FileSystem = $FileSystem }
     if ($PSBoundParameters.ContainsKey('CommandLine')) { $SimulationArguments.CommandLine = $CommandLine }

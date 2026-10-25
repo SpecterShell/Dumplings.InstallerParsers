@@ -2195,7 +2195,7 @@ function Initialize-NSISState {
   $HeaderData = $FormatContext.HeaderData
   $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
   if (-not $FormatInfo.IsSupported) {
-    throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
+    throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $($FormatInfo.Diagnostics.Message -join ' ')"
   }
   $HeaderBytes = $FormatContext.HeaderBytes
   $BlockHeaders = $FormatContext.BlockHeaders
@@ -5527,7 +5527,7 @@ function Invoke-NSISStaticSimulation {
     if ($PSCmdlet.ParameterSetName -eq 'Path') { $FormatContext = Get-NSISFormatContext -Path $Path }
     $FormatInfo = ConvertTo-NSISFormatInfo -Context $FormatContext
     if (-not $FormatInfo.IsSupported) {
-      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $([string]::Join(' ', $FormatInfo.Diagnostics))"
+      throw "The NSIS command layout '$($FormatInfo.CatalogProfileId)' is structurally unsupported: $($FormatInfo.Diagnostics.Message -join ' ')"
     }
     $HeaderData = $FormatContext.HeaderData
     $InitializationArguments = @{ FormatContext = $FormatContext; FileSystem = $FileSystem }
