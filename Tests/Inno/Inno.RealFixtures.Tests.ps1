@@ -2,6 +2,32 @@
 . (Join-Path $PSScriptRoot '..\Support\InnoTestSetup.ps1')
 
 Describe 'Inno real installer fixtures' -Tag 'RealFixture', 'Network' {
+  It 'Reads SoftPerfect NetWorx metadata and all Inno 7.1.1 post-file tables' {
+    # The vendor URL is versionless. Do not replace the pinned fixture with
+    # another release when the persistent regression artifact is unavailable.
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\SoftPerfect.NetWorx\26.10\networx_setup.exe'
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 'B971005AA79411B7CBF1B864189ACF2DF3822C438C5B60BA17D592F9E71F1D1F')) {
+      Set-ItResult -Skipped -Because 'The pinned NetWorx 26.10 installer is not cached and the vendor URL is versionless.'
+      return
+    }
+    $Info = Get-InnoInfo -Path $Fixture
+    $Info.DisplayName | Should -Be 'NetWorx'
+    $Info.DisplayVersion | Should -Be '26.10'
+    $Info.ProductCode | Should -Be 'NetWorx_is1'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.ParserVersionInfo.CatalogFormatId | Should -Be '710100-u'
+    $Info.ParserVersionInfo.SignatureVersion | Should -Be '7.1.1'
+    $Info.ParserVersionInfo.LayoutResolution | Should -Be 'Exact'
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.MetadataRecordCounts.Icons | Should -Be 3
+    $Info.MetadataRecordCounts.Registry | Should -Be 1
+    $Info.MetadataRecordCounts.InstallDelete | Should -Be 3
+    $Info.MetadataRecordCounts.UninstallDelete | Should -Be 2
+    $Info.MetadataRecordCounts.Run | Should -Be 2
+    $Info.MetadataRecordCounts.UninstallRun | Should -Be 2
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
   It 'Extracts a real VM-compiled Inno 6.7 multi-disk payload across three slices' {
     $FixtureRoot = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\Inno\6.7\MultiDisk'
     $Installer = Join-Path $FixtureRoot 'inno-multidisk-6.7.exe'

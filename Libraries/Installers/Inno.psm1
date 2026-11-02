@@ -184,10 +184,11 @@ function Get-InnoInfo {
     )
     $HasCodeConstant = @($ManifestHeaderValues | Where-Object { $_ -match '(?i)\{code:' }).Count -gt 0
     $HasDynamicDirectiveCheck = @(
-      if ($null -eq $Layout.LegacyCreateUninstallRegKeyOptionBit -and $HeaderValues.Count -gt 24 -and
-        -not [string]::IsNullOrWhiteSpace($HeaderValues[24]) -and $HeaderValues[24] -notmatch '^(?i:yes|no|true|false|0|1)$') { $HeaderValues[24] }
-      if ($null -eq $Layout.LegacyUninstallableOptionBit -and $HeaderValues.Count -gt 25 -and
-        -not [string]::IsNullOrWhiteSpace($HeaderValues[25]) -and $HeaderValues[25] -notmatch '^(?i:yes|no|true|false|0|1)$') { $HeaderValues[25] }
+      foreach ($Directive in 'CreateUninstallRegKey', 'Uninstallable') {
+        $Index = $HeaderFields.$Directive
+        if ($null -eq $Layout."Legacy${Directive}OptionBit" -and $HeaderValues.Count -gt $Index -and
+          -not [string]::IsNullOrWhiteSpace($HeaderValues[$Index]) -and $HeaderValues[$Index] -notmatch '^(?i:yes|no|true|false|0|1)$') { $HeaderValues[$Index] }
+      }
     ).Count -gt 0
     $RequiresDetailedPascalAnalysis = $IncludePascalScriptAnalysis -or $IncludeDisassembly -or $HasCodeConstant -or $HasDynamicDirectiveCheck
     try {

@@ -139,7 +139,9 @@ function Resolve-InnoCatalogFormat {
     $Resolved.SupportsExternalDiskSlices = $true
   }
 
-  $Resolved.VersionNumber = if ([int]$Format.InternalStructureVersion -ge 700000) { 7000 } else { [int]$Format.InternalStructureVersion }
+  # Seven-series catalog versions retain two extra digits for the fourth
+  # setup-data revision. Compare their release portion in the same units as 6.x.
+  $Resolved.VersionNumber = [int]$Format.InternalStructureVersion -ge 700000 ? [int][Math]::Floor([int]$Format.InternalStructureVersion / 100) : [int]$Format.InternalStructureVersion
   $Resolved.Edition = [string]$Script:InnoFormatCatalog.Editions[$Format.EditionId]
   $Resolved.StringEncoding = [string]$Format.CharacterMode
   $Resolved.HeaderCountNames = [string[]]@($Script:InnoFormatCatalog.HeaderCountSchemas[$Format.HeaderCountSchema])
@@ -601,7 +603,7 @@ function Get-InnoLayout {
       $_.EditionId -ceq $SignatureInfo.EditionId -and
       $_.CharacterMode -ceq $SignatureInfo.CharacterMode -and
       $_.LoaderRoute -ceq $LoaderRoute -and
-      (if ([int]$_.InternalStructureVersion -ge 700000) { 7000 } else { [int]$_.InternalStructureVersion }) -le $SignatureInfo.VersionNumber
+      $Script:InnoResolvedFormats[$_.Id].VersionNumber -le $SignatureInfo.VersionNumber
     } | Sort-Object InternalStructureVersion -Descending)
   if ($Candidates.Count -eq 0) {
     throw "No Inno format descriptor matches edition '$($SignatureInfo.Edition)', mode '$($SignatureInfo.CharacterMode)', and loader '$LoaderRoute'."
@@ -1448,8 +1450,10 @@ function Get-InnoHeaderArchitectureData {
     }
   }
 
-  $ArchitecturesAllowed = if ($HeaderValues.Count -gt 30) { $HeaderValues[30] } else { $null }
-  $ArchitecturesInstallIn64BitMode = if ($HeaderValues.Count -gt 31) { $HeaderValues[31] } else { $null }
+  $AllowedIndex = $Layout.HeaderFields.ArchitecturesAllowed
+  $Install64Index = $Layout.HeaderFields.ArchitecturesInstallIn64BitMode
+  $ArchitecturesAllowed = if ($HeaderValues.Count -gt $AllowedIndex) { $HeaderValues[$AllowedIndex] } else { $null }
+  $ArchitecturesInstallIn64BitMode = if ($HeaderValues.Count -gt $Install64Index) { $HeaderValues[$Install64Index] } else { $null }
   $EffectiveArchitecturesAllowed = if ([string]::IsNullOrWhiteSpace($ArchitecturesAllowed)) {
     if ($PEInfo.Architecture -eq 'x64') { 'x64compatible' } else { 'x86compatible' }
   } else { $ArchitecturesAllowed }
@@ -1785,8 +1789,10 @@ function Get-InnoAppsAndFeaturesEntryInfo {
     [System.Collections.IDictionary]$StaticReturnValues = @{}
   )
 
-  $CreateUninstallRegKey = if ($HeaderValues.Count -gt 24) { $HeaderValues[24] } else { $null }
-  $Uninstallable = if ($HeaderValues.Count -gt 25) { $HeaderValues[25] } else { $null }
+  $CreateKeyIndex = $Layout.HeaderFields.CreateUninstallRegKey
+  $UninstallableIndex = $Layout.HeaderFields.Uninstallable
+  $CreateUninstallRegKey = if ($HeaderValues.Count -gt $CreateKeyIndex) { $HeaderValues[$CreateKeyIndex] } else { $null }
+  $Uninstallable = if ($HeaderValues.Count -gt $UninstallableIndex) { $HeaderValues[$UninstallableIndex] } else { $null }
 
   # Inno writes an ARP entry only when the uninstall registry key is created
   # and an uninstaller is registered. In 5.3.8 and 5.3.10 respectively, these

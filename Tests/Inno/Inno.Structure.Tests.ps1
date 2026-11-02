@@ -2,6 +2,66 @@
 . (Join-Path $PSScriptRoot '..\Support\InnoTestSetup.ps1')
 
 Describe 'Inno structures and version handling' -Tag Unit {
+  It 'Reads the 7.1.1 header indexes and Inno 7 registry/run record layouts' {
+    InModuleScope InnoFormat {
+      $Signature = [pscustomobject]@{
+        Signature     = 'Inno Setup Setup Data (7.1.1)'
+        VersionNumber = 7101
+        EditionId     = 'official'
+        Edition       = 'Official Inno Setup'
+        CharacterMode = 'Unicode'
+        IsISX         = $false
+      }
+      $Layout = Get-InnoLayout -SignatureInfo $Signature -LoaderRoute resource-v2
+      $Layout.Id | Should -Be '710100-u'
+      $Layout.VersionNumber | Should -Be 7101
+      $Layout.LayoutResolution | Should -Be 'Exact'
+      $Layout.HeaderStringCount | Should -Be 38
+      $Layout.HeaderFields.UninstallDisplayName | Should -Be 13
+      $Layout.RecordFamilies.Registry.FixedSize | Should -Be 30
+      $Layout.RecordFamilies.Registry.OptionsOffset | Should -Be 28
+      $Layout.RecordFamilies.Run.FixedSize | Should -Be 28
+      $Layout.RecordFamilies.Run.Fields[-1] | Should -Be 'OnLog'
+
+      $Values = [string[]](@('') * 38)
+      $Values[23] = 'yes'
+      $Values[24] = 'yes'
+      $Values[25] = '*.exe'
+      $Values[29] = 'x64os arm64'
+      $Values[30] = 'x64os arm64'
+      $ArchitectureInfo = Get-InnoHeaderArchitectureData -HeaderValues $Values -Layout $Layout -PEInfo ([pscustomobject]@{ Architecture = 'x86' }) -HeaderFixedData ([pscustomobject]@{})
+      $ArchitectureInfo.SupportedArchitectures | Should -Be @('x64', 'arm64')
+      (Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $Values -Layout $Layout).WritesAppsAndFeaturesEntry | Should -BeTrue
+      $Values[23] = 'no'
+      (Get-InnoAppsAndFeaturesEntryInfo -HeaderValues $Values -Layout $Layout).WritesAppsAndFeaturesEntry | Should -BeFalse
+    }
+  }
+
+  It 'Selects only the nearest older compatible layout for signature <Version>' -ForEach @(
+    @{ Version = '6.4.4'; VersionNumber = 6404; Loader = 'resource-v1'; Expected = '6403-u' }
+    @{ Version = '6.6.2'; VersionNumber = 6602; Loader = 'resource-v2'; Expected = '6601-u' }
+    @{ Version = '7.0.1'; VersionNumber = 7001; Loader = 'resource-v2'; Expected = '700003-u' }
+    @{ Version = '7.1.2'; VersionNumber = 7102; Loader = 'resource-v2'; Expected = '710100-u' }
+  ) {
+    InModuleScope InnoFormat -Parameters @{ Version = $Version; VersionNumber = $VersionNumber; Loader = $Loader; Expected = $Expected } {
+      $Signature = [pscustomobject]@{
+        Signature     = "Inno Setup Setup Data ($Version)"
+        VersionNumber = $VersionNumber
+        EditionId     = 'official'
+        Edition       = 'Official Inno Setup'
+        CharacterMode = 'Unicode'
+        IsISX         = $false
+      }
+      $Layout = Get-InnoLayout -SignatureInfo $Signature -LoaderRoute $Loader
+      $Layout.Id | Should -Be $Expected
+      $Layout.LoaderRoute | Should -Be $Loader
+      $Layout.LayoutResolution | Should -Be 'NearestOlderPendingValidation'
+      # Selection alone does not authorize metadata or mutate the cached schema.
+      $Layout.LayoutResolution = 'ValidatedNearestOlder'
+      (Get-InnoLayout -SignatureInfo $Signature -LoaderRoute $Loader).LayoutResolution | Should -Be 'NearestOlderPendingValidation'
+    }
+  }
+
   It 'opens installer paths containing wildcard metacharacters literally' {
     InModuleScope Inno {
       $Fixture = Join-Path $TestDrive 'setup[x64].exe'
@@ -13,9 +73,9 @@ Describe 'Inno structures and version handling' -Tag Unit {
 
   It 'Resolves every catalog row to a complete route descriptor' {
     InModuleScope InnoFormat {
-      $Script:InnoFormatCatalog.Formats.Count | Should -Be 104
-      @($Script:InnoFormatCatalog.Formats.Id | Select-Object -Unique).Count | Should -Be 104
-      $Script:InnoResolvedFormats.Count | Should -Be 104
+      $Script:InnoFormatCatalog.Formats.Count | Should -Be 105
+      @($Script:InnoFormatCatalog.Formats.Id | Select-Object -Unique).Count | Should -Be 105
+      $Script:InnoResolvedFormats.Count | Should -Be 105
       foreach ($Format in $Script:InnoFormatCatalog.Formats) {
         $Layout = $Script:InnoResolvedFormats[$Format.Id]
         $Layout.HeaderCountNames.Count | Should -BeGreaterThan 0

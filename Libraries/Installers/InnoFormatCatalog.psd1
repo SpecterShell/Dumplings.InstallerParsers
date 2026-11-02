@@ -20,10 +20,13 @@
     'counts-signature17'   = @('NumLanguageEntries', 'NumCustomMessageEntries', 'NumPermissionEntries', 'NumTypeEntries', 'NumComponentEntries', 'NumTaskEntries', 'NumDirEntries', 'NumISSigKeyEntries', 'NumFileEntries', 'NumFileLocationEntries', 'NumIconEntries', 'NumIniEntries', 'NumRegistryEntries', 'NumInstallDeleteEntries', 'NumUninstallDeleteEntries', 'NumRunEntries', 'NumUninstallRunEntries')
   }
   HeaderFieldSchemas      = @{
-    'header-v1-v2'       = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 8; DefaultDirName = 9; UninstallDisplayName = 17 }
-    'header-v3-v5110'    = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 8; DefaultDirName = 9; UninstallDisplayName = 16 }
-    'header-v5113-v5203' = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 9; DefaultDirName = 10; UninstallDisplayName = 17 }
-    'header-v5205-plus'  = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 9; DefaultDirName = 10; UninstallDisplayName = 14 }
+    'header-v1-v2'       = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 8; DefaultDirName = 9; UninstallDisplayName = 17; CreateUninstallRegKey = 24; Uninstallable = 25; ArchitecturesAllowed = 30; ArchitecturesInstallIn64BitMode = 31 }
+    'header-v3-v5110'    = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 8; DefaultDirName = 9; UninstallDisplayName = 16; CreateUninstallRegKey = 24; Uninstallable = 25; ArchitecturesAllowed = 30; ArchitecturesInstallIn64BitMode = 31 }
+    'header-v5113-v5203' = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 9; DefaultDirName = 10; UninstallDisplayName = 17; CreateUninstallRegKey = 24; Uninstallable = 25; ArchitecturesAllowed = 30; ArchitecturesInstallIn64BitMode = 31 }
+    'header-v5205-plus'  = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 9; DefaultDirName = 10; UninstallDisplayName = 14; CreateUninstallRegKey = 24; Uninstallable = 25; ArchitecturesAllowed = 30; ArchitecturesInstallIn64BitMode = 31 }
+    # 7.1.1 removed the unused BaseFilename at string index 12, shifting every
+    # subsequent field by one. Fixed tails and entry records are unchanged.
+    'header-v7111-plus'  = @{ AppName = 0; AppVerName = 1; AppId = 2; Publisher = 4; AppVersion = 9; DefaultDirName = 10; UninstallDisplayName = 13; CreateUninstallRegKey = 23; Uninstallable = 24; ArchitecturesAllowed = 29; ArchitecturesInstallIn64BitMode = 30 }
   }
   FileEntrySchemas        = @{
     'file-legacy3'     = @('SourceFilename', 'DestName', 'InstallFontName')
@@ -88,6 +91,7 @@
     'registry-languages'           = @{ Fields = @('Subkey', 'ValueName', 'ValueData', 'Components', 'Tasks', 'Languages', 'Check'); AnsiFields = @(); FixedSize = 27; RootKeyOffset = 20; TypeOffset = 24; OptionsOffset = 25 }
     'registry-permission-string'   = @{ Fields = @('Subkey', 'ValueName', 'ValueData', 'Components', 'Tasks', 'Languages', 'Check', 'Permissions'); AnsiFields = @(); FixedSize = 27; RootKeyOffset = 20; TypeOffset = 24; OptionsOffset = 25 }
     'registry-hooks'               = @{ Fields = @('Subkey', 'ValueName', 'ValueData', 'Components', 'Tasks', 'Languages', 'Check', 'AfterInstall', 'BeforeInstall'); AnsiFields = @(); FixedSize = 29; RootKeyOffset = 20; TypeOffset = 26; OptionsOffset = 27 }
+    'registry-bitness'             = @{ Fields = @('Subkey', 'ValueName', 'ValueData', 'Components', 'Tasks', 'Languages', 'Check', 'AfterInstall', 'BeforeInstall'); AnsiFields = @(); FixedSize = 30; RootKeyOffset = 20; TypeOffset = 26; OptionsOffset = 28 }
     'delete-legacy'                = @{ Fields = @('Name'); AnsiFields = @(); FixedSize = 21 }
     'delete-components'            = @{ Fields = @('Name', 'Components', 'Tasks'); AnsiFields = @(); FixedSize = 21 }
     'delete-check'                 = @{ Fields = @('Name', 'Components', 'Tasks', 'Check'); AnsiFields = @(); FixedSize = 21 }
@@ -99,6 +103,7 @@
     'run-languages'                = @{ Fields = @('Name', 'Parameters', 'WorkingDir', 'RunOnceId', 'StatusMsg', 'Description', 'Components', 'Tasks', 'Languages', 'Check'); AnsiFields = @(); FixedSize = 26 }
     'run-hooks'                    = @{ Fields = @('Name', 'Parameters', 'WorkingDir', 'RunOnceId', 'StatusMsg', 'Description', 'Components', 'Tasks', 'Languages', 'Check', 'AfterInstall', 'BeforeInstall'); AnsiFields = @(); FixedSize = 26 }
     'run-verb'                     = @{ Fields = @('Name', 'Parameters', 'WorkingDir', 'RunOnceId', 'StatusMsg', 'Verb', 'Description', 'Components', 'Tasks', 'Languages', 'Check', 'AfterInstall', 'BeforeInstall'); AnsiFields = @(); FixedSize = 27 }
+    'run-bitness-onlog'            = @{ Fields = @('Name', 'Parameters', 'WorkingDir', 'RunOnceId', 'StatusMsg', 'Verb', 'Description', 'Components', 'Tasks', 'Languages', 'Check', 'AfterInstall', 'BeforeInstall', 'OnLog'); AnsiFields = @(); FixedSize = 28 }
   }
   RecordFamilyDeltas      = @(
     @{ Id = 'families-base'; Set = @{ LanguageRecordSchema = 'absent'; CustomMessageRecordSchema = 'absent'; PermissionRecordSchema = 'absent'; TypeRecordSchema = 'absent'; ComponentRecordSchema = 'absent'; TaskRecordSchema = 'absent'; DirRecordSchema = 'dir-legacy'; ISSigKeyRecordSchema = 'absent'; IconRecordSchema = 'icon-legacy'; IniRecordSchema = 'ini-legacy'; RegistryRecordSchema = 'registry-legacy'; DeleteRecordSchema = 'delete-legacy'; RunRecordSchema = 'run-legacy' } }
@@ -119,6 +124,9 @@
     @{ Id = 'families-6500'; MinimumVersion = 6500; Set = @{ ISSigKeyRecordSchema = 'issig-key' } }
     @{ Id = 'families-6600'; MinimumVersion = 6600; Set = @{ LanguageRecordSchema = 'language-6600' } }
     @{ Id = 'families-6700'; MinimumVersion = 6700; Set = @{ ComponentRecordSchema = 'component-6700'; TaskRecordSchema = 'task-6700' } }
+    # Inno 7's registry/run records add explicit bitness. Run entries also
+    # serialize the OnLog callback after BeforeInstall (Shared.Struct.pas).
+    @{ Id = 'families-700003'; MinimumVersion = 700000; Set = @{ RegistryRecordSchema = 'registry-bitness'; RunRecordSchema = 'run-bitness-onlog' } }
   )
   FileLocationFlagSchemas = @{
     'flags-version2'    = @('VersionInfoValid', 'VersionInfoNotValid')
@@ -325,5 +333,6 @@
     @{ Id = '6601-u'; InternalStructureVersion = 6601; Signature = 'Inno Setup Setup Data (6.6.1)'; EditionId = 'official'; CharacterMode = 'Unicode'; LoaderRoute = 'resource-v2'; MetadataRoute = 'chunked32'; HeaderCountSchema = 'counts-signature17'; HeaderFieldSchema = 'header-v5205-plus'; FileEntrySchema = 'file-download15'; FileLocationSchema = 'location-sha256'; RecordSchemaRoute = 'records-6601-u'; PayloadRoute = 'chunked-modern'; CompressionCapabilities = 'Stored,Zlib,BZip2,Lzma,Lzma2'; ChecksumRoute = 'SHA256'; CallTransformRoute = 'relative24-v3'; HeaderStringCount = 34; HeaderAnsiStringCount = 4; FileEntryStringCount = 15; FileEntryAnsiStringCount = 1; Supported = $true }
     @{ Id = '6700-u'; InternalStructureVersion = 6700; Signature = 'Inno Setup Setup Data (6.7.0)'; EditionId = 'official'; CharacterMode = 'Unicode'; LoaderRoute = 'resource-v2'; MetadataRoute = 'chunked64'; HeaderCountSchema = 'counts-signature17'; HeaderFieldSchema = 'header-v5205-plus'; FileEntrySchema = 'file-download15'; FileLocationSchema = 'location-sha256'; RecordSchemaRoute = 'records-6700-u'; PayloadRoute = 'chunked-modern'; CompressionCapabilities = 'Stored,Zlib,BZip2,Lzma,Lzma2'; ChecksumRoute = 'SHA256'; CallTransformRoute = 'relative24-v3'; HeaderStringCount = 39; HeaderAnsiStringCount = 4; FileEntryStringCount = 15; FileEntryAnsiStringCount = 1; Supported = $true }
     @{ Id = '700003-u'; InternalStructureVersion = 700003; Signature = 'Inno Setup Setup Data (7.0.0.3)'; EditionId = 'official'; CharacterMode = 'Unicode'; LoaderRoute = 'resource-v2'; MetadataRoute = 'chunked64'; HeaderCountSchema = 'counts-signature17'; HeaderFieldSchema = 'header-v5205-plus'; FileEntrySchema = 'file-download15'; FileLocationSchema = 'location-sha256'; RecordSchemaRoute = 'records-700003-u'; PayloadRoute = 'chunked-modern'; CompressionCapabilities = 'Stored,Zlib,BZip2,Lzma,Lzma2'; ChecksumRoute = 'SHA256'; CallTransformRoute = 'relative24-v3'; HeaderStringCount = 39; HeaderAnsiStringCount = 4; FileEntryStringCount = 15; FileEntryAnsiStringCount = 1; Supported = $true }
+    @{ Id = '710100-u'; InternalStructureVersion = 710100; Signature = 'Inno Setup Setup Data (7.1.1)'; EditionId = 'official'; CharacterMode = 'Unicode'; LoaderRoute = 'resource-v2'; MetadataRoute = 'chunked64'; HeaderCountSchema = 'counts-signature17'; HeaderFieldSchema = 'header-v7111-plus'; FileEntrySchema = 'file-download15'; FileLocationSchema = 'location-sha256'; RecordSchemaRoute = 'records-710100-u'; PayloadRoute = 'chunked-modern'; CompressionCapabilities = 'Stored,Zlib,BZip2,Lzma,Lzma2'; ChecksumRoute = 'SHA256'; CallTransformRoute = 'relative24-v3'; HeaderStringCount = 38; HeaderAnsiStringCount = 4; FileEntryStringCount = 15; FileEntryAnsiStringCount = 1; Supported = $true }
   )
 }
